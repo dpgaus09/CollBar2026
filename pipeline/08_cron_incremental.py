@@ -294,10 +294,30 @@ def main():
                 f" ({eff_start}–{eff_end})"
             ).strip(" —")
 
+            # Fetch the PDF and compute its hash so the URL is recorded in
+            # source_documents. This prevents re-alerting on future runs once
+            # a pending alert is acknowledged (URL would otherwise remain absent).
+            log.info("Fetching new doc for hash: %s", doc["url"])
+            file_hash = fetch_file_hash(session, doc["url"])
+            time.sleep(common.POLITE_DELAY)
+
+            if file_hash is not None:
+                cur.execute(
+                    """
+                    INSERT INTO source_documents
+                        (district_id, doc_type, source_url, file_hash, retrieved_at)
+                    VALUES (%s, 'cba_pdf', %s, %s, NOW())
+                    ON CONFLICT (source_url, file_hash) DO NOTHING
+                    """,
+                    (district_id, doc["url"], file_hash),
+                )
+            else:
+                log.warning("Could not fetch %s — source_documents row skipped", doc["url"])
+
             ok = insert_alert(cur, district_id, doc_name, doc["url"], "new_doc")
             if ok:
                 new_inserted += 1
-                log.info("Alert inserted: %s", doc_name)
+                log.info("new_doc alert inserted: %s", doc_name)
             else:
                 new_skipped_dupes += 1
 

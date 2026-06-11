@@ -220,6 +220,44 @@ class TestSchema(unittest.TestCase):
             f"drizzle-kit output:\n{combined}",
         )
 
+    def test_migration_files_exist_for_all_phases(self):
+        """
+        Verify SQL migration files exist for all schema phases.
+        On a fresh DB, running these migrations in order reproduces the full schema.
+        Missing migration files mean schema changes happened outside the migration
+        lifecycle and cannot be reproduced on a fresh deployment.
+        """
+        migrations_dir = Path(__file__).parent.parent.parent / "db" / "migrations"
+        self.assertTrue(
+            migrations_dir.is_dir(),
+            f"Migration directory not found: {migrations_dir}",
+        )
+        sql_files = sorted(migrations_dir.glob("*.sql"))
+        self.assertGreater(
+            len(sql_files), 0,
+            "No SQL migration files found in db/migrations/",
+        )
+        # Phase 5 migration must exist (alerts + cdss_staging + column additions)
+        tags = [f.stem for f in sql_files]
+        phase5 = [t for t in tags if "phase5" in t or t.startswith("0003")]
+        self.assertTrue(
+            len(phase5) > 0,
+            f"No Phase 5 migration file found. Have: {tags}. "
+            "Expected a file starting with '0003' or containing 'phase5'.",
+        )
+        # Each migration file in the journal must have a corresponding SQL file
+        journal_path = migrations_dir / "meta" / "_journal.json"
+        if journal_path.exists():
+            import json as _json
+            journal = _json.loads(journal_path.read_text())
+            for entry in journal.get("entries", []):
+                tag = entry["tag"]
+                sql_path = migrations_dir / f"{tag}.sql"
+                self.assertTrue(
+                    sql_path.exists(),
+                    f"Journal entry '{tag}' has no SQL file at {sql_path}",
+                )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
