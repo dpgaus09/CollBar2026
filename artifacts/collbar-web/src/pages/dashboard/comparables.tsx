@@ -91,9 +91,6 @@ export default function ComparablesPage() {
     }
   }, [authLoading, isAuthenticated, isAdmin, districtId, id, setLocation]);
 
-  if (authLoading || !isAuthenticated) return null;
-  if (!isAdmin && districtId != null && districtId !== parseInt(id)) return null;
-
   const buildParams = (extra: Record<string, string> = {}) => {
     const p = new URLSearchParams();
     if (county) p.set("county", county);
@@ -139,6 +136,9 @@ export default function ComparablesPage() {
   });
 
   const csvUrl = `${apiUrl("/api/dashboard/comparables")}?${buildParams({ page: "1" })}&format=csv&limit=10000`;
+
+  if (authLoading || !isAuthenticated) return null;
+  if (!isAdmin && districtId != null && districtId !== parseInt(id)) return null;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-mono">
