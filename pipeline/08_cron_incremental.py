@@ -23,7 +23,7 @@ import logging
 import re
 import sys
 import time
-from datetime import timezone
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
@@ -42,6 +42,11 @@ CBA_CATALOG_URL = (
 )
 
 SCHOOL_BU_CODES = {"T", "NT"}
+
+# If HEAD returns no Last-Modified header, force a full hash check for any
+# existing document whose last-retrieved timestamp is this many days old.
+# Ensures hash changes are never silently missed on servers that omit the header.
+REVERIFY_AFTER_DAYS = 90
 
 ROW_RE = re.compile(
     r'\["([^"]+)","View","(https://serb\.ohio\.gov/static/PDF/Contracts/[^"]+\.pdf)"'
@@ -176,8 +181,24 @@ def check_changed_docs(session, conn, records: list, known_docs: dict,
         maybe_changed = head_maybe_changed(session, url, retrieved_at)
         time.sleep(common.POLITE_DELAY)
 
+        # Fallback: if HEAD returned no Last-Modified header, still force a
+        # hash check for docs that haven't been verified recently, so that
+        # content changes are never silently missed on servers that omit the
+        # header.
+        if not maybe_changed and retrieved_at is not None:
+            rt = (retrieved_at if retrieved_at.tzinfo
+                  else retrieved_at.replace(tzinfo=timezone.utc))
+            age_days = (datetime.now(timezone.utc) - rt).days
+            if age_days >= REVERIFY_AFTER_DAYS:
+                log.info(
+                    "No Last-Modified for %s (age %d d ≥ %d d) — "
+                    "scheduling periodic hash check",
+                    url, age_days, REVERIFY_AFTER_DAYS,
+                )
+                maybe_changed = True
+
         if not maybe_changed:
-            continue  # Conservative: skip full download when no signal
+            continue
 
         log.info("Possible change detected for %s — fetching for hash check…", url)
 

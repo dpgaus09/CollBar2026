@@ -56,6 +56,24 @@ async function getTableCounts(): Promise<Record<string, number>> {
 }
 
 // ---------------------------------------------------------------------------
+// In-memory rate limiter for /admin/login (max 5 attempts per 60 s per IP)
+// ---------------------------------------------------------------------------
+const _loginAttempts = new Map<string, { count: number; resetAt: number }>();
+const _LOGIN_RATE_MAX = 5;
+const _LOGIN_RATE_WINDOW_MS = 60_000;
+
+function loginRateLimited(ip: string): boolean {
+  const now = Date.now();
+  const entry = _loginAttempts.get(ip);
+  if (!entry || entry.resetAt < now) {
+    _loginAttempts.set(ip, { count: 1, resetAt: now + _LOGIN_RATE_WINDOW_MS });
+    return false;
+  }
+  entry.count += 1;
+  return entry.count > _LOGIN_RATE_MAX;
+}
+
+// ---------------------------------------------------------------------------
 // Admin session middleware
 // Checks that the request carries a valid admin session cookie (set via
 // POST /admin/login). No secrets are exposed to the client bundle.
@@ -72,6 +90,12 @@ function requireAdminToken(req: Request, res: Response, next: NextFunction): voi
 // POST /admin/login — exchange ADMIN_TOKEN for a session cookie
 // ---------------------------------------------------------------------------
 router.post("/admin/login", (req, res) => {
+  const ip = req.ip ?? req.socket?.remoteAddress ?? "unknown";
+  if (loginRateLimited(ip)) {
+    res.status(429).json({ error: "Too many login attempts — try again in a minute" });
+    return;
+  }
+
   const { token } = req.body as { token?: string };
   const adminToken = process.env.ADMIN_TOKEN;
 
