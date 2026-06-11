@@ -416,4 +416,79 @@ router.get("/dashboard/district-types", requireAuth, async (_req: Request, res: 
   }
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/dashboard/acceptance — admin only
+// Provenance-gap audit across all districts with extracted provisions.
+// Used to verify extraction quality without running a separate script.
+// ---------------------------------------------------------------------------
+router.get("/dashboard/acceptance", requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    // Run three simple counts to avoid any subquery syntax issues
+    const totalDistricts = await db.execute(sql`SELECT COUNT(*)::int AS n FROM districts`);
+    const withContracts = await db.execute(sql`SELECT COUNT(DISTINCT district_id)::int AS n FROM contracts`);
+    const withProvisions = await db.execute(sql`
+      SELECT COUNT(DISTINCT c.district_id)::int AS n
+      FROM contract_provisions cp
+      JOIN contracts c ON cp.contract_id = c.id
+    `);
+
+    const summary = {
+      districts_total: (totalDistricts.rows[0] as { n: number }).n,
+      districts_with_contracts: (withContracts.rows[0] as { n: number }).n,
+      districts_with_provisions: (withProvisions.rows[0] as { n: number }).n,
+    };
+
+    // Districts with at least one provision missing source doc or page reference
+    const gapRows = await db.execute(sql`
+      SELECT
+        d.id AS district_id,
+        d.name AS district_name,
+        COUNT(cp.id)::int AS total_provisions,
+        COUNT(cp.id) FILTER (WHERE c.source_doc_id IS NULL)::int AS missing_source_doc,
+        COUNT(cp.id) FILTER (WHERE cp.page_ref IS NULL)::int AS missing_page_ref,
+        COUNT(cp.id) FILTER (WHERE cp.confidence IS NULL)::int AS missing_confidence,
+        COUNT(cp.id) FILTER (WHERE cp.human_verified = false)::int AS unverified_count,
+        AVG(cp.confidence)::numeric(4,3) AS avg_confidence
+      FROM contract_provisions cp
+      JOIN contracts c ON cp.contract_id = c.id
+      JOIN districts d ON c.district_id = d.id
+      GROUP BY d.id, d.name
+      HAVING
+        COUNT(cp.id) FILTER (WHERE c.source_doc_id IS NULL) > 0
+        OR COUNT(cp.id) FILTER (WHERE cp.page_ref IS NULL) > 0
+      ORDER BY missing_source_doc DESC, missing_page_ref DESC
+    `);
+
+    // Districts where all provisions have source doc + page ref
+    const okRows = await db.execute(sql`
+      SELECT
+        d.id AS district_id,
+        d.name AS district_name,
+        COUNT(cp.id)::int AS total_provisions,
+        COUNT(cp.id) FILTER (WHERE cp.human_verified = true)::int AS verified_count,
+        AVG(cp.confidence)::numeric(4,3) AS avg_confidence
+      FROM contract_provisions cp
+      JOIN contracts c ON cp.contract_id = c.id
+      JOIN districts d ON c.district_id = d.id
+      GROUP BY d.id, d.name
+      HAVING
+        COUNT(cp.id) FILTER (WHERE c.source_doc_id IS NULL) = 0
+        AND COUNT(cp.id) FILTER (WHERE cp.page_ref IS NULL) = 0
+      ORDER BY d.name
+    `);
+
+    res.json({
+      summary: {
+        ...summary,
+        districts_with_gaps: gapRows.rows.length,
+        districts_fully_provenanced: okRows.rows.length,
+      },
+      gaps: gapRows.rows,
+      ok: okRows.rows,
+    });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 export default router;

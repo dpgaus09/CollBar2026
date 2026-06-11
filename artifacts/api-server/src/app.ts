@@ -7,6 +7,17 @@ import { logger } from "./lib/logger";
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 
+const isProd = process.env.NODE_ENV === "production";
+
+// Fail closed in production — never use a predictable fallback secret
+const sessionSecret = process.env.SESSION_SECRET;
+if (isProd && !sessionSecret) {
+  throw new Error(
+    "SESSION_SECRET environment variable is required in production. " +
+      "Set it to a long random string (e.g. openssl rand -hex 32).",
+  );
+}
+
 const app: Express = express();
 
 app.use(
@@ -29,12 +40,12 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use(
   session({
-    secret: process.env.SESSION_SECRET || "collbar-dev-session-fallback",
+    secret: sessionSecret ?? "collbar-dev-only-not-for-production",
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      secure: isProd,
       sameSite: "lax",
       maxAge: 8 * 60 * 60 * 1000,
     },

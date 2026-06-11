@@ -60,6 +60,11 @@ interface Settlement {
   human_verified: boolean;
 }
 
+interface MedianResult {
+  median_base: string | null;
+  n: number;
+}
+
 // ---------------------------------------------------------------------------
 // Data hooks
 // ---------------------------------------------------------------------------
@@ -104,18 +109,31 @@ function useSettlements(id: string) {
   });
 }
 
-function useMedians(county: string | null, band: string) {
-  return useQuery<{ median_base: string | null; n: number }>({
-    queryKey: [`/api/dashboard/medians`, county, band],
+function useCountyMedians(county: string | null) {
+  return useQuery<MedianResult>({
+    queryKey: [`/api/dashboard/medians-county`, county],
     queryFn: () => {
       const params = new URLSearchParams();
       if (county) params.set("county", county);
+      return fetch(`${apiUrl("/api/dashboard/medians")}?${params}`, {
+        credentials: "include",
+      }).then((r) => r.json());
+    },
+    enabled: !!county,
+  });
+}
+
+function useBandMedians(band: string) {
+  return useQuery<MedianResult>({
+    queryKey: [`/api/dashboard/medians-band`, band],
+    queryFn: () => {
+      const params = new URLSearchParams();
       if (band && band !== "unknown") params.set("band", band);
       return fetch(`${apiUrl("/api/dashboard/medians")}?${params}`, {
         credentials: "include",
       }).then((r) => r.json());
     },
-    enabled: !!(county || band),
+    enabled: !!(band && band !== "unknown"),
   });
 }
 
@@ -219,13 +237,7 @@ function SubNav({ id, active }: { id: string; active: "home" | "clauses" | "comp
 // Data card shell
 // ---------------------------------------------------------------------------
 
-function DataCard({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
+function DataCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-900 overflow-hidden">
       <div className="px-4 py-3 border-b border-slate-800 bg-slate-900">
@@ -237,39 +249,55 @@ function DataCard({
 }
 
 // ---------------------------------------------------------------------------
-// Settlement sparkline
+// Compensation sparkline: district bars vs. county + band medians
 // ---------------------------------------------------------------------------
 
-function SettlementSparkline({
+function CompensationSparkline({
   settlements,
-  medianBase,
+  countyMedian,
+  bandMedian,
 }: {
   settlements: Settlement[];
-  medianBase: string | null;
+  countyMedian: string | null;
+  bandMedian: string | null;
 }) {
-  if (settlements.length === 0) {
-    return (
-      <div className="text-slate-600 text-xs italic py-4 text-center">
-        No settlements extracted yet
-      </div>
-    );
-  }
-
   const data = settlements
     .filter((s) => s.base_increase_pct != null)
     .map((s) => ({
       label: s.from_year?.slice(0, 4) ?? "?",
       base: parseFloat(s.base_increase_pct!),
-      yr2: s.year2_pct != null ? parseFloat(s.year2_pct) : null,
-      yr3: s.year3_pct != null ? parseFloat(s.year3_pct) : null,
     }))
     .reverse();
 
-  const median = medianBase ? parseFloat(medianBase) : null;
+  if (data.length === 0) {
+    return (
+      <div className="text-slate-600 text-xs italic pt-3 pb-1">
+        No historical settlements extracted yet
+      </div>
+    );
+  }
+
+  const cm = countyMedian ? parseFloat(countyMedian) : null;
+  const bm = bandMedian ? parseFloat(bandMedian) : null;
 
   return (
-    <div className="space-y-3">
-      <div className="h-28">
+    <div className="mt-3">
+      <div className="flex items-center gap-4 mb-1">
+        <span className="text-xs text-slate-500">Year-over-year increases vs. peer medians</span>
+        {cm != null && (
+          <span className="text-xs text-amber-500 flex items-center gap-1">
+            <span className="inline-block w-4 border-t border-dashed border-amber-500" />
+            County {cm.toFixed(1)}%
+          </span>
+        )}
+        {bm != null && (
+          <span className="text-xs text-emerald-500 flex items-center gap-1">
+            <span className="inline-block w-4 border-t border-dashed border-emerald-500" />
+            Band {bm.toFixed(1)}%
+          </span>
+        )}
+      </div>
+      <div className="h-24">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
             <XAxis
@@ -289,30 +317,93 @@ function SettlementSparkline({
               formatter={(v: number) => [`${v.toFixed(2)}%`, "Base increase"]}
             />
             <Bar dataKey="base" fill="#3b82f6" radius={[2, 2, 0, 0]} />
-            {median != null && (
+            {cm != null && (
               <ReferenceLine
-                y={median}
+                y={cm}
                 stroke="#f59e0b"
                 strokeDasharray="3 3"
-                label={{ value: `median ${median.toFixed(1)}%`, fill: "#f59e0b", fontSize: 9, position: "insideTopRight" }}
+                label={{
+                  value: `county ${cm.toFixed(1)}%`,
+                  fill: "#f59e0b",
+                  fontSize: 9,
+                  position: "insideTopRight",
+                }}
+              />
+            )}
+            {bm != null && (
+              <ReferenceLine
+                y={bm}
+                stroke="#10b981"
+                strokeDasharray="3 3"
+                label={{
+                  value: `band ${bm.toFixed(1)}%`,
+                  fill: "#10b981",
+                  fontSize: 9,
+                  position: "insideBottomRight",
+                }}
               />
             )}
           </BarChart>
         </ResponsiveContainer>
       </div>
-      <div className="space-y-1">
-        {settlements.slice(0, 4).map((s) => (
-          <div key={s.id} className="flex items-center justify-between text-xs">
-            <span className="text-slate-500">{s.from_year} → {s.to_year}</span>
-            <ProvenanceValue
-              value={s.base_increase_pct ? parseFloat(s.base_increase_pct) : null}
-              unit="%"
-              humanVerified={s.human_verified}
-              confidence={s.confidence}
-            />
-          </div>
-        ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Settlement History table
+// ---------------------------------------------------------------------------
+
+function SettlementTable({ settlements }: { settlements: Settlement[] }) {
+  if (settlements.length === 0) {
+    return (
+      <div className="text-slate-600 text-xs italic py-4 text-center">
+        No settlements extracted yet
       </div>
+    );
+  }
+
+  return (
+    <div className="space-y-0">
+      <div className="grid grid-cols-5 text-xs text-slate-500 pb-2 border-b border-slate-800">
+        <span className="col-span-2">Period</span>
+        <span>Yr 1</span>
+        <span>Yr 2</span>
+        <span>Yr 3</span>
+      </div>
+      {settlements.map((s) => (
+        <div
+          key={s.id}
+          className="grid grid-cols-5 text-xs py-2 border-b border-slate-800/60 last:border-0 items-center"
+        >
+          <div className="col-span-2 space-y-0.5">
+            <div className="text-slate-300">
+              {s.from_year} → {s.to_year}
+            </div>
+            {s.method && (
+              <div className="text-slate-600 capitalize text-[10px]">{s.method}</div>
+            )}
+          </div>
+          <ProvenanceValue
+            value={s.base_increase_pct ? parseFloat(s.base_increase_pct) : null}
+            unit="%"
+            humanVerified={s.human_verified}
+            confidence={s.confidence}
+          />
+          <ProvenanceValue
+            value={s.year2_pct ? parseFloat(s.year2_pct) : null}
+            unit="%"
+            humanVerified={s.human_verified}
+            confidence={s.confidence}
+          />
+          <ProvenanceValue
+            value={s.year3_pct ? parseFloat(s.year3_pct) : null}
+            unit="%"
+            humanVerified={s.human_verified}
+            confidence={s.confidence}
+          />
+        </div>
+      ))}
     </div>
   );
 }
@@ -330,10 +421,8 @@ export default function DistrictDashboardPage() {
   const { data: district, isLoading: distLoading } = useDistrictDetail(id);
   const { data: provsData, isLoading: provsLoading } = useProvisions(id);
   const { data: settlementsData } = useSettlements(id);
-  const { data: medians } = useMedians(
-    district?.county ?? null,
-    district?.enrollmentBand ?? "unknown",
-  );
+  const { data: countyMedians } = useCountyMedians(district?.county ?? null);
+  const { data: bandMedians } = useBandMedians(district?.enrollmentBand ?? "unknown");
 
   if (!authLoading && !isAuthenticated) {
     setLocation("/login");
@@ -363,6 +452,20 @@ export default function DistrictDashboardPage() {
   const daysLeft = contract?.daysUntilExpiration ?? null;
 
   const isLoading = authLoading || distLoading || provsLoading;
+
+  // Helper: build ProvenanceRow props from a Provision
+  function provRow(p: Provision | undefined, label: string, unitOverride?: string) {
+    return {
+      label,
+      value: pVal(p),
+      unit: unitOverride ?? p?.unit ?? undefined,
+      sourceUrl: p?.source_url,
+      pageRef: p?.page_ref,
+      humanVerified: p?.human_verified,
+      confidence: p?.confidence,
+      retrievedAt: p?.retrieved_at,
+    };
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-mono">
@@ -460,108 +563,64 @@ export default function DistrictDashboardPage() {
               </section>
             )}
 
-            {/* 6 data cards */}
+            {/* 6 data cards — ordered per spec */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Compensation */}
+
+              {/* Card 1: Compensation — salary anchors + year increases + sparkline vs medians */}
               <DataCard title="Compensation">
-                {comp.length === 0 ? (
+                {comp.length === 0 && settlements.length === 0 ? (
                   <p className="text-slate-600 text-xs italic">Not yet extracted</p>
                 ) : (
-                  <div className="space-y-0">
-                    <ProvenanceRow
-                      label="BA Min Salary"
-                      value={pVal(getVal(comp, "ba_min_salary"))}
-                      unit="$"
-                      sourceUrl={getVal(comp, "ba_min_salary")?.source_url}
-                      pageRef={getVal(comp, "ba_min_salary")?.page_ref}
-                      humanVerified={getVal(comp, "ba_min_salary")?.human_verified}
-                      confidence={getVal(comp, "ba_min_salary")?.confidence}
+                  <div>
+                    {comp.length > 0 && (
+                      <div className="space-y-0">
+                        <ProvenanceRow {...provRow(getVal(comp, "ba_min_salary"), "BA Min Salary", "$")} />
+                        <ProvenanceRow {...provRow(getVal(comp, "ma_min_salary"), "MA Min Salary", "$")} />
+                        <ProvenanceRow {...provRow(getVal(comp, "base_salary_increase_yr1"), "Yr 1 Increase", "%")} />
+                        <ProvenanceRow {...provRow(getVal(comp, "base_salary_increase_yr2"), "Yr 2 Increase", "%")} />
+                        <ProvenanceRow {...provRow(getVal(comp, "base_salary_increase_yr3"), "Yr 3 Increase", "%")} />
+                        {comp
+                          .filter(
+                            (p) =>
+                              !["ba_min_salary", "ma_min_salary",
+                                "base_salary_increase_yr1", "base_salary_increase_yr2",
+                                "base_salary_increase_yr3"].includes(p.provision_key),
+                          )
+                          .slice(0, 2)
+                          .map((p) => (
+                            <ProvenanceRow
+                              key={p.id}
+                              {...provRow(p, p.provision_key.replace(/_/g, " "))}
+                            />
+                          ))}
+                      </div>
+                    )}
+                    <CompensationSparkline
+                      settlements={settlements}
+                      countyMedian={countyMedians?.median_base ?? null}
+                      bandMedian={bandMedians?.median_base ?? null}
                     />
-                    <ProvenanceRow
-                      label="MA Min Salary"
-                      value={pVal(getVal(comp, "ma_min_salary"))}
-                      unit="$"
-                      sourceUrl={getVal(comp, "ma_min_salary")?.source_url}
-                      pageRef={getVal(comp, "ma_min_salary")?.page_ref}
-                      humanVerified={getVal(comp, "ma_min_salary")?.human_verified}
-                      confidence={getVal(comp, "ma_min_salary")?.confidence}
-                    />
-                    <ProvenanceRow
-                      label="Yr 1 Increase"
-                      value={pVal(getVal(comp, "base_salary_increase_yr1"))}
-                      unit="%"
-                      sourceUrl={getVal(comp, "base_salary_increase_yr1")?.source_url}
-                      pageRef={getVal(comp, "base_salary_increase_yr1")?.page_ref}
-                      humanVerified={getVal(comp, "base_salary_increase_yr1")?.human_verified}
-                      confidence={getVal(comp, "base_salary_increase_yr1")?.confidence}
-                    />
-                    <ProvenanceRow
-                      label="Yr 2 Increase"
-                      value={pVal(getVal(comp, "base_salary_increase_yr2"))}
-                      unit="%"
-                      sourceUrl={getVal(comp, "base_salary_increase_yr2")?.source_url}
-                      pageRef={getVal(comp, "base_salary_increase_yr2")?.page_ref}
-                      humanVerified={getVal(comp, "base_salary_increase_yr2")?.human_verified}
-                      confidence={getVal(comp, "base_salary_increase_yr2")?.confidence}
-                    />
-                    <ProvenanceRow
-                      label="Yr 3 Increase"
-                      value={pVal(getVal(comp, "base_salary_increase_yr3"))}
-                      unit="%"
-                      sourceUrl={getVal(comp, "base_salary_increase_yr3")?.source_url}
-                      pageRef={getVal(comp, "base_salary_increase_yr3")?.page_ref}
-                      humanVerified={getVal(comp, "base_salary_increase_yr3")?.human_verified}
-                      confidence={getVal(comp, "base_salary_increase_yr3")?.confidence}
-                    />
-                    {comp
-                      .filter(
-                        (p) =>
-                          ![
-                            "ba_min_salary", "ma_min_salary",
-                            "base_salary_increase_yr1", "base_salary_increase_yr2",
-                            "base_salary_increase_yr3",
-                          ].includes(p.provision_key),
-                      )
-                      .slice(0, 3)
-                      .map((p) => (
-                        <ProvenanceRow
-                          key={p.id}
-                          label={p.provision_key.replace(/_/g, " ")}
-                          value={pVal(p)}
-                          unit={p.unit}
-                          sourceUrl={p.source_url}
-                          pageRef={p.page_ref}
-                          humanVerified={p.human_verified}
-                          confidence={p.confidence}
-                        />
-                      ))}
                   </div>
                 )}
               </DataCard>
 
-              {/* Insurance */}
+              {/* Card 2: Insurance — premium shares */}
               <DataCard title="Insurance">
                 {ins.length === 0 ? (
                   <p className="text-slate-600 text-xs italic">Not yet extracted</p>
                 ) : (
                   <div className="space-y-0">
                     {[
-                      ["Employer Single", "employer_premium_single"],
-                      ["Employer Family", "employer_premium_family"],
-                      ["Employee Single", "employee_premium_single"],
-                      ["Employee Family", "employee_premium_family"],
-                    ].map(([label, key]) => {
+                      ["Employer Single", "employer_premium_single", "$"],
+                      ["Employer Family", "employer_premium_family", "$"],
+                      ["Employee Single", "employee_premium_single", "$"],
+                      ["Employee Family", "employee_premium_family", "$"],
+                    ].map(([label, key, unit]) => {
                       const p = getVal(ins, key);
                       return (
                         <ProvenanceRow
                           key={key}
-                          label={label}
-                          value={pVal(p)}
-                          unit={p?.unit ?? "$"}
-                          sourceUrl={p?.source_url}
-                          pageRef={p?.page_ref}
-                          humanVerified={p?.human_verified}
-                          confidence={p?.confidence}
+                          {...provRow(p, label, p?.unit ?? unit)}
                         />
                       );
                     })}
@@ -571,24 +630,18 @@ export default function DistrictDashboardPage() {
                           !["employer_premium_single", "employer_premium_family",
                             "employee_premium_single", "employee_premium_family"].includes(p.provision_key),
                       )
-                      .slice(0, 3)
+                      .slice(0, 4)
                       .map((p) => (
                         <ProvenanceRow
                           key={p.id}
-                          label={p.provision_key.replace(/_/g, " ")}
-                          value={pVal(p)}
-                          unit={p.unit}
-                          sourceUrl={p.source_url}
-                          pageRef={p.page_ref}
-                          humanVerified={p.human_verified}
-                          confidence={p.confidence}
+                          {...provRow(p, p.provision_key.replace(/_/g, " "))}
                         />
                       ))}
                   </div>
                 )}
               </DataCard>
 
-              {/* Retirement */}
+              {/* Card 3: Retirement — STRS pickup, severance */}
               <DataCard title="Retirement">
                 {ret.length === 0 ? (
                   <p className="text-slate-600 text-xs italic">Not yet extracted</p>
@@ -597,20 +650,14 @@ export default function DistrictDashboardPage() {
                     {ret.slice(0, 8).map((p) => (
                       <ProvenanceRow
                         key={p.id}
-                        label={p.provision_key.replace(/_/g, " ")}
-                        value={pVal(p)}
-                        unit={p.unit}
-                        sourceUrl={p.source_url}
-                        pageRef={p.page_ref}
-                        humanVerified={p.human_verified}
-                        confidence={p.confidence}
+                        {...provRow(p, p.provision_key.replace(/_/g, " "))}
                       />
                     ))}
                   </div>
                 )}
               </DataCard>
 
-              {/* Leave */}
+              {/* Card 4: Leave — sick/personal/bereavement */}
               <DataCard title="Leave">
                 {leave.length === 0 ? (
                   <p className="text-slate-600 text-xs italic">Not yet extracted</p>
@@ -619,28 +666,14 @@ export default function DistrictDashboardPage() {
                     {leave.slice(0, 8).map((p) => (
                       <ProvenanceRow
                         key={p.id}
-                        label={p.provision_key.replace(/_/g, " ")}
-                        value={pVal(p)}
-                        unit={p.unit}
-                        sourceUrl={p.source_url}
-                        pageRef={p.page_ref}
-                        humanVerified={p.human_verified}
-                        confidence={p.confidence}
+                        {...provRow(p, p.provision_key.replace(/_/g, " "))}
                       />
                     ))}
                   </div>
                 )}
               </DataCard>
 
-              {/* Settlement History */}
-              <DataCard title="Settlement History">
-                <SettlementSparkline
-                  settlements={settlements}
-                  medianBase={medians?.median_base ?? null}
-                />
-              </DataCard>
-
-              {/* Key Clauses preview */}
+              {/* Card 5: Key Clauses preview */}
               <DataCard title="Key Clauses">
                 {provisions.length === 0 ? (
                   <p className="text-slate-600 text-xs italic">Not yet extracted</p>
@@ -681,6 +714,12 @@ export default function DistrictDashboardPage() {
                   </div>
                 )}
               </DataCard>
+
+              {/* Card 6: Settlement History — full table */}
+              <DataCard title="Settlement History">
+                <SettlementTable settlements={settlements} />
+              </DataCard>
+
             </div>
           </>
         )}

@@ -1,13 +1,14 @@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
-interface ProvenanceValueProps {
+export interface ProvenanceValueProps {
   value: string | number | null | undefined;
   unit?: string | null;
   sourceUrl?: string | null;
   pageRef?: number | null;
   humanVerified?: boolean | null;
   confidence?: string | number | null;
+  retrievedAt?: string | null;
   className?: string;
 }
 
@@ -18,6 +19,7 @@ export function ProvenanceValue({
   pageRef,
   humanVerified,
   confidence,
+  retrievedAt,
   className,
 }: ProvenanceValueProps) {
   if (value === null || value === undefined || value === "") {
@@ -27,16 +29,22 @@ export function ProvenanceValue({
   }
 
   const display =
-    typeof value === "number"
-      ? value.toLocaleString()
-      : String(value);
+    typeof value === "number" ? value.toLocaleString() : String(value);
   const unitDisplay = unit ? ` ${unit}` : "";
   const isUnverified = !humanVerified;
   const confNum = confidence != null ? parseFloat(String(confidence)) : null;
   const pdfLink =
     sourceUrl && pageRef != null
       ? `${sourceUrl}#page=${pageRef}`
-      : sourceUrl;
+      : sourceUrl ?? null;
+
+  const retrievedDisplay = retrievedAt
+    ? new Date(retrievedAt).toLocaleDateString("en-US", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      })
+    : null;
 
   return (
     <Tooltip>
@@ -85,6 +93,9 @@ export function ProvenanceValue({
           ) : (
             <div className="text-slate-500">No source URL available</div>
           )}
+          {retrievedDisplay && (
+            <div className="text-slate-400">Retrieved: {retrievedDisplay}</div>
+          )}
           {confNum != null && (
             <div>
               Confidence:{" "}
@@ -105,7 +116,9 @@ export function ProvenanceValue({
             {humanVerified ? (
               <span className="text-emerald-400">✓ Human verified</span>
             ) : (
-              <span className="text-amber-400">⚠ LLM extracted — awaiting verification</span>
+              <span className="text-amber-400">
+                ⚠ LLM extracted — awaiting verification
+              </span>
             )}
           </div>
         </div>
@@ -122,6 +135,7 @@ export function ProvenanceRow({
   pageRef,
   humanVerified,
   confidence,
+  retrievedAt,
 }: { label: string } & ProvenanceValueProps) {
   return (
     <div className="flex items-center justify-between py-2 border-b border-slate-800 last:border-0">
@@ -133,6 +147,7 @@ export function ProvenanceRow({
         pageRef={pageRef}
         humanVerified={humanVerified}
         confidence={confidence}
+        retrievedAt={retrievedAt}
       />
     </div>
   );
