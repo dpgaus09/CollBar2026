@@ -136,19 +136,33 @@ export function ProvenanceRow({
   humanVerified,
   confidence,
   retrievedAt,
-}: { label: string } & ProvenanceValueProps) {
+  countyMedian,
+  bandMedian,
+}: { label: string; countyMedian?: number | null; bandMedian?: number | null } & ProvenanceValueProps) {
   return (
-    <div className="flex items-center justify-between py-2 border-b border-slate-800 last:border-0">
-      <span className="text-xs text-slate-400">{label}</span>
-      <ProvenanceValue
-        value={value}
-        unit={unit}
-        sourceUrl={sourceUrl}
-        pageRef={pageRef}
-        humanVerified={humanVerified}
-        confidence={confidence}
-        retrievedAt={retrievedAt}
-      />
+    <div className="flex items-start justify-between py-2 border-b border-slate-800 last:border-0 gap-2">
+      <span className="text-xs text-slate-400 leading-5 flex-shrink-0">{label}</span>
+      <div className="flex flex-col items-end gap-0.5">
+        <ProvenanceValue
+          value={value}
+          unit={unit}
+          sourceUrl={sourceUrl}
+          pageRef={pageRef}
+          humanVerified={humanVerified}
+          confidence={confidence}
+          retrievedAt={retrievedAt}
+        />
+        {countyMedian != null && (
+          <span className="text-[10px] text-amber-600 tabular-nums">
+            county med {countyMedian.toLocaleString()}{unit ? ` ${unit}` : ""}
+          </span>
+        )}
+        {bandMedian != null && bandMedian !== countyMedian && (
+          <span className="text-[10px] text-emerald-700 tabular-nums">
+            band med {bandMedian.toLocaleString()}{unit ? ` ${unit}` : ""}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

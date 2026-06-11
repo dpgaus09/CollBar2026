@@ -32,7 +32,8 @@ function canAccessDistrict(req: Request, res: Response, next: NextFunction): voi
   const districtId = parseInt(String(req.params.id), 10);
   if (
     req.session.userRole === "district_user" &&
-    req.session.userDistrictId !== districtId
+    // Normalize both sides — postgres bigint comes back as string from node-postgres
+    Number(req.session.userDistrictId) !== districtId
   ) {
     res.status(403).json({ error: "Access denied: you can only view your own district" });
     return;
@@ -194,13 +195,24 @@ router.get("/dashboard/districts/:id/settlements", canAccessDistrict, async (req
   const districtId = parseInt(String(req.params.id), 10);
   if (isNaN(districtId)) { res.status(400).json({ error: "Invalid district id" }); return; }
   try {
+    // Settlements have no direct source_doc link; derive provenance from the
+    // most recent contract whose period overlaps the settlement's to_year.
     const rows = await db.execute(sql`
-      SELECT id, from_year, to_year, base_increase_pct, year2_pct, year3_pct,
-             off_schedule_payment, insurance_changed, term_years,
-             method, confidence, human_verified, notes
-      FROM settlements
-      WHERE district_id = ${districtId}
-      ORDER BY from_year DESC
+      SELECT s.id, s.from_year, s.to_year, s.base_increase_pct, s.year2_pct, s.year3_pct,
+             s.off_schedule_payment, s.insurance_changed, s.term_years,
+             s.method, s.confidence, s.human_verified, s.notes,
+             sd.source_url, sd.retrieved_at
+      FROM settlements s
+      LEFT JOIN LATERAL (
+        SELECT c2.source_doc_id
+        FROM contracts c2
+        WHERE c2.district_id = s.district_id
+        ORDER BY c2.effective_end DESC NULLS LAST
+        LIMIT 1
+      ) lc ON true
+      LEFT JOIN source_documents sd ON lc.source_doc_id = sd.id
+      WHERE s.district_id = ${districtId}
+      ORDER BY s.from_year DESC
     `);
     res.json({ settlements: rows.rows });
   } catch (err) {
@@ -411,6 +423,57 @@ router.get("/dashboard/district-types", requireAuth, async (_req: Request, res: 
       SELECT DISTINCT district_type FROM districts WHERE district_type IS NOT NULL ORDER BY district_type
     `);
     res.json({ districtTypes: (rows.rows as { district_type: string }[]).map((r) => r.district_type) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/dashboard/provision-medians
+// Returns per-provision-key medians for a given category, filtered by
+// county and/or enrollment band. Used to show "vs. county median" context
+// in Insurance, Retirement, and Leave cards.
+// ---------------------------------------------------------------------------
+router.get("/dashboard/provision-medians", requireAuth, async (req: Request, res: Response) => {
+  const category = req.query.category ? String(req.query.category) : null;
+  const county = req.query.county ? String(req.query.county) : null;
+  const band = req.query.band ? String(req.query.band) : null;
+
+  if (!category) {
+    res.status(400).json({ error: "category query parameter is required" });
+    return;
+  }
+
+  const conds: Array<SQL | null> = [
+    sql`cp.category = ${category}`,
+    sql`cp.value_numeric IS NOT NULL`,
+    county ? sql`d.county = ${county}` : null,
+    band ? bandSql(band) : null,
+  ];
+  const where = buildWhere(conds);
+
+  try {
+    const rows = await db.execute(sql`
+      SELECT
+        cp.provision_key,
+        percentile_cont(0.5) WITHIN GROUP (ORDER BY cp.value_numeric) AS median_value,
+        COUNT(*)::int AS n
+      FROM contract_provisions cp
+      JOIN contracts c ON cp.contract_id = c.id
+      JOIN districts d ON c.district_id = d.id
+      WHERE ${where}
+      GROUP BY cp.provision_key
+      ORDER BY cp.provision_key
+    `);
+
+    const medians: Record<string, number | null> = {};
+    let totalN = 0;
+    for (const row of rows.rows as { provision_key: string; median_value: string | null; n: number }[]) {
+      medians[row.provision_key] = row.median_value != null ? parseFloat(row.median_value) : null;
+      totalN = Math.max(totalN, row.n);
+    }
+
+    res.json({ medians, n: totalN });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

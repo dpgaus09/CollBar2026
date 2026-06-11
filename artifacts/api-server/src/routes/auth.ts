@@ -125,10 +125,23 @@ router.post("/auth/request", async (req: Request, res: Response) => {
     const token = randomBytes(32).toString("hex");
     magicLinks.set(token, { userId: user.id, expiresAt: now + TOKEN_EXPIRY_MS });
 
-    const origin =
-      (req.headers.origin as string | undefined) ??
-      `${(req.headers["x-forwarded-proto"] as string | undefined) ?? "http"}://${req.headers.host ?? "localhost"}`;
-    const magicLink = `${origin}/auth/verify?token=${token}`;
+    // Use APP_URL (trusted, configured) to build the magic link.
+    // Never use req.headers.origin — it is attacker-controlled and could
+    // redirect tokens to an attacker's domain in emailed links.
+    const configuredUrl = process.env.APP_URL;
+    if (!configuredUrl && process.env.NODE_ENV === "production") {
+      res.status(503).json({
+        error: "APP_URL environment variable is not configured.",
+        hint: "Set APP_URL to your deployed domain (e.g. https://collbar.replit.app) in Replit Secrets.",
+      });
+      return;
+    }
+    const base =
+      configuredUrl ??
+      // Dev-only fallback: derive from request (acceptable since no email is sent)
+      ((req.headers.origin as string | undefined) ??
+        `${(req.headers["x-forwarded-proto"] as string | undefined) ?? "http"}://${req.headers.host ?? "localhost"}`);
+    const magicLink = `${base}/auth/verify?token=${token}`;
 
     const isDev = process.env.NODE_ENV !== "production";
 
@@ -191,7 +204,8 @@ router.get("/auth/verify", async (req: Request, res: Response) => {
 
     req.session.userId = user.id;
     req.session.userRole = user.role as "admin" | "district_user";
-    req.session.userDistrictId = user.district_id ?? null;
+    // Normalize to Number: postgres bigint comes back as string from node-postgres
+    req.session.userDistrictId = user.district_id != null ? Number(user.district_id) : null;
     req.session.userEmail = user.email;
 
     res.json({ ok: true, role: user.role, districtId: user.district_id });

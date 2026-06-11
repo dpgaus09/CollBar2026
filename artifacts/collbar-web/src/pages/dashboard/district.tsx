@@ -58,10 +58,17 @@ interface Settlement {
   method: string | null;
   confidence: string | null;
   human_verified: boolean;
+  source_url: string | null;
+  retrieved_at: string | null;
 }
 
 interface MedianResult {
   median_base: string | null;
+  n: number;
+}
+
+interface ProvisionMediansResult {
+  medians: Record<string, number | null>;
   n: number;
 }
 
@@ -134,6 +141,24 @@ function useBandMedians(band: string) {
       }).then((r) => r.json());
     },
     enabled: !!(band && band !== "unknown"),
+  });
+}
+
+function useProvisionMedians(
+  category: string,
+  county: string | null,
+  band: string,
+) {
+  return useQuery<ProvisionMediansResult>({
+    queryKey: [`/api/dashboard/provision-medians`, category, county, band],
+    queryFn: () => {
+      const params = new URLSearchParams({ category });
+      if (county) params.set("county", county);
+      if (band && band !== "unknown") params.set("band", band);
+      return fetch(`${apiUrl("/api/dashboard/provision-medians")}?${params}`, {
+        credentials: "include",
+      }).then((r) => r.json());
+    },
   });
 }
 
@@ -383,24 +408,40 @@ function SettlementTable({ settlements }: { settlements: Settlement[] }) {
             {s.method && (
               <div className="text-slate-600 capitalize text-[10px]">{s.method}</div>
             )}
+            {s.source_url && (
+              <a
+                href={s.source_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[10px] text-blue-600 hover:text-blue-400"
+              >
+                Source PDF →
+              </a>
+            )}
           </div>
           <ProvenanceValue
             value={s.base_increase_pct ? parseFloat(s.base_increase_pct) : null}
             unit="%"
             humanVerified={s.human_verified}
             confidence={s.confidence}
+            sourceUrl={s.source_url}
+            retrievedAt={s.retrieved_at}
           />
           <ProvenanceValue
             value={s.year2_pct ? parseFloat(s.year2_pct) : null}
             unit="%"
             humanVerified={s.human_verified}
             confidence={s.confidence}
+            sourceUrl={s.source_url}
+            retrievedAt={s.retrieved_at}
           />
           <ProvenanceValue
             value={s.year3_pct ? parseFloat(s.year3_pct) : null}
             unit="%"
             humanVerified={s.human_verified}
             confidence={s.confidence}
+            sourceUrl={s.source_url}
+            retrievedAt={s.retrieved_at}
           />
         </div>
       ))}
@@ -421,8 +462,14 @@ export default function DistrictDashboardPage() {
   const { data: district, isLoading: distLoading } = useDistrictDetail(id);
   const { data: provsData, isLoading: provsLoading } = useProvisions(id);
   const { data: settlementsData } = useSettlements(id);
-  const { data: countyMedians } = useCountyMedians(district?.county ?? null);
-  const { data: bandMedians } = useBandMedians(district?.enrollmentBand ?? "unknown");
+  const county = district?.county ?? null;
+  const band = district?.enrollmentBand ?? "unknown";
+
+  const { data: countyMedians } = useCountyMedians(county);
+  const { data: bandMedians } = useBandMedians(band);
+  const { data: insMedians } = useProvisionMedians("insurance", county, band);
+  const { data: retMedians } = useProvisionMedians("retirement", county, band);
+  const { data: leaveMedians } = useProvisionMedians("leave", county, band);
 
   if (!authLoading && !isAuthenticated) {
     setLocation("/login");
@@ -453,8 +500,14 @@ export default function DistrictDashboardPage() {
 
   const isLoading = authLoading || distLoading || provsLoading;
 
-  // Helper: build ProvenanceRow props from a Provision
-  function provRow(p: Provision | undefined, label: string, unitOverride?: string) {
+  // Helper: build ProvenanceRow props from a Provision, with optional median context
+  function provRow(
+    p: Provision | undefined,
+    label: string,
+    unitOverride?: string,
+    medians?: Record<string, number | null>,
+  ) {
+    const key = p?.provision_key;
     return {
       label,
       value: pVal(p),
@@ -464,6 +517,7 @@ export default function DistrictDashboardPage() {
       humanVerified: p?.human_verified,
       confidence: p?.confidence,
       retrievedAt: p?.retrieved_at,
+      countyMedian: key && medians ? (medians[key] ?? null) : null,
     };
   }
 
@@ -604,7 +658,7 @@ export default function DistrictDashboardPage() {
                 )}
               </DataCard>
 
-              {/* Card 2: Insurance — premium shares */}
+              {/* Card 2: Insurance — premium shares vs. county medians */}
               <DataCard title="Insurance">
                 {ins.length === 0 ? (
                   <p className="text-slate-600 text-xs italic">Not yet extracted</p>
@@ -620,7 +674,7 @@ export default function DistrictDashboardPage() {
                       return (
                         <ProvenanceRow
                           key={key}
-                          {...provRow(p, label, p?.unit ?? unit)}
+                          {...provRow(p, label, p?.unit ?? unit, insMedians?.medians)}
                         />
                       );
                     })}
@@ -634,14 +688,14 @@ export default function DistrictDashboardPage() {
                       .map((p) => (
                         <ProvenanceRow
                           key={p.id}
-                          {...provRow(p, p.provision_key.replace(/_/g, " "))}
+                          {...provRow(p, p.provision_key.replace(/_/g, " "), undefined, insMedians?.medians)}
                         />
                       ))}
                   </div>
                 )}
               </DataCard>
 
-              {/* Card 3: Retirement — STRS pickup, severance */}
+              {/* Card 3: Retirement — STRS pickup, severance vs. county medians */}
               <DataCard title="Retirement">
                 {ret.length === 0 ? (
                   <p className="text-slate-600 text-xs italic">Not yet extracted</p>
@@ -650,14 +704,14 @@ export default function DistrictDashboardPage() {
                     {ret.slice(0, 8).map((p) => (
                       <ProvenanceRow
                         key={p.id}
-                        {...provRow(p, p.provision_key.replace(/_/g, " "))}
+                        {...provRow(p, p.provision_key.replace(/_/g, " "), undefined, retMedians?.medians)}
                       />
                     ))}
                   </div>
                 )}
               </DataCard>
 
-              {/* Card 4: Leave — sick/personal/bereavement */}
+              {/* Card 4: Leave — sick/personal/bereavement vs. county medians */}
               <DataCard title="Leave">
                 {leave.length === 0 ? (
                   <p className="text-slate-600 text-xs italic">Not yet extracted</p>
@@ -666,7 +720,7 @@ export default function DistrictDashboardPage() {
                     {leave.slice(0, 8).map((p) => (
                       <ProvenanceRow
                         key={p.id}
-                        {...provRow(p, p.provision_key.replace(/_/g, " "))}
+                        {...provRow(p, p.provision_key.replace(/_/g, " "), undefined, leaveMedians?.medians)}
                       />
                     ))}
                   </div>
