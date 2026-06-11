@@ -541,12 +541,20 @@ export default function DistrictDashboardPage() {
               <div className="flex flex-wrap gap-4 text-xs text-slate-400">
                 {district.county && <span>{district.county} County</span>}
                 {district.district_type && <span className="capitalize">{district.district_type}</span>}
-                {district.enrollment && (
-                  <span>{district.enrollment.toLocaleString()} students</span>
+                {district.enrollment ? (
+                  <span title="Source: Ohio Dept. of Education administrative records">
+                    {district.enrollment.toLocaleString()} students
+                    <span className="text-slate-600 ml-1">(state data)</span>
+                  </span>
+                ) : (
+                  <span className="italic text-slate-600">Enrollment unknown</span>
                 )}
-                {district.avg_teacher_salary && (
-                  <span>Avg salary: ${parseFloat(district.avg_teacher_salary).toLocaleString()}</span>
-                )}
+                {district.avg_teacher_salary ? (
+                  <span title="Source: Ohio Dept. of Education administrative records">
+                    Avg salary: ${parseFloat(district.avg_teacher_salary).toLocaleString()}
+                    <span className="text-slate-600 ml-1">(state data)</span>
+                  </span>
+                ) : null}
               </div>
             </section>
 
