@@ -1,17 +1,260 @@
 {
   "districts_loaded": 606,
-  "cba_docs_found": 0,
-  "cba_docs_downloaded": 0,
+  "cba_docs_found": 10922,
+  "ff_proposals_loaded": 0,
+  "ff_page_accessible": true,
+  "wage_settlement_downloaded": 6,
+  "wage_settlement_failed_urls": [],
+  "last_updated": "2026-06-11T01:59:58Z",
+  "cba_docs_downloaded": 30,
   "cba_docs_skipped": 0,
   "cba_docs_failed": 0,
-  "cba_district_matched": 0,
-  "cba_district_unmatched": 0,
-  "ff_proposals_loaded": 0,
-  "ff_page_accessible": false,
-  "wage_settlement_downloaded": 0,
-  "wage_settlement_failed_urls": [],
-  "last_updated": "2026-06-11T01:44:45Z",
-  "downloaded_urls": {},
+  "cba_district_matched": 29,
+  "cba_district_unmatched": 1,
+  "downloaded_urls": {
+    "https://serb.ohio.gov/static/PDF/Contracts/2025/25-MED-04-0466.pdf": {
+      "status": "ok",
+      "case_number": "25-MED-04-0466",
+      "employer": "Ada Exempted Village Schools",
+      "district_id": 178,
+      "match_status": "auto",
+      "doc_id": "1"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2025/25-MED-04-0465.pdf": {
+      "status": "ok",
+      "case_number": "25-MED-04-0465",
+      "employer": "Ada Exempted Village Schools",
+      "district_id": 178,
+      "match_status": "auto",
+      "doc_id": "2"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2022/22-MED-04-0525.pdf": {
+      "status": "ok",
+      "case_number": "22-MED-04-0525",
+      "employer": "Ada Exempted Village Schools",
+      "district_id": 178,
+      "match_status": "auto",
+      "doc_id": "3"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2022/22-MED-03-0358.pdf": {
+      "status": "ok",
+      "case_number": "22-MED-03-0358",
+      "employer": "Ada Exempted Village Schools",
+      "district_id": 178,
+      "match_status": "auto",
+      "doc_id": "4"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2024/24-MED-01-0006.pdf": {
+      "status": "ok",
+      "case_number": "24-MED-01-0006",
+      "employer": "Adams Co/Ohio Valley Local School District",
+      "district_id": 608,
+      "match_status": "auto",
+      "doc_id": "5"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2021/21-MED-12-1603.pdf": {
+      "status": "ok",
+      "case_number": "21-MED-12-1603",
+      "employer": "Adams Co/Ohio Valley Local School District",
+      "district_id": 608,
+      "match_status": "auto",
+      "doc_id": "6"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2022/22-MED-02-0084.pdf": {
+      "status": "ok",
+      "case_number": "22-MED-02-0084",
+      "employer": "Adams Co/Ohio Valley Local School District",
+      "district_id": 608,
+      "match_status": "auto",
+      "doc_id": "7"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2026/26-MED-03-0188.pdf": {
+      "status": "ok",
+      "case_number": "26-MED-03-0188",
+      "employer": "Adena Local Schools",
+      "district_id": 504,
+      "match_status": "auto",
+      "doc_id": "8"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2022/22-CON-01-2061.pdf": {
+      "status": "ok",
+      "case_number": "22-CON-01-2061",
+      "employer": "Adena Local Schools",
+      "district_id": 504,
+      "match_status": "auto",
+      "doc_id": "9"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2025/25-MED-03-0418.pdf": {
+      "status": "ok",
+      "case_number": "25-MED-03-0418",
+      "employer": "Akron City Schools",
+      "district_id": 8,
+      "match_status": "auto",
+      "doc_id": "10"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2025/25-CON-04-2634.pdf": {
+      "status": "ok",
+      "case_number": "25-CON-04-2634",
+      "employer": "Akron City Schools",
+      "district_id": 8,
+      "match_status": "auto",
+      "doc_id": "21"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2025/25-CON-01-2634.pdf": {
+      "status": "ok",
+      "case_number": "25-CON-01-2634",
+      "employer": "Akron City Schools",
+      "district_id": 8,
+      "match_status": "auto",
+      "doc_id": "22"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2025/25-CON-09-2634.pdf": {
+      "status": "ok",
+      "case_number": "25-CON-09-2634",
+      "employer": "Akron City Schools",
+      "district_id": 8,
+      "match_status": "auto",
+      "doc_id": "23"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2025/25-CON-05-2634.pdf": {
+      "status": "ok",
+      "case_number": "25-CON-05-2634",
+      "employer": "Akron City Schools",
+      "district_id": 8,
+      "match_status": "auto",
+      "doc_id": "24"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2025/25-CON-10-2634.pdf": {
+      "status": "ok",
+      "case_number": "25-CON-10-2634",
+      "employer": "Akron City Schools",
+      "district_id": 8,
+      "match_status": "auto",
+      "doc_id": "25"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2025/25-MED-03-0419.pdf": {
+      "status": "ok",
+      "case_number": "25-MED-03-0419",
+      "employer": "Akron City Schools",
+      "district_id": 8,
+      "match_status": "auto",
+      "doc_id": "26"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2022/22-MED-02-0102.pdf": {
+      "status": "ok",
+      "case_number": "22-MED-02-0102",
+      "employer": "Akron City Schools",
+      "district_id": 8,
+      "match_status": "auto",
+      "doc_id": "27"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2022/22-MED-03-0322.pdf": {
+      "status": "ok",
+      "case_number": "22-MED-03-0322",
+      "employer": "Akron City Schools",
+      "district_id": 8,
+      "match_status": "auto",
+      "doc_id": "28"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2022/22-MED-03-0168.pdf": {
+      "status": "ok",
+      "case_number": "22-MED-03-0168",
+      "employer": "Akron City Schools",
+      "district_id": 8,
+      "match_status": "auto",
+      "doc_id": "29"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2022/22-CON-10-2634.pdf": {
+      "status": "ok",
+      "case_number": "22-CON-10-2634",
+      "employer": "Akron City Schools",
+      "district_id": 8,
+      "match_status": "auto",
+      "doc_id": "30"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2022/22-MED-03-0323.pdf": {
+      "status": "ok",
+      "case_number": "22-MED-03-0323",
+      "employer": "Akron City Schools",
+      "district_id": 8,
+      "match_status": "auto",
+      "doc_id": "57"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2022/22-MED-03-0341.pdf": {
+      "status": "ok",
+      "case_number": "22-MED-03-0341",
+      "employer": "Akron City Schools",
+      "district_id": 8,
+      "match_status": "auto",
+      "doc_id": "58"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2022/22-MED-03-0340.pdf": {
+      "status": "ok",
+      "case_number": "22-MED-03-0340",
+      "employer": "Akron City Schools",
+      "district_id": 8,
+      "match_status": "auto",
+      "doc_id": "59"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2024/24-MED-06-0692.pdf": {
+      "status": "ok",
+      "case_number": "24-MED-06-0692",
+      "employer": "Alexander Local Schools",
+      "district_id": 240,
+      "match_status": "auto",
+      "doc_id": "60"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2024/24-MED-04-0478.pdf": {
+      "status": "ok",
+      "case_number": "24-MED-04-0478",
+      "employer": "Alexander Local Schools",
+      "district_id": 240,
+      "match_status": "auto",
+      "doc_id": "61"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2021/21-CON-01-0108.pdf": {
+      "status": "ok",
+      "case_number": "21-CON-01-0108",
+      "employer": "Alexander Local Schools",
+      "district_id": 240,
+      "match_status": "auto",
+      "doc_id": "62"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2021/21-MED-04-0537.pdf": {
+      "status": "ok",
+      "case_number": "21-MED-04-0537",
+      "employer": "Alexander Local Schools",
+      "district_id": 240,
+      "match_status": "auto",
+      "doc_id": "63"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2020/20-MED-06-0688.pdf": {
+      "status": "ok",
+      "case_number": "20-MED-06-0688",
+      "employer": "Alexander Local Schools",
+      "district_id": 240,
+      "match_status": "auto",
+      "doc_id": "64"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2021/21-MED-10-1383.pdf": {
+      "status": "ok",
+      "case_number": "21-MED-10-1383",
+      "employer": "Allen County Board of DD",
+      "district_id": null,
+      "match_status": "unmatched",
+      "doc_id": "65"
+    },
+    "https://serb.ohio.gov/static/PDF/Contracts/2024/24-MED-04-0459.pdf": {
+      "status": "ok",
+      "case_number": "24-MED-04-0459",
+      "employer": "Allen East Local Schools",
+      "district_id": 228,
+      "match_status": "auto",
+      "doc_id": "66"
+    }
+  },
   "manual_review": [],
-  "unmatched_employers": []
+  "unmatched_employers": [
+    "Allen County Board of DD"
+  ]
 }

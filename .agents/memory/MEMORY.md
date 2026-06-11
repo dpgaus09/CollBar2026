@@ -1,0 +1,2 @@
+- [SERB PDF download requirements](serb-pdf-auth.md) — PDFs need AWS ALB session cookies + Referer; visit homepage first to warm up.
+- [SERB district name normalization](serb-district-normalization.md) — strip only terminal words ("schools", "school district"); keep type qualifiers (city, local, exempted village) in name; expand "Co/" abbreviation.

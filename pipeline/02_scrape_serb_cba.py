@@ -37,21 +37,17 @@ CBA_PDF_DIR = common.DATA_DIR / "cba"
 # School-sector bargaining unit codes
 SCHOOL_BU_CODES = {"T", "NT"}
 
-# Employer name normalisation — strip these from the right
+# Employer name normalisation — strip ONLY terminal institutional-type markers
+# Keep district-type qualifiers (city, local, exempted village, etc.) as part of the name
+# because the districts DB stores them (e.g. "Akron City", "Ada Exempted Village").
 STRIP_SUFFIXES = [
     " board of education",
-    " school district",
-    " city schools",
-    " local schools",
-    " city school district",
-    " exempted village school district",
-    " exempted village schools",
-    " local school district",
-    " community city schools",
-    " community schools",
     " joint vocational school district",
     " career center",
     " stem school",
+    " school district",
+    " schools",
+    " school",
 ]
 
 ROW_RE = re.compile(
@@ -65,6 +61,12 @@ ROW_RE = re.compile(
 def fetch_cba_page(session: requests.Session) -> str:
     if CBA_CACHE.exists():
         log.info("Using cached CBA page: %s", CBA_CACHE)
+        # Warm up session cookies using a lightweight SERB page
+        try:
+            r0 = session.get("https://serb.ohio.gov/", headers=common.HEADERS, timeout=15, allow_redirects=True)
+            log.info("Session warm-up (homepage): HTTP %s, %d cookies", r0.status_code, len(session.cookies))
+        except Exception as e:
+            log.warning("Session warm-up failed (will try without cookies): %s", e)
         with open(CBA_CACHE, encoding="utf-8") as f:
             return f.read()
     log.info("Fetching CBA catalog page (this is large, ~10MB)…")
@@ -115,6 +117,12 @@ def school_year_from_dates(start_date: str | None, end_date: str | None) -> str 
 
 def normalise_employer(name: str) -> str:
     n = name.lower().strip()
+    # Expand common abbreviations used in SERB employer names
+    n = re.sub(r"\bco\b\.?(?=/)", "county", n)   # "Adams Co/Ohio" → "Adams County/Ohio"
+    n = re.sub(r"\bco\b\.?\s+", "county ", n)     # "Adams Co Ohio" → "Adams County Ohio"
+    n = n.replace("/", " ")                        # "county/ohio" → "county ohio"
+    n = re.sub(r"\bst\b\.?\s+", "saint ", n)      # "St Mary" → "Saint Mary"
+    n = re.sub(r"\s+", " ", n).strip()            # collapse whitespace
     for suffix in STRIP_SUFFIXES:
         if n.endswith(suffix):
             n = n[: -len(suffix)].strip()
@@ -165,19 +173,16 @@ def match_employer(
 
 
 def download_pdf(session: requests.Session, url: str, dest: Path) -> bytes | None:
-    """Download a PDF; returns bytes or None on failure."""
+    """Download a PDF using PDF_HEADERS (with Referer); returns bytes or None on failure."""
     try:
-        r = common.polite_get(session, url)
+        r = common.polite_get(session, url, headers=common.PDF_HEADERS, timeout=120)
         if not r or r.status_code != 200:
             log.warning("HTTP %s for %s", r.status_code if r else "None", url)
             return None
-        # Reject HTML error pages masquerading as PDFs
         ct = r.headers.get("Content-Type", "")
-        if "html" in ct.lower() or not r.content[:4] == b"%PDF":
-            # Many SERB PDFs don't start with %PDF header check — just check Content-Type
-            if "html" in ct.lower():
-                log.warning("Got HTML instead of PDF for %s", url)
-                return None
+        if "html" in ct.lower():
+            log.warning("Got HTML instead of PDF for %s", url)
+            return None
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(r.content)
         return r.content

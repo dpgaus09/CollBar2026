@@ -1,7 +1,8 @@
 import { Router, type IRouter } from "express";
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
-import { neon } from "@neondatabase/serverless";
+import { db } from "@workspace/db";
+import { sql } from "drizzle-orm";
 
 const router: IRouter = Router();
 
@@ -25,23 +26,18 @@ const TABLES = [
 ];
 
 async function getTableCounts(): Promise<Record<string, number>> {
-  const dbUrl = process.env["DATABASE_URL"];
-  if (!dbUrl) return {};
-  try {
-    const sql = neon(dbUrl);
-    const counts: Record<string, number> = {};
-    for (const table of TABLES) {
-      try {
-        const rows = await sql(`SELECT COUNT(*)::int AS n FROM ${table}`);
-        counts[table] = rows[0]?.n ?? 0;
-      } catch {
-        counts[table] = -1;
-      }
+  const counts: Record<string, number> = {};
+  for (const table of TABLES) {
+    try {
+      const rows = await db.execute(
+        sql.raw(`SELECT COUNT(*)::int AS n FROM ${table}`),
+      );
+      counts[table] = (rows.rows[0] as { n: number })?.n ?? 0;
+    } catch {
+      counts[table] = -1;
     }
-    return counts;
-  } catch {
-    return {};
   }
+  return counts;
 }
 
 router.get("/admin/crawl-report", async (_req, res) => {

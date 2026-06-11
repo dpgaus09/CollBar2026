@@ -67,34 +67,58 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+_OBJ_STORAGE_WARNED = False
+
 def upload_to_object_storage(local_path: Path, storage_key: str) -> str:
-    """Upload a file to Replit Object Storage. Returns the storage_key."""
+    """Upload a file to Replit Object Storage. Returns the storage_key (or local: path)."""
+    global _OBJ_STORAGE_WARNED
     try:
         from replit.object_storage import Client  # type: ignore
         client = Client()
         with open(local_path, "rb") as f:
             client.upload_from_file(storage_key, f)
         return storage_key
+    except ModuleNotFoundError:
+        if not _OBJ_STORAGE_WARNED:
+            logging.info("Object storage module not available — PDFs stored locally under pipeline/data/cba/")
+            _OBJ_STORAGE_WARNED = True
+        return f"local:{local_path}"
     except Exception as e:
-        logging.warning("Object storage upload failed for %s: %s — stored locally only", storage_key, e)
+        logging.warning("Object storage upload failed for %s: %s", storage_key, e)
         return f"local:{local_path}"
 
 
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
 HEADERS = {
-    "User-Agent": "CollBarBot/1.0 (hello@collbar.com; Ohio K-12 CB research)",
+    "User-Agent": BROWSER_UA,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+PDF_HEADERS = {
+    "User-Agent": BROWSER_UA,
+    "Accept": "application/pdf,*/*",
+    "Referer": (
+        "https://serb.ohio.gov/wps/portal/gov/serb/"
+        "view-document-archive/collective-bargaining-agreements"
+    ),
 }
 
 POLITE_DELAY = 2.0  # seconds between requests
 
 
-def polite_get(session, url: str, retries: int = 3, **kwargs):
-    """GET with retry/backoff and polite delay."""
-    import requests
+def polite_get(session, url: str, retries: int = 3, timeout: int = 60,
+               headers: dict | None = None, **kwargs):
+    """GET with retry/backoff and polite delay. Returns response or None."""
     delay = POLITE_DELAY
+    req_headers = headers if headers is not None else HEADERS
     for attempt in range(retries):
         try:
-            r = session.get(url, headers=HEADERS, timeout=30, allow_redirects=True, **kwargs)
+            r = session.get(url, headers=req_headers, timeout=timeout,
+                            allow_redirects=True, **kwargs)
             if r.status_code == 429 or r.status_code >= 500:
                 wait = delay * (2 ** attempt)
                 logging.warning("HTTP %s for %s — waiting %.0fs", r.status_code, url, wait)
@@ -104,7 +128,8 @@ def polite_get(session, url: str, retries: int = 3, **kwargs):
             return r
         except Exception as e:
             if attempt == retries - 1:
-                raise
+                logging.warning("Request failed after %d retries for %s: %s", retries, url, e)
+                return None
             logging.warning("Request error for %s: %s — retrying", url, e)
             time.sleep(delay * (2 ** attempt))
     return None
