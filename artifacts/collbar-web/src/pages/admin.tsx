@@ -248,7 +248,14 @@ function AdminLoginModal({ onSuccess }: { onSuccess: () => void }) {
 function OverviewTab() {
   const { data: health, isLoading: healthLoading, isError: healthError } = useHealthCheck();
   const { data: report } = useCrawlReport();
+  const { data: extraction } = useExtractionReport();
   const counts = report?.tableCounts ?? {};
+
+  const totalCbaDocs = extraction?.totalCbaDocs ?? 0;
+  const processedDocs = extraction?.processedDocs ?? 0;
+  const phase3Done = totalCbaDocs > 0 && processedDocs >= totalCbaDocs;
+  const phase3Active = processedDocs > 0 && !phase3Done;
+  const phase3Pending = totalCbaDocs > 0 && processedDocs === 0;
 
   return (
     <div className="space-y-8">
@@ -265,6 +272,62 @@ function OverviewTab() {
             <StatusBadge ok={!healthError && !!health} />
           )}
         </div>
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Pipeline Status</h2>
+        <div className="grid grid-cols-3 gap-3">
+          <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+            <div className="text-2xl font-bold font-mono text-emerald-400">
+              {(counts["districts"] ?? 0).toLocaleString()}
+            </div>
+            <div className="text-xs text-slate-400 mt-1">Districts in DB</div>
+          </div>
+          <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+            <div className="text-2xl font-bold font-mono text-blue-400">
+              {totalCbaDocs.toLocaleString()}
+            </div>
+            <div className="text-xs text-slate-400 mt-1">PDFs indexed by scraper</div>
+          </div>
+          <div
+            className={`rounded-lg border p-4 ${
+              phase3Pending
+                ? "border-amber-800 bg-amber-950/20"
+                : phase3Active
+                ? "border-blue-800 bg-blue-950/10"
+                : "border-slate-800 bg-slate-900"
+            }`}
+          >
+            <div
+              className={`text-2xl font-bold font-mono ${
+                phase3Pending
+                  ? "text-amber-400"
+                  : phase3Done
+                  ? "text-emerald-400"
+                  : "text-blue-400"
+              }`}
+            >
+              {processedDocs} / {totalCbaDocs}
+            </div>
+            <div className="text-xs text-slate-400 mt-1">PDFs extracted by LLM</div>
+            {phase3Pending && (
+              <div className="text-xs text-amber-500/80 mt-2 font-mono leading-snug">
+                Not started — run:
+                <br />
+                <code className="text-amber-400">python3 pipeline/06_extract_contracts.py</code>
+              </div>
+            )}
+          </div>
+        </div>
+        {phase3Pending && (
+          <div className="rounded-lg border border-amber-800/60 bg-amber-950/10 px-4 py-3 text-xs text-amber-300 leading-relaxed">
+            <span className="font-semibold text-amber-200">Why are contracts and settlements empty?</span>{" "}
+            The scraper has indexed {totalCbaDocs} PDFs but the LLM extraction pipeline has never been
+            run. Contracts, settlements, and provisions stay empty until you run{" "}
+            <code className="font-mono text-amber-400">python3 pipeline/06_extract_contracts.py</code>
+            {" "}(requires <code className="font-mono text-amber-400">ANTHROPIC_API_KEY</code> to be set).
+          </div>
+        )}
       </section>
 
       <section className="space-y-3">
@@ -310,39 +373,52 @@ function OverviewTab() {
           {[
             { phase: "Phase 1", label: "Database Schema & Bootstrap", done: true },
             { phase: "Phase 2", label: "Acquire the Corpus (Scrapers)", done: true },
-            { phase: "Phase 3", label: "LLM Extraction Pipeline", done: false, active: true },
-            { phase: "Phase 4", label: "The Dashboard", done: false },
-            { phase: "Phase 5", label: "Hardening", done: false },
-          ].map(({ phase, label, done, active }) => (
+            {
+              phase: "Phase 3",
+              label: "LLM Extraction Pipeline",
+              done: phase3Done,
+              active: phase3Active || phase3Pending,
+              sub: totalCbaDocs > 0
+                ? `${processedDocs.toLocaleString()} / ${totalCbaDocs.toLocaleString()} docs extracted`
+                : "No PDFs indexed yet",
+            },
+            { phase: "Phase 4", label: "The Dashboard", done: true },
+            { phase: "Phase 5", label: "Hardening", done: true },
+          ].map(({ phase, label, done, active, sub }) => (
             <div
               key={phase}
               className={`rounded-md border px-4 py-3 flex items-center justify-between ${
                 done
                   ? "border-emerald-800 bg-emerald-950/30"
                   : active
-                  ? "border-blue-800 bg-blue-950/20"
+                  ? "border-amber-800 bg-amber-950/10"
                   : "border-slate-800 bg-slate-900/30"
               }`}
             >
               <div className="flex items-center gap-3">
                 <span
                   className={`text-xs font-semibold ${
-                    done ? "text-emerald-400" : active ? "text-blue-400" : "text-slate-500"
+                    done ? "text-emerald-400" : active ? "text-amber-400" : "text-slate-500"
                   }`}
                 >
                   {phase}
                 </span>
-                <span
-                  className={`text-xs ${
-                    done ? "text-slate-300" : active ? "text-slate-300" : "text-slate-500"
-                  }`}
-                >
-                  {label}
-                </span>
+                <div>
+                  <span
+                    className={`text-xs ${
+                      done ? "text-slate-300" : active ? "text-slate-300" : "text-slate-500"
+                    }`}
+                  >
+                    {label}
+                  </span>
+                  {sub && (
+                    <div className="text-xs text-slate-500 mt-0.5">{sub}</div>
+                  )}
+                </div>
               </div>
-              {done && <span className="text-xs text-emerald-500 font-medium">✓ Complete</span>}
+              {done && <span className="text-xs text-emerald-500 font-medium whitespace-nowrap">✓ Complete</span>}
               {active && !done && (
-                <span className="text-xs text-blue-400 font-medium animate-pulse">⚙ In Progress</span>
+                <span className="text-xs text-amber-400 font-medium whitespace-nowrap">⚠ Pending</span>
               )}
             </div>
           ))}
@@ -1292,6 +1368,10 @@ export default function AdminPage() {
   const tab = activeTab(location);
   const { data: alertsData } = useAlertsPendingCount();
   const pendingAlerts = alertsData?.pendingCount ?? 0;
+  const { data: session, refetch: refetchSession } = useAdminSession();
+  const [showLoginBanner, setShowLoginBanner] = useState(false);
+
+  const isAuthenticated = session?.authenticated === true;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-mono">
@@ -1303,12 +1383,45 @@ export default function AdminPage() {
           <span className="text-slate-700">/</span>
           <span className="text-slate-200 font-semibold text-sm">Admin</span>
         </div>
-        <div className="flex items-center gap-2 text-xs text-slate-500">
-          <span>Phase 5</span>
-          <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
-          <span>Hardening</span>
+        <div className="flex items-center gap-3">
+          {isAuthenticated ? (
+            <span className="flex items-center gap-1.5 text-xs text-emerald-400">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              Admin session active
+            </span>
+          ) : (
+            <button
+              onClick={() => setShowLoginBanner(true)}
+              className="text-xs px-3 py-1.5 rounded border border-slate-700 text-slate-300 hover:border-blue-600 hover:text-blue-300 transition-colors"
+            >
+              Log in
+            </button>
+          )}
         </div>
       </header>
+
+      {!isAuthenticated && (
+        <div className="border-b border-amber-800/60 bg-amber-950/20 px-6 py-3 flex items-center justify-between">
+          <span className="text-xs text-amber-300">
+            Log in with your admin token to see live pipeline data and table counts.
+          </span>
+          <button
+            onClick={() => setShowLoginBanner(true)}
+            className="text-xs px-3 py-1 rounded bg-amber-800 hover:bg-amber-700 text-amber-100 transition-colors"
+          >
+            Log in
+          </button>
+        </div>
+      )}
+
+      {showLoginBanner && (
+        <AdminLoginModal
+          onSuccess={() => {
+            setShowLoginBanner(false);
+            refetchSession();
+          }}
+        />
+      )}
 
       <div className="border-b border-slate-800 px-6">
         <nav className="flex -mb-px">
