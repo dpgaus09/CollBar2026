@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -112,6 +113,92 @@ PDF_HEADERS = {
 }
 
 POLITE_DELAY = 2.0  # seconds between requests
+
+# ---------------------------------------------------------------------------
+# Shared employer → district matching
+# ---------------------------------------------------------------------------
+
+# Strip ONLY terminal institutional-type markers.
+# Keep type qualifiers (city, local, exempted village, etc.) as part of the
+# name because the districts DB stores them (e.g. "Akron City",
+# "Ada Exempted Village").
+_STRIP_SUFFIXES = [
+    " board of education",
+    " joint vocational school district",
+    " career center",
+    " stem school",
+    " school district",
+    " schools",
+    " school",
+]
+
+
+def normalise_employer(name: str) -> str:
+    """Normalise a SERB employer name for fuzzy matching against districts.
+
+    Expands common abbreviations and strips trailing institutional markers
+    so that e.g. "Adams Co/Ohio Valley Local School District" →
+    "adams county ohio valley local" which matches the DB row
+    "Adams County Ohio Valley Local".
+    """
+    n = name.lower().strip()
+    n = re.sub(r"\bco\b\.?(?=/)", "county", n)  # "Adams Co/Ohio" → "Adams County/Ohio"
+    n = re.sub(r"\bco\b\.?\s+", "county ", n)   # "Adams Co Ohio" → "Adams County Ohio"
+    n = n.replace("/", " ")                       # "county/ohio" → "county ohio"
+    n = re.sub(r"\bst\b\.?\s+", "saint ", n)     # "St Mary" → "Saint Mary"
+    n = re.sub(r"\s+", " ", n).strip()
+    for suffix in _STRIP_SUFFIXES:
+        if n.endswith(suffix):
+            n = n[: -len(suffix)].strip()
+            break
+    return re.sub(r"[,\.]+$", "", n).strip()
+
+
+def build_district_index(conn) -> dict:
+    """Return {normalised_name: (district_id, original_name)} for OH districts."""
+    cur = conn.cursor()
+    cur.execute("SELECT id, name FROM districts WHERE state = 'OH'")
+    rows = cur.fetchall()
+    cur.close()
+    return {normalise_employer(name): (int(did), name) for did, name in rows}
+
+
+def match_employer(
+    employer: str,
+    dist_index: dict,
+    threshold_auto: int = 92,
+    threshold_review: int = 80,
+) -> tuple:
+    """Match an employer name to a district.
+
+    Returns (district_id | None, match_status, matched_name).
+    match_status: 'auto' | 'review' | 'unmatched'
+    """
+    try:
+        from rapidfuzz import fuzz, process  # type: ignore
+    except ImportError:
+        logging.warning("rapidfuzz not installed — falling back to exact match only")
+        norm = normalise_employer(employer)
+        if norm in dist_index:
+            did, orig = dist_index[norm]
+            return did, "auto", orig
+        return None, "unmatched", ""
+
+    norm = normalise_employer(employer)
+    if norm in dist_index:
+        did, orig = dist_index[norm]
+        return did, "auto", orig
+
+    keys = list(dist_index.keys())
+    results = process.extract(norm, keys, scorer=fuzz.token_sort_ratio, limit=1)
+    if results:
+        best_key, score, _ = results[0]
+        did, orig = dist_index[best_key]
+        if score >= threshold_auto:
+            return did, "auto", orig
+        if score >= threshold_review:
+            return None, "review", orig
+    return None, "unmatched", ""
 
 
 def polite_get(session, url: str, retries: int = 3, timeout: int = 60,

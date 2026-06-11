@@ -169,6 +169,8 @@ def main():
 
     if school_records:
         conn = common.get_db_conn()
+        dist_index = common.build_district_index(conn)
+        log.info("Districts in index: %d", len(dist_index))
         cur = conn.cursor()
         pdf_count = 0
 
@@ -181,6 +183,11 @@ def main():
             if not url.startswith("http"):
                 continue
 
+            # Match employer → district
+            district_id, match_status, _matched = common.match_employer(
+                rec["employer"], dist_index
+            )
+
             fname = url.split("/")[-1]
             dest = FF_PDF_DIR / fname
             pdf_bytes = download_ff_pdf(session, url, dest)
@@ -191,16 +198,33 @@ def main():
 
             file_hash = common.sha256_bytes(pdf_bytes)
             storage_key = common.upload_to_object_storage(dest, f"oh/ff/{file_hash}.pdf")
-            doc_id = upsert_source_doc(cur, None, url, file_hash, storage_key)
+            doc_id = upsert_source_doc(cur, district_id, url, file_hash, storage_key)
+
+            # Derive year_covered from date_issued (year of the FF report)
+            year_covered = None
+            if rec["date_issued"]:
+                try:
+                    year_covered = rec["date_issued"][:4] + "-" + str(int(rec["date_issued"][:4]) + 1)[2:]
+                except (ValueError, IndexError):
+                    pass
 
             try:
                 cur.execute(
                     """
-                    INSERT INTO factfinding_proposals (case_number, report_date, source_doc_id)
-                    VALUES (%s, %s, %s)
+                    INSERT INTO factfinding_proposals
+                        (district_id, case_number, report_date, union_name,
+                         year_covered, source_doc_id)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT DO NOTHING
                     """,
-                    (rec["case_number"], rec["date_issued"] or None, doc_id),
+                    (
+                        district_id,
+                        rec["case_number"],
+                        rec["date_issued"] or None,
+                        rec["union"][:500] if rec["union"] else None,
+                        year_covered,
+                        doc_id,
+                    ),
                 )
                 proposals_loaded += 1
             except Exception as e:

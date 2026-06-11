@@ -22,7 +22,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 import common
 
 import requests
-from rapidfuzz import fuzz, process
 
 common.setup_logging()
 log = logging.getLogger(__name__)
@@ -37,18 +36,8 @@ CBA_PDF_DIR = common.DATA_DIR / "cba"
 # School-sector bargaining unit codes
 SCHOOL_BU_CODES = {"T", "NT"}
 
-# Employer name normalisation — strip ONLY terminal institutional-type markers
-# Keep district-type qualifiers (city, local, exempted village, etc.) as part of the name
-# because the districts DB stores them (e.g. "Akron City", "Ada Exempted Village").
-STRIP_SUFFIXES = [
-    " board of education",
-    " joint vocational school district",
-    " career center",
-    " stem school",
-    " school district",
-    " schools",
-    " school",
-]
+# Employer name normalisation lives in common.py (normalise_employer, match_employer,
+# build_district_index) so that both the CBA and FF scrapers share the same logic.
 
 ROW_RE = re.compile(
     r'\["([^"]+)","View","(https://serb\.ohio\.gov/static/PDF/Contracts/[^"]+\.pdf)"'
@@ -115,61 +104,6 @@ def school_year_from_dates(start_date: str | None, end_date: str | None) -> str 
     return None
 
 
-def normalise_employer(name: str) -> str:
-    n = name.lower().strip()
-    # Expand common abbreviations used in SERB employer names
-    n = re.sub(r"\bco\b\.?(?=/)", "county", n)   # "Adams Co/Ohio" → "Adams County/Ohio"
-    n = re.sub(r"\bco\b\.?\s+", "county ", n)     # "Adams Co Ohio" → "Adams County Ohio"
-    n = n.replace("/", " ")                        # "county/ohio" → "county ohio"
-    n = re.sub(r"\bst\b\.?\s+", "saint ", n)      # "St Mary" → "Saint Mary"
-    n = re.sub(r"\s+", " ", n).strip()            # collapse whitespace
-    for suffix in STRIP_SUFFIXES:
-        if n.endswith(suffix):
-            n = n[: -len(suffix)].strip()
-            break
-    # Strip trailing punctuation
-    n = re.sub(r"[,\.]+$", "", n).strip()
-    return n
-
-
-def build_district_index(conn) -> dict[str, tuple[int, str]]:
-    """Return {normalised_name: (district_id, original_name)} for all OH districts."""
-    cur = conn.cursor()
-    cur.execute("SELECT id, name FROM districts WHERE state = 'OH'")
-    rows = cur.fetchall()
-    cur.close()
-    index = {}
-    for did, dname in rows:
-        key = normalise_employer(dname)
-        index[key] = (int(did), dname)
-    return index
-
-
-def match_employer(
-    employer: str,
-    dist_index: dict[str, tuple[int, str]],
-    threshold_auto: int = 92,
-    threshold_review: int = 80,
-) -> tuple[int | None, str, str]:
-    """
-    Returns (district_id | None, match_status, matched_name).
-    match_status: 'auto' | 'review' | 'unmatched'
-    """
-    norm = normalise_employer(employer)
-    if norm in dist_index:
-        did, orig = dist_index[norm]
-        return did, "auto", orig
-
-    keys = list(dist_index.keys())
-    results = process.extract(norm, keys, scorer=fuzz.token_sort_ratio, limit=1)
-    if results:
-        best_key, score, _ = results[0]
-        did, orig = dist_index[best_key]
-        if score >= threshold_auto:
-            return did, "auto", orig
-        if score >= threshold_review:
-            return None, "review", orig
-    return None, "unmatched", ""
 
 
 def download_pdf(session: requests.Session, url: str, dest: Path) -> bytes | None:
@@ -252,7 +186,7 @@ def main():
 
     # 5 — Build district index for matching
     conn = common.get_db_conn()
-    dist_index = build_district_index(conn)
+    dist_index = common.build_district_index(conn)
     log.info("Districts in index: %d", len(dist_index))
 
     # Crawl-state tracking
@@ -277,13 +211,13 @@ def main():
             log.info("Reached max-pdfs limit (%d)", args.max_pdfs)
             break
 
-        # Skip already-downloaded
-        if url in downloaded_urls:
+        # Skip already-successfully-downloaded; retry previously-failed URLs
+        if downloaded_urls.get(url, {}).get("status") == "ok":
             skipped_count += 1
             continue
 
         # Match employer → district
-        district_id, match_status, matched_name = match_employer(employer, dist_index)
+        district_id, match_status, matched_name = common.match_employer(employer, dist_index)
 
         if match_status == "auto":
             matched_count += 1
