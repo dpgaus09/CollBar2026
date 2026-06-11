@@ -5,6 +5,7 @@ the district match rate. Exits non-zero if match rate < 90%.
 
 Usage: python3 pipeline/05_acceptance_summary.py
 """
+import argparse
 import sys
 import logging
 from pathlib import Path
@@ -26,6 +27,9 @@ TABLES = [
 ]
 
 MATCH_RATE_THRESHOLD = 90.0
+# A full run is considered complete when ≥95% of found docs have been
+# processed (downloaded + skipped-cached + failed).
+CORPUS_COMPLETENESS_THRESHOLD = 95.0
 
 
 def count_rows(cur, table: str) -> int:
@@ -39,6 +43,17 @@ def count_rows(cur, table: str) -> int:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--skip-completeness",
+        action="store_true",
+        help=(
+            "Skip the corpus-completeness gate (use for bounded/dev runs "
+            "where --max-pdfs was set intentionally)"
+        ),
+    )
+    args = parser.parse_args()
+
     state = common.load_crawl_state()
     conn = common.get_db_conn()
     cur = conn.cursor()
@@ -56,11 +71,23 @@ def main() -> int:
         print(f"  {table:<28} {n:>10,}{marker}")
 
     # CBA document breakdown
+    docs_found = state.get("cba_docs_found", 0)
+    docs_downloaded = state.get("cba_docs_downloaded", 0)
+    docs_skipped = state.get("cba_docs_skipped", 0)
+    docs_failed = state.get("cba_docs_failed", 0)
+    docs_processed = docs_downloaded + docs_skipped + docs_failed
+
     print("\n--- CBA Document Crawl ---")
-    print(f"  school-sector docs found   : {state.get('cba_docs_found', 0):>8,}")
-    print(f"  PDFs downloaded            : {state.get('cba_docs_downloaded', 0):>8,}")
-    print(f"  PDFs skipped (cached)      : {state.get('cba_docs_skipped', 0):>8,}")
-    print(f"  PDFs failed                : {state.get('cba_docs_failed', 0):>8,}")
+    print(f"  school-sector docs found   : {docs_found:>8,}")
+    print(f"  PDFs downloaded            : {docs_downloaded:>8,}")
+    print(f"  PDFs skipped (cached)      : {docs_skipped:>8,}")
+    print(f"  PDFs failed                : {docs_failed:>8,}")
+    if docs_found > 0:
+        completeness_pct = (docs_processed / docs_found) * 100
+        print(f"  corpus completeness        : {completeness_pct:>7.1f}%  (threshold {CORPUS_COMPLETENESS_THRESHOLD:.0f}%)")
+    else:
+        completeness_pct = 0.0
+        print(f"  corpus completeness        :      n/a")
 
     # District match rate
     matched = state.get("cba_district_matched", 0)
@@ -102,9 +129,29 @@ def main() -> int:
 
     print("\n" + "=" * 60)
 
-    if match_rate < MATCH_RATE_THRESHOLD and total_attempted > 0:
-        print(f"\n  FAIL: Match rate {match_rate:.1f}% is below {MATCH_RATE_THRESHOLD}% threshold.")
-        print("  Run pipeline/02_scrape_serb_cba.py and check manual_review CSV.")
+    failures = []
+
+    # Gate 1 — district match rate
+    if total_attempted > 0 and match_rate < MATCH_RATE_THRESHOLD:
+        failures.append(
+            f"Match rate {match_rate:.1f}% is below {MATCH_RATE_THRESHOLD}% threshold. "
+            "Run 02_scrape_serb_cba.py and check manual_review CSV."
+        )
+
+    # Gate 2 — corpus completeness (skipped when --skip-completeness is set)
+    if not args.skip_completeness and docs_found > 0:
+        if completeness_pct < CORPUS_COMPLETENESS_THRESHOLD:
+            failures.append(
+                f"Corpus completeness {completeness_pct:.1f}% is below "
+                f"{CORPUS_COMPLETENESS_THRESHOLD}% threshold "
+                f"({docs_processed:,} of {docs_found:,} docs processed). "
+                "Re-run 02_scrape_serb_cba.py without --max-pdfs, "
+                "or pass --skip-completeness for intentional partial runs."
+            )
+
+    if failures:
+        for msg in failures:
+            print(f"\n  FAIL: {msg}")
         print("=" * 60 + "\n")
         return 1
     elif total_attempted == 0:
@@ -112,7 +159,11 @@ def main() -> int:
         print("=" * 60 + "\n")
         return 0
     else:
-        print(f"\n  PASS: Match rate {match_rate:.1f}% meets {MATCH_RATE_THRESHOLD}% threshold.")
+        print(f"\n  PASS: Match rate {match_rate:.1f}% meets threshold.")
+        if not args.skip_completeness and docs_found > 0:
+            print(f"  PASS: Corpus completeness {completeness_pct:.1f}% meets threshold.")
+        elif args.skip_completeness:
+            print("  NOTE: Corpus-completeness gate skipped (--skip-completeness).")
         print("=" * 60 + "\n")
         return 0
 

@@ -130,6 +130,77 @@ def download_ff_pdf(session: requests.Session, url: str, dest: Path) -> bytes | 
         return None
 
 
+def parse_ff_pdf_proposals(pdf_bytes: bytes) -> dict:
+    """
+    Extract employer, union, and fact-finder wage-proposal percentages from
+    an FF report PDF using pdfplumber.
+
+    SERB FF reports use varied layouts, so we apply several regex patterns
+    and take the first match for each role.  Returns a dict with keys:
+    employer_proposal_pct, union_proposal_pct, factfinder_recommendation_pct
+    (all float | None).
+    """
+    try:
+        import pdfplumber  # type: ignore
+        from io import BytesIO
+    except ImportError:
+        log.debug("pdfplumber not available — skipping FF proposal % extraction")
+        return {}
+
+    result: dict = {
+        "employer_proposal_pct": None,
+        "union_proposal_pct": None,
+        "factfinder_recommendation_pct": None,
+    }
+
+    # Pattern: "employer" or "board" proposal / offer → percentage
+    _EMPLOYER_RE = re.compile(
+        r'(?:employer|board|management)[^\n]{0,60}?(?:propos(?:al|ed)|offer|position)'
+        r'[^\n]{0,80}?(\d{1,3}(?:\.\d{1,2})?)\s*%',
+        re.IGNORECASE,
+    )
+    # Pattern: "union" or "oea" / "ota" proposal / offer → percentage
+    _UNION_RE = re.compile(
+        r'(?:union|association|oea|ota|ofa|ocsea|afscme|teamsters?|ibew|seiu)'
+        r'[^\n]{0,60}?(?:propos(?:al|ed)|offer|position|request)'
+        r'[^\n]{0,80}?(\d{1,3}(?:\.\d{1,2})?)\s*%',
+        re.IGNORECASE,
+    )
+    # Pattern: "fact-finder" or "neutral" recommendation → percentage
+    _FF_RE = re.compile(
+        r'(?:fact[\s-]finder|neutral|mediator)[^\n]{0,60}?(?:recommend(?:ation|s)?|award)'
+        r'[^\n]{0,80}?(\d{1,3}(?:\.\d{1,2})?)\s*%',
+        re.IGNORECASE,
+    )
+    # Fallback: look for a table-style line with "X%" values in order
+    # e.g. "Employer | Union | Fact-Finder\n2.5% | 4.0% | 3.0%"
+    _TABLE_PCT_RE = re.compile(r'(\d{1,3}(?:\.\d{1,2})?)\s*%')
+
+    try:
+        full_text = ""
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages[:10]:  # first 10 pages cover all proposal tables
+                text = page.extract_text() or ""
+                full_text += "\n" + text
+
+        m = _EMPLOYER_RE.search(full_text)
+        if m:
+            result["employer_proposal_pct"] = float(m.group(1))
+
+        m = _UNION_RE.search(full_text)
+        if m:
+            result["union_proposal_pct"] = float(m.group(1))
+
+        m = _FF_RE.search(full_text)
+        if m:
+            result["factfinder_recommendation_pct"] = float(m.group(1))
+
+    except Exception as e:
+        log.debug("FF PDF parse error: %s", e)
+
+    return result
+
+
 def upsert_source_doc(cur, district_id, source_url, file_hash, storage_key):
     cur.execute(
         """
@@ -200,6 +271,9 @@ def main():
             storage_key = common.upload_to_object_storage(dest, f"oh/ff/{file_hash}.pdf")
             doc_id = upsert_source_doc(cur, district_id, url, file_hash, storage_key)
 
+            # Parse proposal % fields from the downloaded PDF
+            pct = parse_ff_pdf_proposals(pdf_bytes)
+
             # Derive year_covered from date_issued (year of the FF report)
             year_covered = None
             if rec["date_issued"]:
@@ -213,8 +287,9 @@ def main():
                     """
                     INSERT INTO factfinding_proposals
                         (district_id, case_number, report_date, union_name,
-                         year_covered, source_doc_id)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                         employer_proposal_pct, union_proposal_pct,
+                         factfinder_recommendation_pct, year_covered, source_doc_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT DO NOTHING
                     """,
                     (
@@ -222,11 +297,17 @@ def main():
                         rec["case_number"],
                         rec["date_issued"] or None,
                         rec["union"][:500] if rec["union"] else None,
+                        pct.get("employer_proposal_pct"),
+                        pct.get("union_proposal_pct"),
+                        pct.get("factfinder_recommendation_pct"),
                         year_covered,
                         doc_id,
                     ),
                 )
                 proposals_loaded += 1
+                parsed_pcts = sum(1 for k in pct if pct[k] is not None)
+                if parsed_pcts:
+                    log.debug("Parsed %d pct field(s) from %s", parsed_pcts, fname)
             except Exception as e:
                 log.warning("FF proposal insert failed for %s: %s", rec["case_number"], e)
                 conn.rollback()

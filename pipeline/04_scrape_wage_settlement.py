@@ -122,11 +122,30 @@ def main():
     for year in YEARS:
         dest = WSR_DIR / f"wage_settlement_{year}.pdf"
         if dest.exists():
-            log.info("Already have wage settlement for %d, skipping download", year)
+            log.info("Already have wage settlement for %d; resolving canonical URL", year)
             downloaded += 1
-            # Upsert source_documents row for already-downloaded PDFs
+
+            # Reconstruct the canonical SERB source URL by probing known patterns.
+            # Fall back to the first pattern if no live URL responds.
+            canonical_url = ""
+            yy = str(year)[2:]
+            for pattern in URL_PATTERNS:
+                candidate = pattern.replace("{YEAR}", str(year)).replace("{YY}", yy)
+                try:
+                    r = session.head(candidate, headers=common.HEADERS, timeout=10, allow_redirects=True)
+                    if r and r.status_code == 200:
+                        canonical_url = candidate
+                        log.info("Canonical URL for %d WSR: %s", year, canonical_url)
+                        break
+                except Exception:
+                    pass
+            if not canonical_url:
+                # Use first pattern as best-guess canonical even if unreachable
+                canonical_url = URL_PATTERNS[0].replace("{YEAR}", str(year)).replace("{YY}", yy)
+                log.warning("No live URL found for %d WSR; using best-guess: %s", year, canonical_url)
+
             file_hash = common.sha256_file(dest)
-            storage_key = f"local:{dest}"
+            storage_key = common.upload_to_object_storage(dest, f"oh/wsr/{file_hash}.pdf")
             try:
                 cur.execute(
                     """
@@ -135,13 +154,13 @@ def main():
                     VALUES ('wage_settlement_report', %s, %s, %s, %s)
                     ON CONFLICT (source_url, file_hash) DO NOTHING
                     """,
-                    (f"local:{dest}", file_hash, storage_key, f"{year}-{str(year+1)[2:]}"),
+                    (canonical_url, file_hash, storage_key, f"{year}-{str(year+1)[2:]}"),
                 )
                 conn.commit()
             except Exception as e:
                 conn.rollback()
                 log.debug("source_documents upsert for %d WSR: %s", year, e)
-            parse_wage_tables(dest, f"local:{dest}", conn)
+            parse_wage_tables(dest, canonical_url, conn)
             continue
 
         pdf_bytes, url = try_download_year(session, year)
