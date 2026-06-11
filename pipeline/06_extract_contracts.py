@@ -364,12 +364,21 @@ def insert_provisions(cur, contract_id: int, provisions) -> int:
     for p in provisions:
         page_ref = _n(p, "page_ref")
         pkey = _s(p, "provision_key") or "?"
+        raw_conf = _n(p, "confidence", default=0.5)
+
         if page_ref is None:
+            # No page reference — cap confidence so the provision lands in the
+            # review queue (threshold is 0.8) and a human can verify or fill in
+            # the page number before it is trusted.
+            conf = min(raw_conf, 0.6)
             log.debug(
                 "provision '%s' for contract %d has no page_ref — "
-                "provenance is partial (clause_excerpt still required)",
-                pkey, contract_id,
+                "capping confidence %.2f→%.2f to route to review queue",
+                pkey, contract_id, raw_conf, conf,
             )
+        else:
+            conf = raw_conf
+
         try:
             cur.execute(
                 """
@@ -387,7 +396,7 @@ def insert_provisions(cur, contract_id: int, provisions) -> int:
                     _s(p, "unit"),
                     _s(p, "clause_excerpt"),
                     page_ref,
-                    _n(p, "confidence", default=0.5),
+                    conf,
                 ),
             )
             inserted += 1

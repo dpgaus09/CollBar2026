@@ -4,6 +4,12 @@ import { join } from "path";
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 
+declare module "express-session" {
+  interface SessionData {
+    adminAuthenticated?: boolean;
+  }
+}
+
 const router: IRouter = Router();
 
 const CRAWL_STATE_PATH = join(
@@ -47,35 +53,55 @@ async function getTableCounts(): Promise<Record<string, number>> {
 }
 
 // ---------------------------------------------------------------------------
-// Admin token middleware (applied only to mutation endpoints)
-// In development with no ADMIN_TOKEN set, mutations are allowed from localhost.
-// In production, ADMIN_TOKEN must be set and provided via X-Admin-Token header.
+// Admin session middleware
+// Checks that the request carries a valid admin session cookie (set via
+// POST /admin/login). No secrets are exposed to the client bundle.
 // ---------------------------------------------------------------------------
 function requireAdminToken(req: Request, res: Response, next: NextFunction): void {
-  const token = process.env.ADMIN_TOKEN;
-  const isDev = process.env.NODE_ENV !== "production";
-
-  if (!token) {
-    if (isDev) {
-      // Development convenience: allow without token, but warn
-      console.warn("[WARN] ADMIN_TOKEN not set — mutation endpoints are unprotected (dev only)");
-      next();
-      return;
-    }
-    res.status(503).json({
-      error: "Admin auth not configured. Set the ADMIN_TOKEN environment variable.",
-    });
+  if (req.session.adminAuthenticated) {
+    next();
     return;
   }
-
-  const provided = req.headers["x-admin-token"];
-  if (provided !== token) {
-    res.status(401).json({ error: "Unauthorized: invalid or missing X-Admin-Token header" });
-    return;
-  }
-
-  next();
+  res.status(401).json({ error: "Unauthorized: admin login required" });
 }
+
+// ---------------------------------------------------------------------------
+// POST /admin/login — exchange ADMIN_TOKEN for a session cookie
+// ---------------------------------------------------------------------------
+router.post("/admin/login", (req, res) => {
+  const { token } = req.body as { token?: string };
+  const adminToken = process.env.ADMIN_TOKEN;
+
+  if (!adminToken) {
+    res
+      .status(503)
+      .json({ error: "Admin auth not configured on server. Set the ADMIN_TOKEN environment variable." });
+    return;
+  }
+
+  if (!token || token !== adminToken) {
+    res.status(401).json({ error: "Invalid token" });
+    return;
+  }
+
+  req.session.adminAuthenticated = true;
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/session — check if the current session is authenticated
+// ---------------------------------------------------------------------------
+router.get("/admin/session", (req, res) => {
+  res.json({ authenticated: !!req.session.adminAuthenticated });
+});
+
+// ---------------------------------------------------------------------------
+// POST /admin/logout
+// ---------------------------------------------------------------------------
+router.post("/admin/logout", (req, res) => {
+  req.session.destroy(() => {});
+  res.json({ ok: true });
+});
 
 // ---------------------------------------------------------------------------
 // GET /admin/crawl-report
@@ -299,11 +325,11 @@ router.get("/admin/review-queue", async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // PATCH /admin/review-queue/:id
-// Protected by requireAdminToken middleware.
+// Protected by requireAdminToken middleware (session-based).
 // body: { action: 'approve'|'correct'|'reject', correctedValue?: string }
 // ---------------------------------------------------------------------------
 router.patch("/admin/review-queue/:id", requireAdminToken, async (req, res) => {
-  const id = parseInt(req.params.id, 10);
+  const id = parseInt(String(req.params.id), 10);
   if (isNaN(id) || id < 1) {
     res.status(400).json({ error: "Invalid id" });
     return;

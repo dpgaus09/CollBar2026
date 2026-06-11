@@ -89,11 +89,16 @@ def main() -> int:
     cur.execute("SELECT COUNT(*) FROM contract_provisions WHERE human_verified = true")
     human_verified_count = cur.fetchone()[0]
 
+    # Gate 4: provisions without page_ref (partial provenance)
+    cur.execute("SELECT COUNT(*) FROM contract_provisions WHERE page_ref IS NULL")
+    no_page_ref_count = cur.fetchone()[0]
+
     print(f"\n--- Contracts & Provisions ---")
     print(f"  Contracts extracted     : {total_contracts:>8,}")
     print(f"  Contracts w/o source_doc: {orphan_contracts:>8,}  (must be 0)")
     print(f"  Provisions extracted    : {total_provisions:>8,}")
     print(f"  Untraceable provisions  : {untraceable_provisions:>8,}  (must be 0)")
+    print(f"  Provisions w/o page_ref : {no_page_ref_count:>8,}  (must be 0)")
     print(f"  Review queue items      : {review_queue_count:>8,}  (confidence < 0.8, unverified)")
     print(f"  Human-verified          : {human_verified_count:>8,}")
 
@@ -149,6 +154,20 @@ def main() -> int:
             "traceable to any source_doc (parent contract has NULL source_doc_id). "
             "Zero rows without provenance is required."
         )
+
+    # --- Gate 4: Provisions without page_ref (partial provenance) ---
+    if no_page_ref_count > 0:
+        pct = (no_page_ref_count / total_provisions * 100) if total_provisions > 0 else 0.0
+        msg = (
+            f"{'WARN' if args.sample else 'GATE FAIL'}: "
+            f"{no_page_ref_count} provision(s) ({pct:.1f}%) have no page_ref. "
+            "Every extracted value should carry page-level provenance. "
+            "These provisions are capped at confidence ≤ 0.6 and land in the review queue."
+        )
+        if args.sample:
+            print(f"\n  {msg}")
+        else:
+            failures_found.append(msg)
 
     # --- Gate 3: Minimum contract count ---
     if not args.sample and total_contracts < MIN_CONTRACTS:

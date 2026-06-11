@@ -110,14 +110,26 @@ function apiUrl(path: string) {
   return `${import.meta.env.BASE_URL}${path.replace(/^\//, "")}`;
 }
 
-/** Admin token sent as X-Admin-Token header on mutation requests.
- *  Set VITE_ADMIN_TOKEN in the environment to enable in production. */
-const ADMIN_TOKEN: string = (import.meta.env.VITE_ADMIN_TOKEN as string) ?? "";
+/** Build a page-anchored PDF URL when page_ref is known. */
+function pdfPageUrl(sourceUrl: string | null, pageRef: number | null): string | null {
+  if (!sourceUrl) return null;
+  return pageRef != null ? `${sourceUrl}#page=${pageRef}` : sourceUrl;
+}
 
-function adminHeaders(extra: Record<string, string> = {}): Record<string, string> {
-  const headers: Record<string, string> = { "Content-Type": "application/json", ...extra };
-  if (ADMIN_TOKEN) headers["X-Admin-Token"] = ADMIN_TOKEN;
-  return headers;
+// ---------------------------------------------------------------------------
+// Admin session hook — checks whether the browser has an active admin session
+// ---------------------------------------------------------------------------
+
+function useAdminSession() {
+  return useQuery<{ authenticated: boolean }>({
+    queryKey: ["/api/admin/session"],
+    queryFn: () =>
+      fetch(apiUrl("/api/admin/session"), { credentials: "include" }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    staleTime: 60_000,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -128,7 +140,7 @@ function useCrawlReport() {
   return useQuery<CrawlReport>({
     queryKey: ["/api/admin/crawl-report"],
     queryFn: () =>
-      fetch(apiUrl("/api/admin/crawl-report")).then((r) => {
+      fetch(apiUrl("/api/admin/crawl-report"), { credentials: "include" }).then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       }),
@@ -140,7 +152,7 @@ function useExtractionReport() {
   return useQuery<ExtractionReport>({
     queryKey: ["/api/admin/extraction-report"],
     queryFn: () =>
-      fetch(apiUrl("/api/admin/extraction-report")).then((r) => {
+      fetch(apiUrl("/api/admin/extraction-report"), { credentials: "include" }).then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       }),
@@ -154,12 +166,77 @@ function useReviewQueue(page: number, category: string) {
     queryFn: () => {
       const params = new URLSearchParams({ page: String(page), limit: "50" });
       if (category) params.set("category", category);
-      return fetch(apiUrl(`/api/admin/review-queue?${params}`)).then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      });
+      return fetch(apiUrl(`/api/admin/review-queue?${params}`), { credentials: "include" }).then(
+        (r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        },
+      );
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Admin login modal
+// ---------------------------------------------------------------------------
+
+function AdminLoginModal({ onSuccess }: { onSuccess: () => void }) {
+  const [token, setToken] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      const r = await fetch(apiUrl("/api/admin/login"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ token }),
+      });
+      if (!r.ok) {
+        const body = (await r.json().catch(() => ({}))) as { error?: string };
+        setError(body.error ?? "Login failed");
+      } else {
+        onSuccess();
+      }
+    } catch {
+      setError("Network error — is the API server running?");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm">
+      <div className="w-full max-w-sm rounded-xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
+        <h2 className="text-sm font-semibold text-slate-200 mb-1">Admin Authentication</h2>
+        <p className="text-xs text-slate-500 mb-5">
+          Enter the server-side ADMIN_TOKEN to unlock mutation endpoints.
+        </p>
+        <form onSubmit={submit} className="space-y-3">
+          <input
+            type="password"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            placeholder="Admin token"
+            autoFocus
+            className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+          />
+          {error && <p className="text-xs text-red-400">{error}</p>}
+          <button
+            type="submit"
+            disabled={loading || !token}
+            className="w-full text-xs px-3 py-2 rounded bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-50 transition-colors"
+          >
+            {loading ? "Authenticating…" : "Authenticate"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -657,7 +734,9 @@ function ReviewQueueTab() {
   const [actionId, setActionId] = useState<number | null>(null);
   const [correcting, setCorrecting] = useState<{ id: number; current: string } | null>(null);
   const [correctedValue, setCorrectedValue] = useState("");
+  const [showLogin, setShowLogin] = useState(false);
 
+  const { data: session, refetch: refetchSession } = useAdminSession();
   const { data, isLoading, isError } = useReviewQueue(page, category);
 
   const mutation = useMutation({
@@ -672,9 +751,14 @@ function ReviewQueueTab() {
     }) => {
       const r = await fetch(apiUrl(`/api/admin/review-queue/${id}`), {
         method: "PATCH",
-        headers: adminHeaders(),
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ action, correctedValue }),
       });
+      if (r.status === 401) {
+        setShowLogin(true);
+        throw new Error("401");
+      }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return r.json();
     },
@@ -688,16 +772,48 @@ function ReviewQueueTab() {
   });
 
   const act = (id: number, action: "approve" | "reject") => {
+    if (!session?.authenticated) {
+      setShowLogin(true);
+      return;
+    }
     setActionId(id);
     mutation.mutate({ id, action });
   };
 
   const submitCorrection = (id: number) => {
+    if (!session?.authenticated) {
+      setShowLogin(true);
+      return;
+    }
     mutation.mutate({ id, action: "correct", correctedValue });
   };
 
   return (
     <div className="space-y-6">
+      {showLogin && (
+        <AdminLoginModal
+          onSuccess={() => {
+            setShowLogin(false);
+            refetchSession();
+          }}
+        />
+      )}
+
+      {/* Auth banner */}
+      {!session?.authenticated && (
+        <div className="flex items-center justify-between rounded-lg border border-amber-800 bg-amber-950/20 px-4 py-3">
+          <span className="text-xs text-amber-400">
+            Admin session required to approve / correct / reject items.
+          </span>
+          <button
+            onClick={() => setShowLogin(true)}
+            className="text-xs px-3 py-1 rounded bg-amber-800 hover:bg-amber-700 text-amber-100 transition-colors"
+          >
+            Log in
+          </button>
+        </div>
+      )}
+
       {/* Filters */}
       <div className="flex items-center gap-4">
         <div className="flex items-center gap-2">
@@ -742,114 +858,120 @@ function ReviewQueueTab() {
 
       {data && data.items.length > 0 && (
         <div className="space-y-3">
-          {data.items.map((item) => (
-            <div
-              key={item.id}
-              className="rounded-lg border border-slate-800 bg-slate-900 overflow-hidden"
-            >
-              {/* Header */}
-              <div className="flex items-center justify-between px-4 py-3 bg-slate-900 border-b border-slate-800">
-                <div className="flex items-center gap-3">
-                  <span className="text-xs font-mono text-blue-400">{item.provision_key}</span>
-                  <span className="text-xs text-slate-500">{item.category}</span>
-                  <ConfidenceBadge value={item.confidence} />
+          {data.items.map((item) => {
+            const pageUrl = pdfPageUrl(item.source_url, item.page_ref);
+            return (
+              <div
+                key={item.id}
+                className="rounded-lg border border-slate-800 bg-slate-900 overflow-hidden"
+              >
+                {/* Header */}
+                <div className="flex items-center justify-between px-4 py-3 bg-slate-900 border-b border-slate-800">
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-mono text-blue-400">{item.provision_key}</span>
+                    <span className="text-xs text-slate-500">{item.category}</span>
+                    <ConfidenceBadge value={item.confidence} />
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    {item.district_name || "Unknown district"} •{" "}
+                    {item.union_name || item.unit_scope || ""}
+                    {item.effective_start ? ` • ${item.effective_start.slice(0, 4)}` : ""}
+                  </div>
                 </div>
-                <div className="text-xs text-slate-500">
-                  {item.district_name || "Unknown district"} •{" "}
-                  {item.union_name || item.unit_scope || ""}
-                  {item.effective_start ? ` • ${item.effective_start.slice(0, 4)}` : ""}
-                </div>
-              </div>
 
-              {/* Value */}
-              <div className="px-4 py-3 space-y-2">
-                <div className="flex items-center gap-3">
-                  <span className="text-xs text-slate-400">Value:</span>
-                  <span className="text-sm font-mono text-slate-200">
-                    {item.value_numeric != null
-                      ? `${item.value_numeric}${item.unit ? ` ${item.unit}` : ""}`
-                      : item.value_text || "—"}
-                  </span>
-                  {item.page_ref != null && (
-                    <span className="text-xs text-slate-600">p.{item.page_ref}</span>
+                {/* Value */}
+                <div className="px-4 py-3 space-y-2">
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-slate-400">Value:</span>
+                    <span className="text-sm font-mono text-slate-200">
+                      {item.value_numeric != null
+                        ? `${item.value_numeric}${item.unit ? ` ${item.unit}` : ""}`
+                        : item.value_text || "—"}
+                    </span>
+                    {item.page_ref != null && (
+                      <span className="text-xs text-slate-600">p.{item.page_ref}</span>
+                    )}
+                  </div>
+
+                  {item.clause_excerpt && (
+                    <blockquote className="text-xs text-slate-400 italic border-l-2 border-slate-700 pl-3 leading-relaxed">
+                      "{item.clause_excerpt}"
+                    </blockquote>
+                  )}
+
+                  {pageUrl && (
+                    <a
+                      href={pageUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-blue-500 hover:text-blue-400 truncate block"
+                    >
+                      {item.page_ref != null
+                        ? `${item.source_url} — page ${item.page_ref}`
+                        : item.source_url}
+                    </a>
                   )}
                 </div>
 
-                {item.clause_excerpt && (
-                  <blockquote className="text-xs text-slate-400 italic border-l-2 border-slate-700 pl-3 leading-relaxed">
-                    "{item.clause_excerpt}"
-                  </blockquote>
+                {/* Correction form */}
+                {correcting?.id === item.id && (
+                  <div className="px-4 py-3 border-t border-slate-800 bg-slate-950 flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={correctedValue}
+                      onChange={(e) => setCorrectedValue(e.target.value)}
+                      placeholder="Enter corrected value"
+                      className="flex-1 text-xs bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-slate-200 focus:outline-none focus:border-blue-500"
+                      autoFocus
+                    />
+                    <button
+                      onClick={() => submitCorrection(item.id)}
+                      disabled={mutation.isPending}
+                      className="text-xs px-3 py-1.5 rounded bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-50"
+                    >
+                      Save
+                    </button>
+                    <button
+                      onClick={() => { setCorrecting(null); setCorrectedValue(""); }}
+                      className="text-xs px-3 py-1.5 rounded border border-slate-700 text-slate-400 hover:text-slate-200"
+                    >
+                      Cancel
+                    </button>
+                  </div>
                 )}
 
-                {item.source_url && (
-                  <a
-                    href={item.source_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs text-blue-500 hover:text-blue-400 truncate block"
-                  >
-                    {item.source_url}
-                  </a>
+                {/* Actions */}
+                {correcting?.id !== item.id && (
+                  <div className="px-4 py-2 border-t border-slate-800 flex items-center gap-2 bg-slate-950">
+                    <button
+                      onClick={() => act(item.id, "approve")}
+                      disabled={mutation.isPending && actionId === item.id}
+                      className="text-xs px-3 py-1 rounded bg-emerald-900 hover:bg-emerald-800 text-emerald-300 border border-emerald-800 disabled:opacity-50"
+                    >
+                      ✓ Approve
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!session?.authenticated) { setShowLogin(true); return; }
+                        setCorrecting({ id: item.id, current: item.value_text ?? String(item.value_numeric ?? "") });
+                        setCorrectedValue(item.value_text ?? String(item.value_numeric ?? ""));
+                      }}
+                      className="text-xs px-3 py-1 rounded bg-blue-900 hover:bg-blue-800 text-blue-300 border border-blue-800"
+                    >
+                      ✎ Correct
+                    </button>
+                    <button
+                      onClick={() => act(item.id, "reject")}
+                      disabled={mutation.isPending && actionId === item.id}
+                      className="text-xs px-3 py-1 rounded bg-red-950 hover:bg-red-900 text-red-400 border border-red-900 disabled:opacity-50"
+                    >
+                      ✗ Reject
+                    </button>
+                  </div>
                 )}
               </div>
-
-              {/* Correction form */}
-              {correcting?.id === item.id && (
-                <div className="px-4 py-3 border-t border-slate-800 bg-slate-950 flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={correctedValue}
-                    onChange={(e) => setCorrectedValue(e.target.value)}
-                    placeholder="Enter corrected value"
-                    className="flex-1 text-xs bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-slate-200 focus:outline-none focus:border-blue-500"
-                    autoFocus
-                  />
-                  <button
-                    onClick={() => submitCorrection(item.id)}
-                    disabled={mutation.isPending}
-                    className="text-xs px-3 py-1.5 rounded bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-50"
-                  >
-                    Save
-                  </button>
-                  <button
-                    onClick={() => { setCorrecting(null); setCorrectedValue(""); }}
-                    className="text-xs px-3 py-1.5 rounded border border-slate-700 text-slate-400 hover:text-slate-200"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              )}
-
-              {/* Actions */}
-              {correcting?.id !== item.id && (
-                <div className="px-4 py-2 border-t border-slate-800 flex items-center gap-2 bg-slate-950">
-                  <button
-                    onClick={() => act(item.id, "approve")}
-                    disabled={mutation.isPending && actionId === item.id}
-                    className="text-xs px-3 py-1 rounded bg-emerald-900 hover:bg-emerald-800 text-emerald-300 border border-emerald-800 disabled:opacity-50"
-                  >
-                    ✓ Approve
-                  </button>
-                  <button
-                    onClick={() => {
-                      setCorrecting({ id: item.id, current: item.value_text ?? String(item.value_numeric ?? "") });
-                      setCorrectedValue(item.value_text ?? String(item.value_numeric ?? ""));
-                    }}
-                    className="text-xs px-3 py-1 rounded bg-blue-900 hover:bg-blue-800 text-blue-300 border border-blue-800"
-                  >
-                    ✎ Correct
-                  </button>
-                  <button
-                    onClick={() => act(item.id, "reject")}
-                    disabled={mutation.isPending && actionId === item.id}
-                    className="text-xs px-3 py-1 rounded bg-red-950 hover:bg-red-900 text-red-400 border border-red-900 disabled:opacity-50"
-                  >
-                    ✗ Reject
-                  </button>
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
 
           {/* Pagination */}
           {data.pages > 1 && (
