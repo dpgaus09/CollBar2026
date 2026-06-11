@@ -194,5 +194,32 @@ class TestSchema(unittest.TestCase):
             cur.close()
 
 
+    def test_drizzle_schema_matches_db(self):
+        """
+        Drizzle schema files must declare every column that exists in the DB.
+        Runs drizzle-kit push and asserts 'No changes detected', confirming
+        the TypeScript schema files and the live DB are in sync.
+        This catches the failure mode where a column was added via raw
+        ALTER TABLE but not declared in the .ts schema file.
+        """
+        import subprocess
+        result = subprocess.run(
+            ["pnpm", "--filter", "@workspace/db", "run", "push"],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).parent.parent.parent),
+            timeout=30,
+        )
+        combined = result.stdout + result.stderr
+        self.assertIn(
+            "No changes detected",
+            combined,
+            "drizzle-kit detected pending schema changes — run "
+            "`pnpm --filter @workspace/db run push` and re-add any raw "
+            "ALTER TABLE columns to the Drizzle schema .ts files.\n"
+            f"drizzle-kit output:\n{combined}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

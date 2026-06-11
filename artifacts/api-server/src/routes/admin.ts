@@ -68,15 +68,6 @@ function requireAdminToken(req: Request, res: Response, next: NextFunction): voi
   res.status(401).json({ error: "Unauthorized: admin login required" });
 }
 
-/** Requires either a magic-link session (any user) or an admin token session. */
-function requireSession(req: Request, res: Response, next: NextFunction): void {
-  if (req.session.userId || req.session.adminAuthenticated) {
-    next();
-    return;
-  }
-  res.status(401).json({ error: "Authentication required" });
-}
-
 // ---------------------------------------------------------------------------
 // POST /admin/login — exchange ADMIN_TOKEN for a session cookie
 // ---------------------------------------------------------------------------
@@ -118,7 +109,7 @@ router.post("/admin/logout", (req, res) => {
 // ---------------------------------------------------------------------------
 // GET /admin/crawl-report
 // ---------------------------------------------------------------------------
-router.get("/admin/crawl-report", requireSession, async (_req, res) => {
+router.get("/admin/crawl-report", requireAdminToken, async (_req, res) => {
   let crawlState: Record<string, unknown> = {};
   if (existsSync(CRAWL_STATE_PATH)) {
     try {
@@ -167,7 +158,7 @@ router.get("/admin/crawl-report", requireSession, async (_req, res) => {
 // ---------------------------------------------------------------------------
 // GET /admin/extraction-report
 // ---------------------------------------------------------------------------
-router.get("/admin/extraction-report", requireSession, async (_req, res) => {
+router.get("/admin/extraction-report", requireAdminToken, async (_req, res) => {
   try {
     const runRows = await db.execute(
       sql.raw(`SELECT status, COUNT(*)::int AS n FROM extraction_runs GROUP BY status`),
@@ -242,7 +233,7 @@ router.get("/admin/extraction-report", requireSession, async (_req, res) => {
 // ---------------------------------------------------------------------------
 // GET /admin/review-queue
 // ---------------------------------------------------------------------------
-router.get("/admin/review-queue", requireSession, async (req, res) => {
+router.get("/admin/review-queue", requireAdminToken, async (req, res) => {
   const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10));
   const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10)));
   const offset = (page - 1) * limit;
@@ -338,7 +329,7 @@ router.get("/admin/review-queue", requireSession, async (req, res) => {
 // ---------------------------------------------------------------------------
 // GET /admin/alerts — paginated list of alerts by status
 // ---------------------------------------------------------------------------
-router.get("/admin/alerts", requireSession, async (req, res) => {
+router.get("/admin/alerts", requireAdminToken, async (req, res) => {
   const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10));
   const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10)));
   const offset = (page - 1) * limit;

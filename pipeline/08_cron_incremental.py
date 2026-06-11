@@ -2,10 +2,13 @@
 """
 Nightly incremental SERB scraper — Phase 5 cron job.
 
-Fetches the SERB CBA catalog and detects new documents not already in
-source_documents. Writes an alert row for each new document found.
-Does NOT download PDFs — alerts surface in the admin UI so an operator
-can trigger a full scrape when needed.
+Fetches the SERB CBA catalog and:
+  1. Detects NEW documents (URL not in source_documents) → 'new_doc' alert
+  2. Detects CHANGED documents (URL known but file hash changed) → 'changed_doc' alert
+     Uses HTTP HEAD to check Last-Modified before doing a full download.
+
+Does NOT run full LLM extraction — alerts surface in the admin UI so an
+operator can trigger a pipeline run when needed.
 
 Usage:
     python3 pipeline/08_cron_incremental.py [--dry-run]
@@ -14,12 +17,16 @@ Cron example (run at 3am daily):
     0 3 * * * /usr/bin/python3 /home/runner/workspace/pipeline/08_cron_incremental.py >> /var/log/collbar_cron.log 2>&1
 """
 import argparse
+import hashlib
 import html
 import logging
 import re
 import sys
 import time
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 import common
@@ -64,13 +71,54 @@ def parse_cba_records(raw_html: str) -> list:
     return records
 
 
-def get_known_urls(conn) -> set:
-    """Return all source_urls already in source_documents for cba_pdf doc type."""
+def get_known_docs(conn) -> dict:
+    """Return {url: {file_hash, retrieved_at}} for the latest cba_pdf row per URL."""
     cur = conn.cursor()
-    cur.execute("SELECT source_url FROM source_documents WHERE doc_type = 'cba_pdf'")
+    cur.execute("""
+        SELECT DISTINCT ON (source_url) source_url, file_hash, retrieved_at
+        FROM source_documents
+        WHERE doc_type = 'cba_pdf'
+        ORDER BY source_url, retrieved_at DESC
+    """)
     rows = cur.fetchall()
     cur.close()
-    return {r[0] for r in rows}
+    return {r[0]: {"file_hash": r[1], "retrieved_at": r[2]} for r in rows}
+
+
+def head_maybe_changed(session, url: str, retrieved_at) -> bool:
+    """
+    Issue a HEAD request and return True if Last-Modified > retrieved_at.
+    Returns False if no Last-Modified header is present (conservative).
+    """
+    try:
+        r = session.head(url, headers=common.HEADERS, timeout=20)
+        lm_header = r.headers.get("Last-Modified")
+        if not lm_header:
+            return False
+        last_modified = parsedate_to_datetime(lm_header)
+        if last_modified.tzinfo is None:
+            last_modified = last_modified.replace(tzinfo=timezone.utc)
+        if retrieved_at is None:
+            return True
+        if retrieved_at.tzinfo is None:
+            retrieved_at = retrieved_at.replace(tzinfo=timezone.utc)
+        return last_modified > retrieved_at
+    except Exception as e:
+        log.warning("HEAD failed for %s: %s", url, e)
+        return False
+
+
+def fetch_file_hash(session, url: str) -> Optional[str]:
+    """Fetch a PDF and return its SHA-256 hex digest, or None on error."""
+    try:
+        r = session.get(url, headers=common.HEADERS, timeout=90)
+        if r.status_code != 200:
+            log.warning("GET %s returned HTTP %s", url, r.status_code)
+            return None
+        return hashlib.sha256(r.content).hexdigest()
+    except Exception as e:
+        log.warning("Failed to fetch %s: %s", url, e)
+        return None
 
 
 def alert_already_pending(cur, source_url: str, alert_type: str) -> bool:
@@ -96,6 +144,88 @@ def insert_alert(cur, district_id, doc_name: str, source_url: str,
         (district_id, alert_type, doc_name, source_url),
     )
     return True
+
+
+def check_changed_docs(session, conn, records: list, known_docs: dict,
+                       dist_index: dict, dry_run: bool = False) -> int:
+    """
+    For each catalog record whose URL is already in the DB, check whether
+    the file content has changed via HEAD + hash comparison.
+
+    Returns the number of changed_doc alerts inserted (or that would be).
+    """
+    existing = [r for r in records if r["url"] in known_docs]
+    log.info("Checking %d existing URLs for content changes (HEAD first)…", len(existing))
+
+    changed_alerts = 0
+    cur = conn.cursor()
+
+    for doc in existing:
+        url = doc["url"]
+        entry = known_docs[url]
+        retrieved_at = entry["retrieved_at"]
+        known_hash = entry["file_hash"]
+
+        # Step 1: HEAD to see if the server reports a modification
+        maybe_changed = head_maybe_changed(session, url, retrieved_at)
+        time.sleep(common.POLITE_DELAY)
+
+        if not maybe_changed:
+            continue  # Conservative: skip full download when no signal
+
+        log.info("Possible change detected for %s — fetching for hash check…", url)
+
+        # Step 2: Full GET + hash comparison
+        new_hash = fetch_file_hash(session, url)
+        time.sleep(common.POLITE_DELAY)
+
+        if new_hash is None:
+            log.warning("Could not fetch %s — skipping", url)
+            continue
+
+        if new_hash == known_hash:
+            log.debug("Hash unchanged for %s (Last-Modified may be stale)", url)
+            continue
+
+        log.info(
+            "Content CHANGED: %s (old=%.8s… new=%.8s…)",
+            url, known_hash or "None", new_hash
+        )
+
+        employer = doc.get("employer", "")
+        doc_name = employer or url.split("/")[-1]
+
+        district_id = None
+        if employer:
+            district_id, status, _ = common.match_employer(employer, dist_index)
+            if status != "auto":
+                district_id = None
+
+        if dry_run:
+            log.info("[DRY RUN] Would insert changed_doc alert for %s", doc_name)
+            changed_alerts += 1
+            continue
+
+        # Insert new source_documents row for the updated file
+        cur.execute(
+            """
+            INSERT INTO source_documents
+                (district_id, doc_type, source_url, file_hash, retrieved_at)
+            VALUES (%s, 'cba_pdf', %s, %s, NOW())
+            ON CONFLICT (source_url, file_hash) DO NOTHING
+            """,
+            (district_id, url, new_hash),
+        )
+
+        ok = insert_alert(cur, district_id, doc_name, url, "changed_doc")
+        if ok:
+            changed_alerts += 1
+            log.info("changed_doc alert inserted: %s", doc_name)
+
+    if not dry_run:
+        conn.commit()
+    cur.close()
+    return changed_alerts
 
 
 def main():
@@ -133,16 +263,18 @@ def main():
         sys.exit(0)
 
     conn = common.get_db_conn()
-    known_urls = get_known_urls(conn)
+    known_docs = get_known_docs(conn)
+    known_urls = set(known_docs.keys())
     log.info("Found %d known CBA URLs in database", len(known_urls))
 
     dist_index = common.build_district_index(conn)
 
+    # ── Phase A: new documents ─────────────────────────────────────────────
     new_docs = [rec for rec in records if rec["url"] not in known_urls]
     log.info("New documents detected: %d", len(new_docs))
 
-    inserted = 0
-    skipped_dupes = 0
+    new_inserted = 0
+    new_skipped_dupes = 0
 
     if new_docs and not args.dry_run:
         cur = conn.cursor()
@@ -164,22 +296,28 @@ def main():
 
             ok = insert_alert(cur, district_id, doc_name, doc["url"], "new_doc")
             if ok:
-                inserted += 1
+                new_inserted += 1
                 log.info("Alert inserted: %s", doc_name)
             else:
-                skipped_dupes += 1
+                new_skipped_dupes += 1
 
         conn.commit()
         cur.close()
-        log.info("Inserted %d new alerts (%d skipped — already pending)", inserted, skipped_dupes)
+        log.info("Inserted %d new alerts (%d skipped — already pending)",
+                 new_inserted, new_skipped_dupes)
 
     elif new_docs and args.dry_run:
-        log.info("[DRY RUN] Would insert up to %d alerts:", len(new_docs))
+        log.info("[DRY RUN] Would insert up to %d new_doc alerts:", len(new_docs))
         for doc in new_docs[:10]:
             log.info("  - %s: %s", doc.get("employer", "?"), doc["url"])
         if len(new_docs) > 10:
             log.info("  … and %d more", len(new_docs) - 10)
-        inserted = len(new_docs)
+        new_inserted = len(new_docs)
+
+    # ── Phase B: changed documents ─────────────────────────────────────────
+    changed_alerts = check_changed_docs(
+        session, conn, records, known_docs, dist_index, dry_run=args.dry_run
+    )
 
     conn.close()
 
@@ -190,9 +328,11 @@ def main():
     print(f"  Catalog records found   : {len(records):>8,}")
     print(f"  Known URLs in DB        : {len(known_urls):>8,}")
     print(f"  New documents detected  : {len(new_docs):>8,}")
+    print(f"  Changed documents found : {changed_alerts:>8,}")
     if not args.dry_run:
-        print(f"  Alerts inserted         : {inserted:>8,}")
-        print(f"  Alerts skipped (dupe)   : {skipped_dupes:>8,}")
+        print(f"  New alerts inserted     : {new_inserted:>8,}")
+        print(f"  New alerts skipped(dup) : {new_skipped_dupes:>8,}")
+        print(f"  Changed alerts inserted : {changed_alerts:>8,}")
     else:
         print("  [DRY RUN — no DB writes]")
     print("=" * 60)
