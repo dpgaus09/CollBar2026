@@ -1,0 +1,17 @@
+{
+  "districts_loaded": 606,
+  "cba_docs_found": 0,
+  "cba_docs_downloaded": 0,
+  "cba_docs_skipped": 0,
+  "cba_docs_failed": 0,
+  "cba_district_matched": 0,
+  "cba_district_unmatched": 0,
+  "ff_proposals_loaded": 0,
+  "ff_page_accessible": false,
+  "wage_settlement_downloaded": 0,
+  "wage_settlement_failed_urls": [],
+  "last_updated": "2026-06-11T01:44:45Z",
+  "downloaded_urls": {},
+  "manual_review": [],
+  "unmatched_employers": []
+}
