@@ -628,16 +628,19 @@ export default function DistrictDashboardPage() {
                   <div>
                     {comp.length > 0 && (
                       <div className="space-y-0">
-                        <ProvenanceRow {...provRow(getVal(comp, "ba_min_salary"), "BA Min Salary", "$")} />
-                        <ProvenanceRow {...provRow(getVal(comp, "ma_min_salary"), "MA Min Salary", "$")} />
+                        <ProvenanceRow {...provRow(getVal(comp, "ba_min_salary"), "BA Min", "$")} />
+                        <ProvenanceRow {...provRow(getVal(comp, "ba_max_salary"), "BA Max", "$")} />
+                        <ProvenanceRow {...provRow(getVal(comp, "ma_min_salary"), "MA Min", "$")} />
+                        <ProvenanceRow {...provRow(getVal(comp, "ma_max_salary"), "MA Max", "$")} />
+                        <ProvenanceRow {...provRow(getVal(comp, "salary_steps"), "Steps")} />
                         <ProvenanceRow {...provRow(getVal(comp, "base_salary_increase_yr1"), "Yr 1 Increase", "%")} />
                         <ProvenanceRow {...provRow(getVal(comp, "base_salary_increase_yr2"), "Yr 2 Increase", "%")} />
                         <ProvenanceRow {...provRow(getVal(comp, "base_salary_increase_yr3"), "Yr 3 Increase", "%")} />
                         {comp
                           .filter(
                             (p) =>
-                              !["ba_min_salary", "ma_min_salary",
-                                "base_salary_increase_yr1", "base_salary_increase_yr2",
+                              !["ba_min_salary", "ba_max_salary", "ma_min_salary", "ma_max_salary",
+                                "salary_steps", "base_salary_increase_yr1", "base_salary_increase_yr2",
                                 "base_salary_increase_yr3"].includes(p.provision_key),
                           )
                           .slice(0, 2)

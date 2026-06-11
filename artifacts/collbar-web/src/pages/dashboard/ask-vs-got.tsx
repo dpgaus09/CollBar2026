@@ -167,7 +167,11 @@ export default function AskVsGotPage() {
                   <tr key={p.id} className="bg-slate-950 hover:bg-slate-900/50">
                     <td className="px-3 py-2.5 text-slate-400 font-mono">{p.case_number ?? "—"}</td>
                     <td className="px-3 py-2.5 text-slate-400">{p.year_covered ?? p.report_date?.slice(0, 4) ?? "—"}</td>
-                    <td className="px-3 py-2.5 text-slate-300">{p.union_name ?? "—"}</td>
+                    <td className="px-3 py-2.5">
+                      {p.union_name
+                        ? <span className="text-slate-300">{p.union_name}</span>
+                        : <span className="text-slate-600 italic text-xs">Not yet extracted</span>}
+                    </td>
                     <td className="px-3 py-2.5">
                       <ProvenanceValue
                         value={p.employer_proposal_pct != null ? parseFloat(p.employer_proposal_pct) : null}

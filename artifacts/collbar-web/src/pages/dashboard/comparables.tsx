@@ -244,7 +244,11 @@ export default function ComparablesPage() {
                       <td className="px-3 py-2.5">
                         <ProvenanceValue value={item.year3_pct != null ? parseFloat(item.year3_pct) : null} unit="%" humanVerified={item.human_verified} confidence={item.confidence} sourceUrl={item.source_url} retrievedAt={item.retrieved_at} />
                       </td>
-                      <td className="px-3 py-2.5 text-slate-500">{item.method ?? "—"}</td>
+                      <td className="px-3 py-2.5">
+                        {item.method
+                          ? <span className="text-slate-500">{item.method}</span>
+                          : <span className="text-slate-600 italic text-xs">Not yet extracted</span>}
+                      </td>
                     </tr>
                   ))
                 )}
