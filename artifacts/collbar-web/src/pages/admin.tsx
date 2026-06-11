@@ -112,6 +112,21 @@ function apiUrl(path: string) {
   return `${import.meta.env.BASE_URL}${path.replace(/^\//, "")}`;
 }
 
+function LoginRequiredCard({ onLogin }: { onLogin: () => void }) {
+  return (
+    <div className="rounded-lg border border-amber-800/60 bg-amber-950/10 p-10 text-center space-y-3">
+      <p className="text-amber-300 text-sm font-medium">Admin login required</p>
+      <p className="text-slate-500 text-xs">Sign in with your ADMIN_TOKEN to view this data.</p>
+      <button
+        onClick={onLogin}
+        className="text-xs px-4 py-2 rounded bg-amber-800 hover:bg-amber-700 text-amber-100 transition-colors"
+      >
+        Log in
+      </button>
+    </div>
+  );
+}
+
 /** Build a page-anchored PDF URL when page_ref is known. */
 function pdfPageUrl(sourceUrl: string | null, pageRef: number | null): string | null {
   if (!sourceUrl) return null;
@@ -147,6 +162,7 @@ function useCrawlReport() {
         return r.json();
       }),
     refetchInterval: 20_000,
+    retry: false,
   });
 }
 
@@ -159,6 +175,7 @@ function useExtractionReport() {
         return r.json();
       }),
     refetchInterval: 30_000,
+    retry: false,
   });
 }
 
@@ -175,6 +192,7 @@ function useReviewQueue(page: number, category: string) {
         },
       );
     },
+    retry: false,
   });
 }
 
@@ -433,7 +451,22 @@ function OverviewTab() {
 // ---------------------------------------------------------------------------
 
 function CrawlReportTab() {
+  const [showLogin, setShowLogin] = useState(false);
+  const { data: session, refetch: refetchSession } = useAdminSession();
   const { data, isLoading, isError, refetch } = useCrawlReport();
+
+  if (!session?.authenticated) {
+    return (
+      <>
+        {showLogin && (
+          <AdminLoginModal
+            onSuccess={() => { setShowLogin(false); refetchSession(); refetch(); }}
+          />
+        )}
+        <LoginRequiredCard onLogin={() => setShowLogin(true)} />
+      </>
+    );
+  }
 
   if (isLoading) {
     return (
@@ -446,7 +479,7 @@ function CrawlReportTab() {
   if (isError || !data) {
     return (
       <div className="rounded-lg border border-red-800 bg-red-950/30 p-6 text-red-400 text-sm">
-        Failed to load crawl report. Make sure the API server is running.
+        Failed to load crawl report. Make sure the API server is running and try refreshing.
       </div>
     );
   }
@@ -605,7 +638,22 @@ function CrawlReportTab() {
 // ---------------------------------------------------------------------------
 
 function ExtractionReportTab() {
+  const [showLogin, setShowLogin] = useState(false);
+  const { data: session, refetch: refetchSession } = useAdminSession();
   const { data, isLoading, isError, refetch } = useExtractionReport();
+
+  if (!session?.authenticated) {
+    return (
+      <>
+        {showLogin && (
+          <AdminLoginModal
+            onSuccess={() => { setShowLogin(false); refetchSession(); refetch(); }}
+          />
+        )}
+        <LoginRequiredCard onLogin={() => setShowLogin(true)} />
+      </>
+    );
+  }
 
   if (isLoading) {
     return (
@@ -618,7 +666,7 @@ function ExtractionReportTab() {
   if (isError || !data) {
     return (
       <div className="rounded-lg border border-red-800 bg-red-950/30 p-6 text-red-400 text-sm">
-        Failed to load extraction report.
+        Failed to load extraction report. Make sure the API server is running and try refreshing.
       </div>
     );
   }
@@ -919,9 +967,9 @@ function ReviewQueueTab() {
         </div>
       )}
 
-      {isError && (
+      {isError && session?.authenticated && (
         <div className="rounded-lg border border-red-800 bg-red-950/30 p-6 text-red-400 text-sm">
-          Failed to load review queue.
+          Failed to load review queue. Try refreshing.
         </div>
       )}
 
@@ -1122,6 +1170,7 @@ function useAlerts(page: number, status: string) {
       );
     },
     refetchInterval: 30_000,
+    retry: false,
   });
 }
 
@@ -1231,9 +1280,9 @@ function AlertsTab() {
         </div>
       )}
 
-      {isError && (
+      {isError && session?.authenticated && (
         <div className="rounded-lg border border-red-800 bg-red-950/30 p-6 text-red-400 text-sm">
-          Failed to load alerts. Make sure you are signed in.
+          Failed to load alerts. Try refreshing.
         </div>
       )}
 
@@ -1344,6 +1393,7 @@ function useAlertsPendingCount() {
         .then((r) => (r.ok ? r.json() : { pendingCount: 0 }))
         .then((d: AlertsResponse) => ({ pendingCount: d.pendingCount ?? 0 })),
     refetchInterval: 60_000,
+    retry: false,
   });
 }
 
