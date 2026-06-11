@@ -202,13 +202,16 @@ router.get("/auth/verify", async (req: Request, res: Response) => {
       return;
     }
 
-    req.session.userId = user.id;
-    req.session.userRole = user.role as "admin" | "district_user";
-    // Normalize to Number: postgres bigint comes back as string from node-postgres
-    req.session.userDistrictId = user.district_id != null ? Number(user.district_id) : null;
-    req.session.userEmail = user.email;
-
-    res.json({ ok: true, role: user.role, districtId: user.district_id });
+    // Regenerate session ID to mitigate session fixation attacks
+    req.session.regenerate((err) => {
+      if (err) { res.status(500).json({ error: "Session error" }); return; }
+      req.session.userId = user!.id;
+      req.session.userRole = user!.role as "admin" | "district_user";
+      // Normalize to Number: postgres bigint comes back as string from node-postgres
+      req.session.userDistrictId = user!.district_id != null ? Number(user!.district_id) : null;
+      req.session.userEmail = user!.email;
+      res.json({ ok: true, role: user!.role, districtId: user!.district_id });
+    });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

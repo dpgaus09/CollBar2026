@@ -20,6 +20,10 @@ if (isProd && !sessionSecret) {
 
 const app: Express = express();
 
+// Trust the first proxy (Replit's TLS terminator) so that secure session
+// cookies are issued correctly over HTTPS in production.
+app.set("trust proxy", 1);
+
 app.use(
   pinoHttp({
     logger,
