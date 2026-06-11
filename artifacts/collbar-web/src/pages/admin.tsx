@@ -110,6 +110,16 @@ function apiUrl(path: string) {
   return `${import.meta.env.BASE_URL}${path.replace(/^\//, "")}`;
 }
 
+/** Admin token sent as X-Admin-Token header on mutation requests.
+ *  Set VITE_ADMIN_TOKEN in the environment to enable in production. */
+const ADMIN_TOKEN: string = (import.meta.env.VITE_ADMIN_TOKEN as string) ?? "";
+
+function adminHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...extra };
+  if (ADMIN_TOKEN) headers["X-Admin-Token"] = ADMIN_TOKEN;
+  return headers;
+}
+
 // ---------------------------------------------------------------------------
 // Data hooks
 // ---------------------------------------------------------------------------
@@ -662,7 +672,7 @@ function ReviewQueueTab() {
     }) => {
       const r = await fetch(apiUrl(`/api/admin/review-queue/${id}`), {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: adminHeaders(),
         body: JSON.stringify({ action, correctedValue }),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);

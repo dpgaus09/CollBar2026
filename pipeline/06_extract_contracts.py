@@ -65,6 +65,8 @@ if PYDANTIC_OK:
         @field_validator("clause_excerpt")
         @classmethod
         def truncate_excerpt(cls, v: str) -> str:
+            if not v or not v.strip():
+                raise ValueError("clause_excerpt must not be empty — include verbatim text from the contract")
             words = v.split()
             return " ".join(words[:80]) if len(words) > 80 else v
 
@@ -360,6 +362,14 @@ def upsert_contract(cur, district_id, c: "ContractData", source_doc_id: int) -> 
 def insert_provisions(cur, contract_id: int, provisions) -> int:
     inserted = 0
     for p in provisions:
+        page_ref = _n(p, "page_ref")
+        pkey = _s(p, "provision_key") or "?"
+        if page_ref is None:
+            log.debug(
+                "provision '%s' for contract %d has no page_ref — "
+                "provenance is partial (clause_excerpt still required)",
+                pkey, contract_id,
+            )
         try:
             cur.execute(
                 """
@@ -371,12 +381,12 @@ def insert_provisions(cur, contract_id: int, provisions) -> int:
                 (
                     contract_id,
                     _s(p, "category") or "other",
-                    _s(p, "provision_key"),
+                    pkey,
                     _n(p, "value_numeric"),
                     _s(p, "value_text"),
                     _s(p, "unit"),
                     _s(p, "clause_excerpt"),
-                    _n(p, "page_ref"),
+                    page_ref,
                     _n(p, "confidence", default=0.5),
                 ),
             )
@@ -493,9 +503,10 @@ def derive_settlements(conn):
         )
         contracts = cur.fetchall()  # [(id, eff_start, eff_end, term_years)]
 
-        # Track BA-min from previous contract for delta calculation
+        # State carried across consecutive contract iterations
         prev_ba_min: Optional[float] = None
         prev_ba_conf: float = 0.5
+        prev_eff_end: Optional[str] = None   # effective_end of the prior contract
 
         for i, (contract_id, eff_start, eff_end, term_years) in enumerate(contracts):
             prov = _get_contract_provisions(cur, contract_id)
@@ -506,25 +517,46 @@ def derive_settlements(conn):
             yr3_val = prov.get("base_salary_increase_yr3", {}).get("val")
             off_sched = prov.get("off_schedule_bonus_yr1", {}).get("val")
 
+            # Determine whether this contract is temporally adjacent to the prior one.
+            # Adjacent means the gap between prev_eff_end (or prev_eff_start) and this
+            # contract's eff_start is ≤ 2 years (730 days).  Non-adjacent pairs cannot
+            # use BA-min delta because the salary change may span an intervening contract.
+            is_adjacent = False
+            if i > 0 and eff_start and prev_eff_end:
+                try:
+                    from datetime import date as _date
+                    d_start = _date.fromisoformat(eff_start)
+                    d_prev_end = _date.fromisoformat(prev_eff_end)
+                    gap_days = (d_start - d_prev_end).days
+                    is_adjacent = abs(gap_days) <= 730  # within 2 years
+                except (ValueError, TypeError):
+                    is_adjacent = False
+
             base_pct: Optional[float] = None
             method: Optional[str] = None
             confidence: float = 0.5
 
             if yr1:
-                # Stated percentage increases found in this contract
+                # Stated percentage increases found in this contract → cba_diff
                 base_pct = yr1["val"]
                 method = "cba_diff"
                 confidence = yr1["conf"]
-            elif i > 0 and prev_ba_min is not None and ba_min is not None and prev_ba_min > 0:
-                # No stated %; compute implied increase from consecutive BA-min values
+            elif is_adjacent and prev_ba_min is not None and ba_min is not None and prev_ba_min > 0:
+                # No stated %s but contracts are adjacent → compute BA-min delta
                 base_pct = round((ba_min - prev_ba_min) / prev_ba_min * 100, 2)
                 method = "ba_min_delta"
-                confidence = round((prov.get("ba_min_salary", {}).get("conf", 0.6) + prev_ba_conf) / 2, 2)
+                confidence = round(
+                    (prov.get("ba_min_salary", {}).get("conf", 0.6) + prev_ba_conf) / 2, 2
+                )
 
-            # Update prev_ba_min for the next iteration regardless
+            # Update state for the next iteration
             if ba_min is not None:
                 prev_ba_min = ba_min
                 prev_ba_conf = prov.get("ba_min_salary", {}).get("conf", 0.6)
+            else:
+                # No BA-min for this contract — reset so next contract can't use stale value
+                prev_ba_min = None
+            prev_eff_end = eff_end or eff_start  # fall back to start if no end date
 
             # Skip if we couldn't determine a wage change
             if method is None or base_pct is None:
