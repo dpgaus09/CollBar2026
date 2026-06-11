@@ -7,3 +7,5 @@ export * from "./factfinding_proposals";
 export * from "./extraction_runs";
 export * from "./users";
 export * from "./benchmarks";
+export * from "./alerts";
+export * from "./cdss_staging";

@@ -5,6 +5,8 @@ import {
   text,
   date,
   numeric,
+  integer,
+  boolean,
   varchar,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
@@ -33,6 +35,9 @@ export const factfindingProposalsTable = pgTable("factfinding_proposals", {
   sourceDocId: bigint("source_doc_id", { mode: "bigint" }).references(
     () => sourceDocumentsTable.id,
   ),
+  pageRef: integer("page_ref"),
+  humanVerified: boolean("human_verified").notNull().default(false),
+  confidence: numeric("confidence", { precision: 3, scale: 2 }),
 });
 
 export const insertFactfindingProposalSchema = createInsertSchema(

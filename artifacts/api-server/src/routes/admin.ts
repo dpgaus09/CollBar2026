@@ -7,6 +7,7 @@ import { sql } from "drizzle-orm";
 declare module "express-session" {
   interface SessionData {
     adminAuthenticated?: boolean;
+    userId?: number;
   }
 }
 
@@ -29,6 +30,8 @@ const TABLES = [
   "contracts",
   "contract_provisions",
   "settlements",
+  "alerts",
+  "cdss_staging",
 ];
 
 /** Valid provision categories as defined by the DB check constraint. */
@@ -63,6 +66,15 @@ function requireAdminToken(req: Request, res: Response, next: NextFunction): voi
     return;
   }
   res.status(401).json({ error: "Unauthorized: admin login required" });
+}
+
+/** Requires either a magic-link session (any user) or an admin token session. */
+function requireSession(req: Request, res: Response, next: NextFunction): void {
+  if (req.session.userId || req.session.adminAuthenticated) {
+    next();
+    return;
+  }
+  res.status(401).json({ error: "Authentication required" });
 }
 
 // ---------------------------------------------------------------------------
@@ -106,7 +118,7 @@ router.post("/admin/logout", (req, res) => {
 // ---------------------------------------------------------------------------
 // GET /admin/crawl-report
 // ---------------------------------------------------------------------------
-router.get("/admin/crawl-report", async (_req, res) => {
+router.get("/admin/crawl-report", requireSession, async (_req, res) => {
   let crawlState: Record<string, unknown> = {};
   if (existsSync(CRAWL_STATE_PATH)) {
     try {
@@ -155,7 +167,7 @@ router.get("/admin/crawl-report", async (_req, res) => {
 // ---------------------------------------------------------------------------
 // GET /admin/extraction-report
 // ---------------------------------------------------------------------------
-router.get("/admin/extraction-report", async (_req, res) => {
+router.get("/admin/extraction-report", requireSession, async (_req, res) => {
   try {
     const runRows = await db.execute(
       sql.raw(`SELECT status, COUNT(*)::int AS n FROM extraction_runs GROUP BY status`),
@@ -230,7 +242,7 @@ router.get("/admin/extraction-report", async (_req, res) => {
 // ---------------------------------------------------------------------------
 // GET /admin/review-queue
 // ---------------------------------------------------------------------------
-router.get("/admin/review-queue", async (req, res) => {
+router.get("/admin/review-queue", requireSession, async (req, res) => {
   const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10));
   const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10)));
   const offset = (page - 1) * limit;
@@ -322,6 +334,99 @@ router.get("/admin/review-queue", async (req, res) => {
     res.status(500).json({ error: String(err) });
   }
 });
+
+// ---------------------------------------------------------------------------
+// GET /admin/alerts — paginated list of alerts by status
+// ---------------------------------------------------------------------------
+router.get("/admin/alerts", requireSession, async (req, res) => {
+  const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10));
+  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10)));
+  const offset = (page - 1) * limit;
+  const rawStatus = String(req.query.status ?? "pending");
+  const status = rawStatus === "acknowledged" ? "acknowledged" : "pending";
+
+  try {
+    const rows = await db.execute(sql`
+      SELECT
+        a.id,
+        a.alert_type,
+        a.doc_name,
+        a.source_url,
+        a.detected_at,
+        a.status,
+        a.acknowledged_at,
+        a.acknowledged_by,
+        a.notes,
+        d.name AS district_name
+      FROM alerts a
+      LEFT JOIN districts d ON a.district_id = d.id
+      WHERE a.status = ${status}
+      ORDER BY a.detected_at DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `);
+
+    const countRows = await db.execute(
+      sql`SELECT COUNT(*)::int AS n FROM alerts WHERE status = ${status}`,
+    );
+    const total = (countRows.rows[0] as { n: number })?.n ?? 0;
+
+    const pendingRows = await db.execute(
+      sql`SELECT COUNT(*)::int AS n FROM alerts WHERE status = 'pending'`,
+    );
+    const pendingCount = (pendingRows.rows[0] as { n: number })?.n ?? 0;
+
+    res.json({
+      items: rows.rows,
+      total,
+      page,
+      limit,
+      pages: Math.ceil(total / limit),
+      pendingCount,
+    });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /admin/alerts/:id/acknowledge
+// Protected by requireAdminToken — only admin-token holders may acknowledge.
+// ---------------------------------------------------------------------------
+router.post(
+  "/admin/alerts/:id/acknowledge",
+  requireAdminToken,
+  async (req, res) => {
+    const id = parseInt(String(req.params.id), 10);
+    if (isNaN(id) || id < 1) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+
+    const { notes, acknowledgedBy } = req.body as {
+      notes?: string;
+      acknowledgedBy?: string;
+    };
+
+    try {
+      const result = await db.execute(sql`
+        UPDATE alerts
+        SET status           = 'acknowledged',
+            acknowledged_at  = NOW(),
+            acknowledged_by  = ${acknowledgedBy ?? null},
+            notes            = ${notes ?? null}
+        WHERE id = ${id} AND status = 'pending'
+      `);
+      const affected = (result as unknown as { rowCount?: number }).rowCount ?? 0;
+      if (affected === 0) {
+        res.status(404).json({ error: "Alert not found or already acknowledged" });
+        return;
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  },
+);
 
 // ---------------------------------------------------------------------------
 // PATCH /admin/review-queue/:id

@@ -2,3 +2,5 @@
 - [SERB district name normalization](serb-district-normalization.md) — strip only terminal words ("schools", "school district"); keep type qualifiers (city, local, exempted village) in name; expand "Co/" abbreviation.
 - [Drizzle dynamic SQL WHERE clauses](drizzle-dynamic-where.md) — use `sql.join()` + condition array; never use `$n IS NULL OR x = $n` pattern with optional params.
 - [CollBar auth: custom magic-link on Express](collbar-auth-pattern.md) — collbar-web is Vite/React (not Next.js); magic-link tokens in memory Map (15min expiry); dev mode returns link in response body; admin seeded on startup.
+- [Drizzle schema sync with raw ALTER TABLE](drizzle-schema-sync.md) — columns added via raw SQL must be backfilled into the .ts schema before next push or Drizzle stages a destructive drop.
+- [CollBar DB actual column names](collbar-test-column-names.md) — districts uses `state_district_id` (not `irn`); benchmarks has `doc_year`/`wage_schedule` (not `metric_key`/`metric_value`).

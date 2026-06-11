@@ -4,6 +4,7 @@ import {
   bigint,
   varchar,
   numeric,
+  integer,
   boolean,
   text,
   unique,
@@ -34,6 +35,7 @@ export const settlementsTable = pgTable(
     confidence: numeric("confidence", { precision: 3, scale: 2 }),
     humanVerified: boolean("human_verified").default(false),
     notes: text("notes"),
+    pageRef: integer("page_ref"),
   },
   (t) => [unique().on(t.districtId, t.fromYear, t.toYear)],
 );

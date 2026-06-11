@@ -12,6 +12,8 @@ const DB_TABLES = [
   "contract_provisions",
   "settlements",
   "users",
+  "alerts",
+  "cdss_staging",
 ] as const;
 
 interface CrawlReport {
@@ -1005,16 +1007,280 @@ function ReviewQueueTab() {
 // Page shell with tab routing
 // ---------------------------------------------------------------------------
 
-type TabKey = "overview" | "crawl-report" | "extraction-report" | "review-queue";
+// ---------------------------------------------------------------------------
+// Alerts Tab
+// ---------------------------------------------------------------------------
+
+interface AlertItem {
+  id: number;
+  alert_type: string;
+  doc_name: string | null;
+  source_url: string | null;
+  detected_at: string;
+  status: string;
+  acknowledged_at: string | null;
+  acknowledged_by: string | null;
+  notes: string | null;
+  district_name: string | null;
+}
+
+interface AlertsResponse {
+  items: AlertItem[];
+  total: number;
+  page: number;
+  limit: number;
+  pages: number;
+  pendingCount: number;
+}
+
+function useAlerts(page: number, status: string) {
+  return useQuery<AlertsResponse>({
+    queryKey: ["/api/admin/alerts", page, status],
+    queryFn: () => {
+      const params = new URLSearchParams({ page: String(page), limit: "50", status });
+      return fetch(apiUrl(`/api/admin/alerts?${params}`), { credentials: "include" }).then(
+        (r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        },
+      );
+    },
+    refetchInterval: 30_000,
+  });
+}
+
+function AlertTypeBadge({ type }: { type: string }) {
+  const styles: Record<string, string> = {
+    new_doc: "bg-blue-950 text-blue-400 border-blue-800",
+    changed_doc: "bg-amber-950 text-amber-400 border-amber-800",
+    new_settlement: "bg-emerald-950 text-emerald-400 border-emerald-800",
+  };
+  const labels: Record<string, string> = {
+    new_doc: "New doc",
+    changed_doc: "Changed",
+    new_settlement: "Settlement",
+  };
+  const cls = styles[type] ?? "bg-slate-900 text-slate-400 border-slate-700";
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${cls}`}>
+      {labels[type] ?? type}
+    </span>
+  );
+}
+
+function AlertsTab() {
+  const queryClient = useQueryClient();
+  const [page, setPage] = useState(1);
+  const [statusFilter, setStatusFilter] = useState("pending");
+  const [showLogin, setShowLogin] = useState(false);
+  const [ackId, setAckId] = useState<number | null>(null);
+
+  const { data: session, refetch: refetchSession } = useAdminSession();
+  const { data, isLoading, isError, refetch } = useAlerts(page, statusFilter);
+
+  const ackMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const r = await fetch(apiUrl(`/api/admin/alerts/${id}/acknowledge`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({}),
+      });
+      if (r.status === 401) { setShowLogin(true); throw new Error("401"); }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/alerts"] });
+      setAckId(null);
+    },
+  });
+
+  const acknowledge = (id: number) => {
+    if (!session?.authenticated) { setShowLogin(true); return; }
+    setAckId(id);
+    ackMutation.mutate(id);
+  };
+
+  return (
+    <div className="space-y-6">
+      {showLogin && (
+        <AdminLoginModal
+          onSuccess={() => { setShowLogin(false); refetchSession(); }}
+        />
+      )}
+
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <label className="text-xs text-slate-400">Status</label>
+          <select
+            value={statusFilter}
+            onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}
+            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-300 focus:outline-none focus:border-blue-500"
+          >
+            <option value="pending">Pending</option>
+            <option value="acknowledged">Acknowledged</option>
+          </select>
+          {data && statusFilter === "pending" && data.pendingCount > 0 && (
+            <span className="text-xs text-amber-400 font-mono">
+              {data.pendingCount} pending
+            </span>
+          )}
+        </div>
+        <button
+          onClick={() => refetch()}
+          className="text-xs text-slate-500 hover:text-slate-300 px-3 py-1 rounded border border-slate-700 hover:border-slate-500 transition-colors"
+        >
+          ↻ Refresh
+        </button>
+      </div>
+
+      {!session?.authenticated && (
+        <div className="flex items-center justify-between rounded-lg border border-amber-800 bg-amber-950/20 px-4 py-3">
+          <span className="text-xs text-amber-400">
+            Admin session required to acknowledge alerts.
+          </span>
+          <button
+            onClick={() => setShowLogin(true)}
+            className="text-xs px-3 py-1 rounded bg-amber-800 hover:bg-amber-700 text-amber-100 transition-colors"
+          >
+            Log in
+          </button>
+        </div>
+      )}
+
+      {isLoading && (
+        <div className="flex items-center justify-center py-20 text-slate-500 text-sm animate-pulse">
+          Loading alerts…
+        </div>
+      )}
+
+      {isError && (
+        <div className="rounded-lg border border-red-800 bg-red-950/30 p-6 text-red-400 text-sm">
+          Failed to load alerts. Make sure you are signed in.
+        </div>
+      )}
+
+      {data?.items.length === 0 && !isLoading && (
+        <div className="rounded-lg border border-emerald-800 bg-emerald-950/20 p-8 text-center">
+          <p className="text-emerald-400 text-sm font-medium">
+            {statusFilter === "pending" ? "No pending alerts ✓" : "No acknowledged alerts"}
+          </p>
+          <p className="text-slate-500 text-xs mt-1">
+            {statusFilter === "pending"
+              ? "Run the nightly cron (pipeline/08_cron_incremental.py) to detect new SERB documents."
+              : "Acknowledged alerts will appear here."}
+          </p>
+        </div>
+      )}
+
+      {data && data.items.length > 0 && (
+        <div className="space-y-2">
+          {data.items.map((alert) => (
+            <div
+              key={alert.id}
+              className="rounded-lg border border-slate-800 bg-slate-900 overflow-hidden"
+            >
+              <div className="flex items-start justify-between px-4 py-3 gap-3">
+                <div className="flex flex-col gap-1.5 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <AlertTypeBadge type={alert.alert_type} />
+                    {alert.district_name && (
+                      <span className="text-xs text-slate-400 font-mono">
+                        {alert.district_name}
+                      </span>
+                    )}
+                    <span className="text-xs text-slate-600">
+                      {new Date(alert.detected_at).toLocaleString()}
+                    </span>
+                  </div>
+                  {alert.doc_name && (
+                    <p className="text-xs text-slate-300 truncate">{alert.doc_name}</p>
+                  )}
+                  {alert.source_url && (
+                    <a
+                      href={alert.source_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-blue-500 hover:text-blue-400 truncate block"
+                    >
+                      {alert.source_url}
+                    </a>
+                  )}
+                  {alert.acknowledged_at && (
+                    <p className="text-xs text-slate-600">
+                      Acknowledged {new Date(alert.acknowledged_at).toLocaleString()}
+                      {alert.acknowledged_by ? ` by ${alert.acknowledged_by}` : ""}
+                    </p>
+                  )}
+                </div>
+                {statusFilter === "pending" && (
+                  <button
+                    onClick={() => acknowledge(alert.id)}
+                    disabled={ackMutation.isPending && ackId === alert.id}
+                    className="shrink-0 text-xs px-3 py-1.5 rounded border border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-500 disabled:opacity-50 transition-colors"
+                  >
+                    {ackMutation.isPending && ackId === alert.id ? "…" : "Acknowledge"}
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+
+          {data.pages > 1 && (
+            <div className="flex items-center justify-center gap-2 pt-2">
+              <button
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page === 1}
+                className="text-xs px-3 py-1 rounded border border-slate-700 text-slate-400 hover:text-slate-200 disabled:opacity-40"
+              >
+                ← Prev
+              </button>
+              <span className="text-xs text-slate-500">
+                Page {data.page} of {data.pages}
+              </span>
+              <button
+                onClick={() => setPage((p) => Math.min(data.pages, p + 1))}
+                disabled={page === data.pages}
+                className="text-xs px-3 py-1 rounded border border-slate-700 text-slate-400 hover:text-slate-200 disabled:opacity-40"
+              >
+                Next →
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Page shell with tab routing
+// ---------------------------------------------------------------------------
+
+type TabKey = "overview" | "crawl-report" | "extraction-report" | "review-queue" | "alerts";
+
+function useAlertsPendingCount() {
+  return useQuery<{ pendingCount: number }>({
+    queryKey: ["/api/admin/alerts/pending-count"],
+    queryFn: () =>
+      fetch(apiUrl("/api/admin/alerts?limit=1&status=pending"), { credentials: "include" })
+        .then((r) => (r.ok ? r.json() : { pendingCount: 0 }))
+        .then((d: AlertsResponse) => ({ pendingCount: d.pendingCount ?? 0 })),
+    refetchInterval: 60_000,
+  });
+}
 
 const TABS: { key: TabKey; label: string; path: string }[] = [
   { key: "overview", label: "Overview", path: "/admin" },
   { key: "crawl-report", label: "Crawl Report", path: "/admin/crawl-report" },
   { key: "extraction-report", label: "Extraction", path: "/admin/extraction-report" },
   { key: "review-queue", label: "Review Queue", path: "/admin/review-queue" },
+  { key: "alerts", label: "Alerts", path: "/admin/alerts" },
 ];
 
 function activeTab(location: string): TabKey {
+  if (location.includes("/admin/alerts")) return "alerts";
   if (location.includes("review-queue")) return "review-queue";
   if (location.includes("extraction-report")) return "extraction-report";
   if (location.includes("crawl-report")) return "crawl-report";
@@ -1024,6 +1290,8 @@ function activeTab(location: string): TabKey {
 export default function AdminPage() {
   const [location, setLocation] = useLocation();
   const tab = activeTab(location);
+  const { data: alertsData } = useAlertsPendingCount();
+  const pendingAlerts = alertsData?.pendingCount ?? 0;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-mono">
@@ -1036,9 +1304,9 @@ export default function AdminPage() {
           <span className="text-slate-200 font-semibold text-sm">Admin</span>
         </div>
         <div className="flex items-center gap-2 text-xs text-slate-500">
-          <span>Phase 3</span>
+          <span>Phase 5</span>
           <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
-          <span>LLM Extraction</span>
+          <span>Hardening</span>
         </div>
       </header>
 
@@ -1048,13 +1316,18 @@ export default function AdminPage() {
             <button
               key={key}
               onClick={() => setLocation(path)}
-              className={`px-4 py-3 text-xs font-medium border-b-2 transition-colors ${
+              className={`px-4 py-3 text-xs font-medium border-b-2 transition-colors flex items-center gap-1.5 ${
                 tab === key
                   ? "border-blue-500 text-blue-400"
                   : "border-transparent text-slate-500 hover:text-slate-300"
               }`}
             >
               {label}
+              {key === "alerts" && pendingAlerts > 0 && (
+                <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-amber-500 text-slate-950 text-[10px] font-bold">
+                  {pendingAlerts > 9 ? "9+" : pendingAlerts}
+                </span>
+              )}
             </button>
           ))}
         </nav>
@@ -1065,6 +1338,7 @@ export default function AdminPage() {
         {tab === "crawl-report" && <CrawlReportTab />}
         {tab === "extraction-report" && <ExtractionReportTab />}
         {tab === "review-queue" && <ReviewQueueTab />}
+        {tab === "alerts" && <AlertsTab />}
       </main>
     </div>
   );

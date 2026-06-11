@@ -12,6 +12,8 @@ K-12 collective bargaining settlement database and district dashboard — Ohio s
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes to dev database (run after schema changes)
 - `python3 pipeline/seed_test.py` — insert and delete 3 TEST_ districts, print acceptance row-count table
+- `python3 -m unittest discover -s pipeline/tests -p "test_*.py" -v` — run Python test suite (57 tests)
+- `python3 pipeline/08_cron_incremental.py` — run nightly incremental SERB scraper manually
 - Required env secret: `DATABASE_URL` — already provisioned via Replit managed PostgreSQL
 
 ## Stack
@@ -30,10 +32,16 @@ K-12 collective bargaining settlement database and district dashboard — Ohio s
 - `lib/db/src/schema/` — Drizzle table definitions (source of truth for DB schema)
   - `districts.ts`, `source_documents.ts`, `contracts.ts`, `contract_provisions.ts`
   - `settlements.ts`, `factfinding_proposals.ts`, `extraction_runs.ts`, `users.ts`
+  - `alerts.ts`, `cdss_staging.ts` (Phase 5)
 - `lib/api-spec/openapi.yaml` — OpenAPI spec (source of truth for API contracts)
 - `artifacts/api-server/src/routes/` — Express route handlers
+  - `admin.ts` — admin endpoints (crawl/extraction/review/alerts); guarded by `requireSession`
+  - `dashboard.ts` — public district dashboard data
 - `artifacts/collbar-web/src/` — React frontend (pages, components)
+  - `src/pages/admin.tsx` — Admin panel (Crawl, Extraction, Review Queue, DB Stats, Alerts tabs)
 - `pipeline/` — Python data acquisition and extraction scripts
+  - `pipeline/08_cron_incremental.py` — nightly incremental SERB scraper (Phase 5)
+  - `pipeline/tests/` — Python unit + integration tests (57 tests across 4 files)
 - `pipeline/seed_test.py` — Phase 1 acceptance test seed script
 
 ## Architecture decisions
@@ -43,10 +51,22 @@ K-12 collective bargaining settlement database and district dashboard — Ohio s
 - Provenance model: every extracted value traces to `source_doc_id` → `source_documents` → `source_url`, `file_hash`, `retrieved_at`. PDF blobs live in object storage; only metadata+keys in Postgres.
 - LLM extraction confidence: values with `confidence < 0.8` are flagged in `contract_provisions.human_verified = false` and surfaced in admin review queue (Phase 4).
 - Secrets in Replit only: `DATABASE_URL`, `ANTHROPIC_API_KEY` etc. are never in code or logs.
+- HTTP security headers: CSP, HSTS (prod only), X-Frame-Options, nosniff, Referrer-Policy, Permissions-Policy applied in `artifacts/api-server/src/app.ts` (Phase 5).
+- Admin session guard: `requireSession` middleware on all `/admin/*` routes; session established via magic-link + `ADMIN_TOKEN` (Phase 5).
 
 ## Product
 
 CollBar lets school business officials (CFOs/treasurers) see their entire labor landscape in one screen: contract terms, salary benchmarks, comparable-district settlements, and fact-finding history. Admin users can view any district and see the full data pipeline status.
+
+## Phase tracker
+
+| Phase | Name | Status |
+|-------|------|--------|
+| 1 | Scaffold & Seed | ✅ Done |
+| 2 | SERB Scraper | ✅ Done |
+| 3 | LLM Extraction | ✅ Done |
+| 4 | District Dashboard | ✅ Done |
+| 5 | Hardening | ✅ Done |
 
 ## User preferences
 
@@ -59,10 +79,11 @@ CollBar lets school business officials (CFOs/treasurers) see their entire labor 
 
 - Always run `pnpm --filter @workspace/db run push` after any schema change in `lib/db/src/schema/`
 - Always run `pnpm --filter @workspace/api-spec run codegen` after changing `lib/api-spec/openapi.yaml`
-- `drizzle-kit push-force` available if push fails with column conflicts
+- Drizzle schema must declare every column that exists in the DB — columns added via raw ALTER TABLE must be added to the `.ts` schema file before the next `push` or Drizzle will try to drop them
 - `psycopg` (not `psycopg2`) is the Python Postgres client for pipeline scripts
 - The `pipeline/` directory contains Python scripts — run them with `python3`, not `node`
 - Scraper crawl state files live in `pipeline/crawl_state/` (created in Phase 2)
+- Python tests use built-in `unittest` runner (`python3 -m unittest discover`), not pytest
 
 ## Pointers
 

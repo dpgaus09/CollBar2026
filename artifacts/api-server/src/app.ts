@@ -56,6 +56,40 @@ app.use(
   }),
 );
 
+// ---------------------------------------------------------------------------
+// Security headers — applied to every response
+// ---------------------------------------------------------------------------
+app.use((_req, res, next) => {
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader(
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=()",
+  );
+  res.setHeader(
+    "Content-Security-Policy",
+    [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob:",
+      "font-src 'self' data:",
+      "connect-src 'self'",
+      "frame-ancestors 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+    ].join("; "),
+  );
+  if (isProd) {
+    res.setHeader(
+      "Strict-Transport-Security",
+      "max-age=31536000; includeSubDomains",
+    );
+  }
+  next();
+});
+
 app.use("/api", router);
 
 // Seed admin user on startup (idempotent)
