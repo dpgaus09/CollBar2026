@@ -231,5 +231,185 @@ class TestDBInsertFlow(unittest.TestCase):
             cur.close()
 
 
+class TestExtractionPipelineFromFixturePDF(unittest.TestCase):
+    """
+    End-to-end test using a real fixture PDF stored in pipeline/data/cba/.
+
+    extract_pdf_text() is called on the actual file (pdfplumber path), then
+    call_anthropic is patched to return the deterministic FIXTURE_LLM_RESPONSE.
+    The full validate → shape-check → DB-insert flow is exercised so that
+    regressions in PDF parsing, validation, or DB persistence are caught.
+    """
+
+    FIXTURE_PDF = Path(__file__).parent.parent / "data" / "cba" / "21-CON-01-0108.pdf"
+
+    @classmethod
+    def setUpClass(cls):
+        if not cls.FIXTURE_PDF.exists():
+            raise unittest.SkipTest(f"Fixture PDF not found: {cls.FIXTURE_PDF}")
+        try:
+            import pdfplumber  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("pdfplumber not installed")
+        try:
+            cls.conn = common.get_db_conn()
+        except Exception as e:
+            raise unittest.SkipTest(f"DATABASE_URL not available: {e}")
+
+        cur = cls.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO districts (state, state_district_id, name)
+            VALUES ('OH', '999998', '__e2e_pdf_test_district__')
+            ON CONFLICT (state, state_district_id) DO UPDATE SET name = EXCLUDED.name
+            RETURNING id
+            """
+        )
+        cls.fixture_district_id = cur.fetchone()[0]
+        cur.close()
+        cls.conn.commit()
+
+    @classmethod
+    def tearDownClass(cls):
+        cur = cls.conn.cursor()
+        cur.execute(
+            "DELETE FROM districts WHERE state_district_id = '999998' AND state = 'OH'"
+        )
+        cls.conn.commit()
+        cur.close()
+        cls.conn.close()
+
+    def test_pdf_text_extraction_produces_content(self):
+        """extract_pdf_text on the fixture PDF must return non-empty text."""
+        text, used_ocr = _MOD.extract_pdf_text(self.FIXTURE_PDF)
+        self.assertIsInstance(text, str)
+        self.assertGreater(len(text), 50, "Expected meaningful text from fixture PDF")
+        self.assertFalse(used_ocr, "Fixture PDF should have a usable text layer")
+
+    def test_full_pipeline_with_mocked_llm(self):
+        """
+        Full path: PDF text extraction → (mocked) LLM call → validate →
+        upsert_contract → insert_provisions — all in a rolled-back transaction.
+        """
+        # Step 1: extract real text from the fixture PDF
+        text, _ = _MOD.extract_pdf_text(self.FIXTURE_PDF)
+        self.assertGreater(len(text), 50, "PDF text extraction failed")
+
+        # Step 2: call the LLM (mocked) using the extracted text
+        with patch.object(_MOD, "call_anthropic", return_value=FIXTURE_LLM_RESPONSE):
+            raw = _MOD.call_anthropic("system-prompt", text)
+
+        # Step 3: validate and parse
+        cleaned = extract_json_from_response(raw)
+        result = validate_extraction(cleaned)
+        self.assertIsNotNone(result, "validate_extraction returned None for fixture LLM response")
+
+        # Step 4: DB insert (rolled back so no permanent rows)
+        contracts = result.contracts if PYDANTIC_OK else result["contracts"]
+        contract_data = contracts[0]
+        cur = self.conn.cursor()
+        try:
+            contract_id = upsert_contract(cur, self.fixture_district_id, contract_data, None)
+            self.assertIsNotNone(contract_id)
+            self.assertIsInstance(contract_id, int)
+
+            provisions = (
+                contract_data.provisions if PYDANTIC_OK else contract_data["provisions"]
+            )
+            n = insert_provisions(cur, contract_id, provisions)
+            self.assertEqual(n, 3, f"Expected 3 provisions, got {n}")
+
+            cur.execute("SELECT COUNT(*) FROM contracts WHERE id = %s", (contract_id,))
+            self.assertEqual(cur.fetchone()[0], 1)
+            cur.execute(
+                "SELECT COUNT(*) FROM contract_provisions WHERE contract_id = %s",
+                (contract_id,),
+            )
+            self.assertEqual(cur.fetchone()[0], 3)
+        finally:
+            self.conn.rollback()
+            cur.close()
+
+
+class TestFreshSchemaMigrations(unittest.TestCase):
+    """
+    Apply all SQL migration files to a freshly-created PostgreSQL schema and
+    verify the expected tables are created. This proves the migration files
+    are sufficient to reproduce the full schema from scratch on a new database.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import uuid
+        cls.schema = f"test_migration_{uuid.uuid4().hex[:8]}"
+        try:
+            cls.conn = common.get_db_conn()
+        except Exception as e:
+            raise unittest.SkipTest(f"DATABASE_URL not available: {e}")
+
+    @classmethod
+    def tearDownClass(cls):
+        cur = cls.conn.cursor()
+        cur.execute(f'DROP SCHEMA IF EXISTS "{cls.schema}" CASCADE')
+        cls.conn.commit()
+        cur.close()
+        cls.conn.close()
+
+    def test_migrations_apply_cleanly_to_fresh_schema(self):
+        """
+        Apply all migration SQL files in order to a blank schema and assert
+        all core tables are created. Catches: missing migration files, DDL
+        errors in any migration, or tables accidentally omitted from migrations.
+        """
+        migrations_dir = Path(__file__).parent.parent.parent / "db" / "migrations"
+        sql_files = sorted(migrations_dir.glob("*.sql"))
+        self.assertGreater(len(sql_files), 0, "No migration SQL files found")
+
+        cur = self.conn.cursor()
+        try:
+            cur.execute(f'CREATE SCHEMA "{self.schema}"')
+            cur.execute(f'SET search_path TO "{self.schema}", public')
+
+            for sql_file in sql_files:
+                sql = sql_file.read_text()
+                statements = [
+                    s.strip()
+                    for s in sql.split("--> statement-breakpoint")
+                    if s.strip()
+                ]
+                for stmt in statements:
+                    cur.execute(stmt)
+
+            self.conn.commit()
+
+            # Verify core tables were created in the fresh schema
+            cur.execute(
+                """
+                SELECT table_name FROM information_schema.tables
+                WHERE table_schema = %s
+                """,
+                (self.schema,),
+            )
+            created_tables = {row[0] for row in cur.fetchall()}
+            required = {
+                "districts", "source_documents", "contracts",
+                "contract_provisions", "settlements", "factfinding_proposals",
+                "alerts", "cdss_staging",
+            }
+            missing = required - created_tables
+            self.assertEqual(
+                missing,
+                set(),
+                f"Tables missing after fresh migration: {missing}. "
+                f"Created: {sorted(created_tables)}",
+            )
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cur.execute(f'SET search_path TO public')
+            cur.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
