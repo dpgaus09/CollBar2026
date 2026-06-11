@@ -1,4 +1,4 @@
-import { Router, type IRouter } from "express";
+import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { db } from "@workspace/db";
@@ -25,6 +25,12 @@ const TABLES = [
   "settlements",
 ];
 
+/** Valid provision categories as defined by the DB check constraint. */
+const VALID_CATEGORIES = new Set([
+  "compensation", "insurance", "retirement", "leave",
+  "workday", "evaluation", "rif", "grievance", "other",
+]);
+
 async function getTableCounts(): Promise<Record<string, number>> {
   const counts: Record<string, number> = {};
   for (const table of TABLES) {
@@ -38,6 +44,37 @@ async function getTableCounts(): Promise<Record<string, number>> {
     }
   }
   return counts;
+}
+
+// ---------------------------------------------------------------------------
+// Admin token middleware (applied only to mutation endpoints)
+// In development with no ADMIN_TOKEN set, mutations are allowed from localhost.
+// In production, ADMIN_TOKEN must be set and provided via X-Admin-Token header.
+// ---------------------------------------------------------------------------
+function requireAdminToken(req: Request, res: Response, next: NextFunction): void {
+  const token = process.env.ADMIN_TOKEN;
+  const isDev = process.env.NODE_ENV !== "production";
+
+  if (!token) {
+    if (isDev) {
+      // Development convenience: allow without token, but warn
+      console.warn("[WARN] ADMIN_TOKEN not set — mutation endpoints are unprotected (dev only)");
+      next();
+      return;
+    }
+    res.status(503).json({
+      error: "Admin auth not configured. Set the ADMIN_TOKEN environment variable.",
+    });
+    return;
+  }
+
+  const provided = req.headers["x-admin-token"];
+  if (provided !== token) {
+    res.status(401).json({ error: "Unauthorized: invalid or missing X-Admin-Token header" });
+    return;
+  }
+
+  next();
 }
 
 // ---------------------------------------------------------------------------
@@ -94,7 +131,6 @@ router.get("/admin/crawl-report", async (_req, res) => {
 // ---------------------------------------------------------------------------
 router.get("/admin/extraction-report", async (_req, res) => {
   try {
-    // Extraction run stats
     const runRows = await db.execute(
       sql.raw(`SELECT status, COUNT(*)::int AS n FROM extraction_runs GROUP BY status`),
     );
@@ -103,11 +139,9 @@ router.get("/admin/extraction-report", async (_req, res) => {
       runCounts[row.status] = row.n;
     }
 
-    // Contract count
     const cRows = await db.execute(sql.raw(`SELECT COUNT(*)::int AS n FROM contracts`));
     const totalContracts = (cRows.rows[0] as { n: number })?.n ?? 0;
 
-    // Provisions by category
     const cpRows = await db.execute(
       sql.raw(
         `SELECT category, COUNT(*)::int AS n FROM contract_provisions GROUP BY category ORDER BY n DESC`,
@@ -117,7 +151,6 @@ router.get("/admin/extraction-report", async (_req, res) => {
       (r) => ({ category: r.category, count: r.n }),
     );
 
-    // Low-confidence count (review queue)
     const rqRows = await db.execute(
       sql.raw(
         `SELECT COUNT(*)::int AS n FROM contract_provisions WHERE confidence < 0.8 AND NOT human_verified`,
@@ -125,30 +158,26 @@ router.get("/admin/extraction-report", async (_req, res) => {
     );
     const reviewQueueCount = (rqRows.rows[0] as { n: number })?.n ?? 0;
 
-    // Human-verified count
     const hvRows = await db.execute(
       sql.raw(`SELECT COUNT(*)::int AS n FROM contract_provisions WHERE human_verified = true`),
     );
     const humanVerifiedCount = (hvRows.rows[0] as { n: number })?.n ?? 0;
 
-    // Settlement stats
     const sRows = await db.execute(sql.raw(`SELECT COUNT(*)::int AS n FROM settlements`));
     const totalSettlements = (sRows.rows[0] as { n: number })?.n ?? 0;
 
     const smRows = await db.execute(
-      sql.raw(
-        `SELECT method, COUNT(*)::int AS n FROM settlements GROUP BY method`,
-      ),
+      sql.raw(`SELECT method, COUNT(*)::int AS n FROM settlements GROUP BY method`),
     );
     const settlementsByMethod = (smRows.rows as { method: string; n: number }[]).map(
       (r) => ({ method: r.method, count: r.n }),
     );
 
-    // Source coverage
     const sdRows = await db.execute(
       sql.raw(`SELECT COUNT(*)::int AS n FROM source_documents WHERE doc_type = 'cba_pdf'`),
     );
     const totalCbaDocs = (sdRows.rows[0] as { n: number })?.n ?? 0;
+
     const procRows = await db.execute(
       sql.raw(
         `SELECT COUNT(DISTINCT source_doc_id)::int AS n FROM extraction_runs WHERE status = 'success'`,
@@ -179,51 +208,80 @@ router.get("/admin/review-queue", async (req, res) => {
   const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10));
   const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10)));
   const offset = (page - 1) * limit;
-  const category = req.query.category ? String(req.query.category) : null;
+
+  // Validate category against the allowlist — never interpolate raw user input
+  const rawCategory = req.query.category ? String(req.query.category) : "";
+  if (rawCategory && !VALID_CATEGORIES.has(rawCategory)) {
+    res.status(400).json({ error: `Invalid category. Must be one of: ${[...VALID_CATEGORIES].join(", ")}` });
+    return;
+  }
+  const category = rawCategory || null;
 
   try {
-    const categoryFilter = category
-      ? `AND cp.category = '${category.replace(/'/g, "''")}'`
-      : "";
-
+    // Use Drizzle sql template for safe parameterization of user-supplied values
     const rows = await db.execute(
-      sql.raw(`
-        SELECT
-          cp.id,
-          cp.category,
-          cp.provision_key,
-          cp.value_numeric,
-          cp.value_text,
-          cp.unit,
-          cp.clause_excerpt,
-          cp.page_ref,
-          cp.confidence,
-          c.id              AS contract_id,
-          c.union_name,
-          c.unit_scope,
-          c.effective_start,
-          c.effective_end,
-          sd.source_url,
-          d.name            AS district_name
-        FROM contract_provisions cp
-        JOIN contracts c ON cp.contract_id = c.id
-        LEFT JOIN source_documents sd ON c.source_doc_id = sd.id
-        LEFT JOIN districts d ON c.district_id = d.id
-        WHERE cp.confidence < 0.8
-          AND NOT cp.human_verified
-          ${categoryFilter}
-        ORDER BY cp.confidence ASC, cp.id
-        LIMIT ${limit} OFFSET ${offset}
-      `),
+      category
+        ? sql`
+            SELECT
+              cp.id,
+              cp.category,
+              cp.provision_key,
+              cp.value_numeric,
+              cp.value_text,
+              cp.unit,
+              cp.clause_excerpt,
+              cp.page_ref,
+              cp.confidence,
+              c.id              AS contract_id,
+              c.union_name,
+              c.unit_scope,
+              c.effective_start,
+              c.effective_end,
+              sd.source_url,
+              d.name            AS district_name
+            FROM contract_provisions cp
+            JOIN contracts c ON cp.contract_id = c.id
+            LEFT JOIN source_documents sd ON c.source_doc_id = sd.id
+            LEFT JOIN districts d ON c.district_id = d.id
+            WHERE cp.confidence < 0.8
+              AND NOT cp.human_verified
+              AND cp.category = ${category}
+            ORDER BY cp.confidence ASC, cp.id
+            LIMIT ${limit} OFFSET ${offset}
+          `
+        : sql`
+            SELECT
+              cp.id,
+              cp.category,
+              cp.provision_key,
+              cp.value_numeric,
+              cp.value_text,
+              cp.unit,
+              cp.clause_excerpt,
+              cp.page_ref,
+              cp.confidence,
+              c.id              AS contract_id,
+              c.union_name,
+              c.unit_scope,
+              c.effective_start,
+              c.effective_end,
+              sd.source_url,
+              d.name            AS district_name
+            FROM contract_provisions cp
+            JOIN contracts c ON cp.contract_id = c.id
+            LEFT JOIN source_documents sd ON c.source_doc_id = sd.id
+            LEFT JOIN districts d ON c.district_id = d.id
+            WHERE cp.confidence < 0.8
+              AND NOT cp.human_verified
+            ORDER BY cp.confidence ASC, cp.id
+            LIMIT ${limit} OFFSET ${offset}
+          `,
     );
 
     const countRows = await db.execute(
-      sql.raw(`
-        SELECT COUNT(*)::int AS n
-        FROM contract_provisions cp
-        WHERE cp.confidence < 0.8 AND NOT cp.human_verified
-        ${categoryFilter}
-      `),
+      category
+        ? sql`SELECT COUNT(*)::int AS n FROM contract_provisions cp WHERE cp.confidence < 0.8 AND NOT cp.human_verified AND cp.category = ${category}`
+        : sql`SELECT COUNT(*)::int AS n FROM contract_provisions cp WHERE cp.confidence < 0.8 AND NOT cp.human_verified`,
     );
     const total = (countRows.rows[0] as { n: number })?.n ?? 0;
 
@@ -240,11 +298,13 @@ router.get("/admin/review-queue", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// PATCH /admin/review-queue/:id   body: { action: 'approve'|'correct'|'reject', correctedValue?: string }
+// PATCH /admin/review-queue/:id
+// Protected by requireAdminToken middleware.
+// body: { action: 'approve'|'correct'|'reject', correctedValue?: string }
 // ---------------------------------------------------------------------------
-router.patch("/admin/review-queue/:id", async (req, res) => {
+router.patch("/admin/review-queue/:id", requireAdminToken, async (req, res) => {
   const id = parseInt(req.params.id, 10);
-  if (isNaN(id)) {
+  if (isNaN(id) || id < 1) {
     res.status(400).json({ error: "Invalid id" });
     return;
   }
@@ -261,24 +321,33 @@ router.patch("/admin/review-queue/:id", async (req, res) => {
 
   try {
     if (action === "reject") {
-      await db.execute(sql.raw(`DELETE FROM contract_provisions WHERE id = ${id}`));
-    } else if (action === "correct" && correctedValue !== undefined) {
-      const escaped = correctedValue.replace(/'/g, "''");
+      await db.execute(sql`DELETE FROM contract_provisions WHERE id = ${id}`);
+    } else if (action === "correct") {
+      if (correctedValue === undefined) {
+        res.status(400).json({ error: "correctedValue is required for action=correct" });
+        return;
+      }
       const numericVal = parseFloat(correctedValue);
-      const numericSet = !isNaN(numericVal) ? `, value_numeric = ${numericVal}` : "";
-      await db.execute(
-        sql.raw(
-          `UPDATE contract_provisions
-           SET human_verified = true,
-               value_text = '${escaped}'
-               ${numericSet}
-           WHERE id = ${id}`,
-        ),
-      );
+      if (!isNaN(numericVal)) {
+        await db.execute(
+          sql`UPDATE contract_provisions
+              SET human_verified = true,
+                  value_text    = ${correctedValue},
+                  value_numeric = ${numericVal}
+              WHERE id = ${id}`,
+        );
+      } else {
+        await db.execute(
+          sql`UPDATE contract_provisions
+              SET human_verified = true,
+                  value_text    = ${correctedValue}
+              WHERE id = ${id}`,
+        );
+      }
     } else {
       // approve
       await db.execute(
-        sql.raw(`UPDATE contract_provisions SET human_verified = true WHERE id = ${id}`),
+        sql`UPDATE contract_provisions SET human_verified = true WHERE id = ${id}`,
       );
     }
     res.json({ ok: true });

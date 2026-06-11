@@ -415,24 +415,65 @@ def _b(obj, key: str) -> Optional[bool]:
 # Settlement derivation
 # ---------------------------------------------------------------------------
 
+def _get_contract_provisions(cur, contract_id: int) -> dict:
+    """Return compensation provisions for a contract keyed by provision_key."""
+    cur.execute(
+        """
+        SELECT provision_key,
+               value_numeric::float AS val,
+               confidence::float    AS conf
+        FROM contract_provisions
+        WHERE contract_id = %s
+          AND category = 'compensation'
+          AND provision_key IN (
+            'base_salary_increase_yr1','base_salary_increase_yr2',
+            'base_salary_increase_yr3','ba_min_salary','off_schedule_bonus_yr1'
+          )
+          AND value_numeric IS NOT NULL
+        """,
+        (contract_id,),
+    )
+    return {row[0]: {"val": row[1], "conf": row[2]} for row in cur.fetchall()}
+
+
+def _school_year(date_str: str, *, is_end: bool = False) -> Optional[str]:
+    """Convert a YYYY-MM-DD date string to 'YYYY-YY' school year format."""
+    if not date_str:
+        return None
+    try:
+        y = int(date_str[:4])
+        m = int(date_str[5:7]) if len(date_str) >= 7 else 7
+        # Ohio school year starts in July; a contract starting Aug 2022 → 2022-23
+        # A contract ending Jun 2025 belongs to 2024-25
+        if is_end and m <= 6:
+            y -= 1
+        return f"{y}-{str(y + 1)[2:]}"
+    except (ValueError, IndexError):
+        return None
+
+
 def derive_settlements(conn):
     """
-    For each district with ≥ 2 contracts in contracts table (same unit_scope),
-    derive a settlements row per contract using extracted compensation provisions.
+    For each (district_id, unit_scope) pair that has ≥ 2 consecutive contracts,
+    derive one settlements row per contract:
+      - method = 'cba_diff'     if stated % increases (base_salary_increase_yr1) exist
+      - method = 'ba_min_delta' if no stated %s but consecutive BA-min values allow
+                                 computing the implied increase
 
-    method = 'cba_diff' if stated percentage increases found,
-             'ba_min_delta' otherwise (comparing consecutive BA-min values).
+    Only emits a settlement row when one of the above methods yields a valid value.
+    Requires district_id is not null and at least 2 contracts so the BA-min delta
+    path is possible.
     """
     cur = conn.cursor()
 
-    # Get districts with multiple contracts
+    # Only process district+unit pairs with >= 2 contracts
     cur.execute(
         """
-        SELECT DISTINCT district_id, unit_scope
+        SELECT district_id, unit_scope
         FROM contracts
         WHERE district_id IS NOT NULL
         GROUP BY district_id, unit_scope
-        HAVING COUNT(*) >= 1
+        HAVING COUNT(*) >= 2
         """
     )
     district_units = cur.fetchall()
@@ -440,60 +481,59 @@ def derive_settlements(conn):
     settlements_inserted = 0
 
     for district_id, unit_scope in district_units:
-        # Get all contracts for this district+unit, ordered by start date
+        # Ordered list of contracts for this district+unit
         cur.execute(
             """
-            SELECT c.id, c.effective_start, c.effective_end, c.term_years
-            FROM contracts c
-            WHERE c.district_id = %s AND (c.unit_scope = %s OR %s IS NULL)
-            ORDER BY c.effective_start
+            SELECT id, effective_start, effective_end, term_years
+            FROM contracts
+            WHERE district_id = %s AND unit_scope = %s
+            ORDER BY effective_start NULLS LAST, id
             """,
-            (district_id, unit_scope, unit_scope),
+            (district_id, unit_scope),
         )
-        contracts = cur.fetchall()
+        contracts = cur.fetchall()  # [(id, eff_start, eff_end, term_years)]
 
-        for contract_id, eff_start, eff_end, term_years in contracts:
-            # Get compensation provisions
-            cur.execute(
-                """
-                SELECT provision_key, value_numeric, confidence
-                FROM contract_provisions
-                WHERE contract_id = %s AND category = 'compensation'
-                  AND provision_key IN (
-                    'base_salary_increase_yr1','base_salary_increase_yr2',
-                    'base_salary_increase_yr3','ba_min_salary','off_schedule_bonus_yr1'
-                  )
-                """,
-                (contract_id,),
-            )
-            provisions = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+        # Track BA-min from previous contract for delta calculation
+        prev_ba_min: Optional[float] = None
+        prev_ba_conf: float = 0.5
 
-            # Derive from_year / to_year from contract dates
-            from_year = None
-            to_year = None
-            if eff_start:
-                try:
-                    y = int(eff_start[:4])
-                    from_year = f"{y}-{str(y+1)[2:]}"
-                except (ValueError, IndexError):
-                    pass
-            if eff_end:
-                try:
-                    y = int(eff_end[:4])
-                    to_year = f"{y}-{str(y+1)[2:]}"
-                except (ValueError, IndexError):
-                    pass
+        for i, (contract_id, eff_start, eff_end, term_years) in enumerate(contracts):
+            prov = _get_contract_provisions(cur, contract_id)
 
-            if not from_year:
+            ba_min = prov.get("ba_min_salary", {}).get("val")
+            yr1 = prov.get("base_salary_increase_yr1", {})
+            yr2_val = prov.get("base_salary_increase_yr2", {}).get("val")
+            yr3_val = prov.get("base_salary_increase_yr3", {}).get("val")
+            off_sched = prov.get("off_schedule_bonus_yr1", {}).get("val")
+
+            base_pct: Optional[float] = None
+            method: Optional[str] = None
+            confidence: float = 0.5
+
+            if yr1:
+                # Stated percentage increases found in this contract
+                base_pct = yr1["val"]
+                method = "cba_diff"
+                confidence = yr1["conf"]
+            elif i > 0 and prev_ba_min is not None and ba_min is not None and prev_ba_min > 0:
+                # No stated %; compute implied increase from consecutive BA-min values
+                base_pct = round((ba_min - prev_ba_min) / prev_ba_min * 100, 2)
+                method = "ba_min_delta"
+                confidence = round((prov.get("ba_min_salary", {}).get("conf", 0.6) + prev_ba_conf) / 2, 2)
+
+            # Update prev_ba_min for the next iteration regardless
+            if ba_min is not None:
+                prev_ba_min = ba_min
+                prev_ba_conf = prov.get("ba_min_salary", {}).get("conf", 0.6)
+
+            # Skip if we couldn't determine a wage change
+            if method is None or base_pct is None:
                 continue
 
-            base_pct, base_conf = provisions.get("base_salary_increase_yr1", (None, None))
-            yr2_pct, _ = provisions.get("base_salary_increase_yr2", (None, None))
-            yr3_pct, _ = provisions.get("base_salary_increase_yr3", (None, None))
-            off_sched, _ = provisions.get("off_schedule_bonus_yr1", (None, None))
-
-            method = "cba_diff" if base_pct is not None else "ba_min_delta"
-            confidence = float(base_conf) if base_conf is not None else 0.5
+            from_year = _school_year(eff_start)
+            to_year = _school_year(eff_end, is_end=True)
+            if not from_year:
+                continue
 
             try:
                 cur.execute(
@@ -506,18 +546,25 @@ def derive_settlements(conn):
                     ON CONFLICT (district_id, from_year, to_year) DO NOTHING
                     """,
                     (
-                        district_id, from_year, to_year or from_year,
-                        base_pct, yr2_pct, yr3_pct, off_sched,
-                        term_years, method, confidence,
+                        district_id,
+                        from_year,
+                        to_year or from_year,
+                        base_pct,
+                        yr2_val,
+                        yr3_val,
+                        off_sched,
+                        term_years,
+                        method,
+                        confidence,
                     ),
                 )
                 settlements_inserted += 1
             except Exception as e:
-                log.debug("Settlement insert error: %s", e)
+                log.debug("Settlement insert error for contract %d: %s", contract_id, e)
 
     conn.commit()
     cur.close()
-    log.info("Settlements derived/upserted: %d", settlements_inserted)
+    log.info("Settlements derived: %d (from %d district+unit pairs)", settlements_inserted, len(district_units))
     return settlements_inserted
 
 
