@@ -1,2 +1,4 @@
 - [SERB PDF download requirements](serb-pdf-auth.md) — PDFs need AWS ALB session cookies + Referer; visit homepage first to warm up.
 - [SERB district name normalization](serb-district-normalization.md) — strip only terminal words ("schools", "school district"); keep type qualifiers (city, local, exempted village) in name; expand "Co/" abbreviation.
+- [Drizzle dynamic SQL WHERE clauses](drizzle-dynamic-where.md) — use `sql.join()` + condition array; never use `$n IS NULL OR x = $n` pattern with optional params.
+- [CollBar auth: custom magic-link on Express](collbar-auth-pattern.md) — collbar-web is Vite/React (not Next.js); magic-link tokens in memory Map (15min expiry); dev mode returns link in response body; admin seeded on startup.

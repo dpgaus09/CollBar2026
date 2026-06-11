@@ -4,8 +4,22 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import AdminPage from "@/pages/admin";
+import LoginPage from "@/pages/login";
+import AuthVerifyPage from "@/pages/auth-verify";
+import DashboardIndexPage from "@/pages/dashboard/index";
+import DistrictDashboardPage from "@/pages/dashboard/district";
+import ClausesPage from "@/pages/dashboard/clauses";
+import ComparablesPage from "@/pages/dashboard/comparables";
+import AskVsGotPage from "@/pages/dashboard/ask-vs-got";
+import ExpirationCalendarPage from "@/pages/expiration-calendar";
 
-const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      refetchOnWindowFocus: false,
+    },
+  },
+});
 
 function Home() {
   return (
@@ -19,15 +33,19 @@ function Home() {
         <p className="text-slate-400 text-sm font-mono">
           Ohio K-12 Collective Bargaining Database
         </p>
-        <p className="text-slate-500 text-xs mt-6">
-          Phase 1 complete — database schema initialized
-        </p>
-        <div className="mt-4">
+        <p className="text-slate-500 text-xs mt-6">Phase 4 — District Dashboard</p>
+        <div className="mt-4 flex items-center justify-center gap-3">
           <a
-            href="/admin"
+            href="login"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-blue-800 text-slate-100 text-sm hover:bg-blue-700 transition-colors border border-blue-700"
+          >
+            Sign In →
+          </a>
+          <a
+            href="admin"
             className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-slate-800 text-slate-300 text-sm hover:bg-slate-700 transition-colors border border-slate-700"
           >
-            Admin Dashboard →
+            Admin →
           </a>
         </div>
       </div>
@@ -39,8 +57,25 @@ function Router() {
   return (
     <Switch>
       <Route path="/" component={Home} />
+
+      {/* Auth */}
+      <Route path="/login" component={LoginPage} />
+      <Route path="/auth/verify" component={AuthVerifyPage} />
+
+      {/* Dashboard */}
+      <Route path="/dashboard" component={DashboardIndexPage} />
+      <Route path="/dashboard/:id" component={DistrictDashboardPage} />
+      <Route path="/dashboard/:id/clauses" component={ClausesPage} />
+      <Route path="/dashboard/:id/comparables" component={ComparablesPage} />
+      <Route path="/dashboard/:id/ask-vs-got" component={AskVsGotPage} />
+
+      {/* Admin calendar */}
+      <Route path="/expiration-calendar" component={ExpirationCalendarPage} />
+
+      {/* Legacy admin */}
       <Route path="/admin" component={AdminPage} />
       <Route path="/admin/:rest*" component={AdminPage} />
+
       <Route component={NotFound} />
     </Switch>
   );
