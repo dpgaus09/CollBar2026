@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "CollBar"
+version = "1.0.0"
+id = "artifacts/collbar-web"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 18627
+
+[services.development]
+run = "pnpm --filter @workspace/collbar-web run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/collbar-web", "run", "build" ]
+publicDir = "artifacts/collbar-web/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18627"
+BASE_PATH = "/"
