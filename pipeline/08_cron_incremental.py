@@ -89,9 +89,11 @@ def head_maybe_changed(session, url: str, retrieved_at) -> bool:
     """
     Issue a HEAD request and return True if Last-Modified > retrieved_at.
     Returns False if no Last-Modified header is present (conservative).
+    Uses PDF_HEADERS (browser UA + Referer) because SERB rejects bot UAs for
+    static PDF paths.
     """
     try:
-        r = session.head(url, headers=common.HEADERS, timeout=20)
+        r = session.head(url, headers=common.PDF_HEADERS, timeout=20)
         lm_header = r.headers.get("Last-Modified")
         if not lm_header:
             return False
@@ -109,9 +111,13 @@ def head_maybe_changed(session, url: str, retrieved_at) -> bool:
 
 
 def fetch_file_hash(session, url: str) -> Optional[str]:
-    """Fetch a PDF and return its SHA-256 hex digest, or None on error."""
+    """
+    Fetch a PDF and return its SHA-256 hex digest, or None on error.
+    Uses PDF_HEADERS (browser UA + Referer) because SERB rejects bot UAs for
+    static PDF paths.
+    """
     try:
-        r = session.get(url, headers=common.HEADERS, timeout=90)
+        r = session.get(url, headers=common.PDF_HEADERS, timeout=90)
         if r.status_code != 200:
             log.warning("GET %s returned HTTP %s", url, r.status_code)
             return None
@@ -311,15 +317,20 @@ def main():
                     """,
                     (district_id, doc["url"], file_hash),
                 )
+                # Only alert once source_documents row is committed. If the alert
+                # is later acknowledged, the URL stays in source_documents so
+                # subsequent cron runs will not re-alert.
+                ok = insert_alert(cur, district_id, doc_name, doc["url"], "new_doc")
+                if ok:
+                    new_inserted += 1
+                    log.info("new_doc alert inserted: %s", doc_name)
+                else:
+                    new_skipped_dupes += 1
             else:
-                log.warning("Could not fetch %s — source_documents row skipped", doc["url"])
-
-            ok = insert_alert(cur, district_id, doc_name, doc["url"], "new_doc")
-            if ok:
-                new_inserted += 1
-                log.info("new_doc alert inserted: %s", doc_name)
-            else:
-                new_skipped_dupes += 1
+                log.warning(
+                    "Could not fetch %s — source_documents row and alert skipped",
+                    doc["url"],
+                )
 
         conn.commit()
         cur.close()
