@@ -15,6 +15,13 @@
       "when": 1781142000000,
       "tag": "0001_benchmarks",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1781228400000,
+      "tag": "0002_ff_unique_case",
+      "breakpoints": true
     }
   ]
 }

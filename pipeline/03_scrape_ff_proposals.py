@@ -290,7 +290,7 @@ def main():
                          employer_proposal_pct, union_proposal_pct,
                          factfinder_recommendation_pct, year_covered, source_doc_id)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (case_number) DO NOTHING
                     """,
                     (
                         district_id,

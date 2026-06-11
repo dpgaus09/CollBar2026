@@ -167,6 +167,11 @@ def main():
     school_records = [r for r in all_records if r["bargaining_unit"] in SCHOOL_BU_CODES]
     log.info("School-sector records (T/NT): %d", len(school_records))
     state["cba_docs_found"] = len(school_records)
+    # cba_docs_in_scope tracks the actual universe for this run:
+    # limited to max_pdfs (if set) so the completeness gate compares
+    # processed vs intended, not processed vs the full 10k catalog.
+    docs_in_scope = min(args.max_pdfs, len(school_records)) if args.max_pdfs else len(school_records)
+    state["cba_docs_in_scope"] = docs_in_scope
 
     # 4 — Year filter: last N years (0 = all time)
     import datetime

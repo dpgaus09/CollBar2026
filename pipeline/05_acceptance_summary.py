@@ -72,6 +72,11 @@ def main() -> int:
 
     # CBA document breakdown
     docs_found = state.get("cba_docs_found", 0)
+    # cba_docs_in_scope = min(max_pdfs, docs_found) when --max-pdfs was set;
+    # equals docs_found for unbounded runs.  Use this as the denominator for
+    # completeness so bounded/dev runs are not penalised for not downloading
+    # the full 10k-doc catalog.
+    docs_in_scope = state.get("cba_docs_in_scope", docs_found)
     docs_downloaded = state.get("cba_docs_downloaded", 0)
     docs_skipped = state.get("cba_docs_skipped", 0)
     docs_failed = state.get("cba_docs_failed", 0)
@@ -79,11 +84,12 @@ def main() -> int:
 
     print("\n--- CBA Document Crawl ---")
     print(f"  school-sector docs found   : {docs_found:>8,}")
+    print(f"  docs in scope (this run)   : {docs_in_scope:>8,}")
     print(f"  PDFs downloaded            : {docs_downloaded:>8,}")
     print(f"  PDFs skipped (cached)      : {docs_skipped:>8,}")
     print(f"  PDFs failed                : {docs_failed:>8,}")
-    if docs_found > 0:
-        completeness_pct = (docs_processed / docs_found) * 100
+    if docs_in_scope > 0:
+        completeness_pct = (docs_processed / docs_in_scope) * 100
         print(f"  corpus completeness        : {completeness_pct:>7.1f}%  (threshold {CORPUS_COMPLETENESS_THRESHOLD:.0f}%)")
     else:
         completeness_pct = 0.0
@@ -139,7 +145,7 @@ def main() -> int:
         )
 
     # Gate 2 — corpus completeness (skipped when --skip-completeness is set)
-    if not args.skip_completeness and docs_found > 0:
+    if not args.skip_completeness and docs_in_scope > 0:
         if completeness_pct < CORPUS_COMPLETENESS_THRESHOLD:
             failures.append(
                 f"Corpus completeness {completeness_pct:.1f}% is below "
