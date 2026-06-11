@@ -200,7 +200,7 @@ router.get("/dashboard/districts/:id/settlements", canAccessDistrict, async (req
     const rows = await db.execute(sql`
       SELECT s.id, s.from_year, s.to_year, s.base_increase_pct, s.year2_pct, s.year3_pct,
              s.off_schedule_payment, s.insurance_changed, s.term_years,
-             s.method, s.confidence, s.human_verified, s.notes,
+             s.method, s.confidence, s.human_verified, s.page_ref, s.notes,
              sd.source_url, sd.retrieved_at
       FROM settlements s
       LEFT JOIN LATERAL (
@@ -231,6 +231,7 @@ router.get("/dashboard/districts/:id/factfinding", canAccessDistrict, async (req
       SELECT fp.id, fp.case_number, fp.report_date, fp.union_name,
              fp.employer_proposal_pct, fp.union_proposal_pct,
              fp.factfinder_recommendation_pct, fp.year_covered,
+             fp.page_ref, fp.confidence, fp.human_verified,
              sd.source_url, sd.retrieved_at
       FROM factfinding_proposals fp
       LEFT JOIN source_documents sd ON fp.source_doc_id = sd.id
@@ -308,7 +309,7 @@ router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Resp
       db.execute(sql`
         SELECT
           s.id, s.from_year, s.to_year, s.base_increase_pct, s.year2_pct, s.year3_pct,
-          s.off_schedule_payment, s.term_years, s.method, s.confidence, s.human_verified,
+          s.off_schedule_payment, s.term_years, s.method, s.confidence, s.human_verified, s.page_ref,
           d.id AS district_id, d.name AS district_name,
           d.county, d.district_type, d.enrollment,
           sd.source_url, sd.retrieved_at

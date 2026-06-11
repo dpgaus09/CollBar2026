@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useParams, useLocation } from "wouter";
 import {
@@ -58,6 +59,7 @@ interface Settlement {
   method: string | null;
   confidence: string | null;
   human_verified: boolean;
+  page_ref: number | null;
   source_url: string | null;
   retrieved_at: string | null;
 }
@@ -424,6 +426,7 @@ function SettlementTable({ settlements }: { settlements: Settlement[] }) {
             unit="%"
             humanVerified={s.human_verified}
             confidence={s.confidence}
+            pageRef={s.page_ref}
             sourceUrl={s.source_url}
             retrievedAt={s.retrieved_at}
           />
@@ -432,6 +435,7 @@ function SettlementTable({ settlements }: { settlements: Settlement[] }) {
             unit="%"
             humanVerified={s.human_verified}
             confidence={s.confidence}
+            pageRef={s.page_ref}
             sourceUrl={s.source_url}
             retrievedAt={s.retrieved_at}
           />
@@ -440,6 +444,7 @@ function SettlementTable({ settlements }: { settlements: Settlement[] }) {
             unit="%"
             humanVerified={s.human_verified}
             confidence={s.confidence}
+            pageRef={s.page_ref}
             sourceUrl={s.source_url}
             retrievedAt={s.retrieved_at}
           />
@@ -459,6 +464,14 @@ export default function DistrictDashboardPage() {
   const [, setLocation] = useLocation();
   const { isAuthenticated, isLoading: authLoading, isAdmin, districtId } = useAuth();
 
+  useEffect(() => {
+    if (authLoading) return;
+    if (!isAuthenticated) { setLocation("/login"); return; }
+    if (!isAdmin && districtId != null && districtId !== parseInt(id)) {
+      setLocation(`/dashboard/${districtId}`);
+    }
+  }, [authLoading, isAuthenticated, isAdmin, districtId, id, setLocation]);
+
   const { data: district, isLoading: distLoading } = useDistrictDetail(id);
   const { data: provsData, isLoading: provsLoading } = useProvisions(id);
   const { data: settlementsData } = useSettlements(id);
@@ -471,15 +484,8 @@ export default function DistrictDashboardPage() {
   const { data: retMedians } = useProvisionMedians("retirement", county, band);
   const { data: leaveMedians } = useProvisionMedians("leave", county, band);
 
-  if (!authLoading && !isAuthenticated) {
-    setLocation("/login");
-    return null;
-  }
-
-  if (!authLoading && !isAdmin && districtId != null && districtId !== parseInt(id)) {
-    setLocation(`/dashboard/${districtId}`);
-    return null;
-  }
+  if (authLoading || !isAuthenticated) return null;
+  if (!isAdmin && districtId != null && districtId !== parseInt(id)) return null;
 
   const provisions = provsData?.provisions ?? [];
   const settlements = settlementsData?.settlements ?? [];

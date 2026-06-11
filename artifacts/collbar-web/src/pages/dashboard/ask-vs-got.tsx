@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useParams, useLocation } from "wouter";
 import {
@@ -17,6 +18,9 @@ interface Proposal {
   union_proposal_pct: string | null;
   factfinder_recommendation_pct: string | null;
   year_covered: string | null;
+  page_ref: number | null;
+  confidence: string | null;
+  human_verified: boolean;
   source_url: string | null;
   retrieved_at: string | null;
 }
@@ -69,10 +73,16 @@ export default function AskVsGotPage() {
     enabled: !!id,
   });
 
-  if (!authLoading && !isAuthenticated) { setLocation("/login"); return null; }
-  if (!authLoading && !isAdmin && districtId != null && districtId !== parseInt(id)) {
-    setLocation(`/dashboard/${districtId}`); return null;
-  }
+  useEffect(() => {
+    if (authLoading) return;
+    if (!isAuthenticated) { setLocation("/login"); return; }
+    if (!isAdmin && districtId != null && districtId !== parseInt(id)) {
+      setLocation(`/dashboard/${districtId}`);
+    }
+  }, [authLoading, isAuthenticated, isAdmin, districtId, id, setLocation]);
+
+  if (authLoading || !isAuthenticated) return null;
+  if (!isAdmin && districtId != null && districtId !== parseInt(id)) return null;
 
   const proposals = data?.proposals ?? [];
 
@@ -176,6 +186,9 @@ export default function AskVsGotPage() {
                       <ProvenanceValue
                         value={p.employer_proposal_pct != null ? parseFloat(p.employer_proposal_pct) : null}
                         unit="%"
+                        pageRef={p.page_ref}
+                        confidence={p.confidence}
+                        humanVerified={p.human_verified}
                         sourceUrl={p.source_url}
                         retrievedAt={p.retrieved_at}
                       />
@@ -184,6 +197,9 @@ export default function AskVsGotPage() {
                       <ProvenanceValue
                         value={p.union_proposal_pct != null ? parseFloat(p.union_proposal_pct) : null}
                         unit="%"
+                        pageRef={p.page_ref}
+                        confidence={p.confidence}
+                        humanVerified={p.human_verified}
                         sourceUrl={p.source_url}
                         retrievedAt={p.retrieved_at}
                       />
@@ -192,6 +208,9 @@ export default function AskVsGotPage() {
                       <ProvenanceValue
                         value={p.factfinder_recommendation_pct != null ? parseFloat(p.factfinder_recommendation_pct) : null}
                         unit="%"
+                        pageRef={p.page_ref}
+                        confidence={p.confidence}
+                        humanVerified={p.human_verified}
                         sourceUrl={p.source_url}
                         retrievedAt={p.retrieved_at}
                       />

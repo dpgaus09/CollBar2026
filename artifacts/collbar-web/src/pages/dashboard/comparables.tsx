@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useParams, useLocation } from "wouter";
 import { useAuth, useLogout } from "@/hooks/use-auth";
@@ -22,6 +22,7 @@ interface ComparableItem {
   method: string | null;
   confidence: string | null;
   human_verified: boolean;
+  page_ref: number | null;
   source_url: string | null;
   retrieved_at: string | null;
 }
@@ -82,10 +83,16 @@ export default function ComparablesPage() {
   const [yearTo, setYearTo] = useState("");
   const [page, setPage] = useState(1);
 
-  if (!authLoading && !isAuthenticated) { setLocation("/login"); return null; }
-  if (!authLoading && !isAdmin && districtId != null && districtId !== parseInt(id)) {
-    setLocation(`/dashboard/${districtId}`); return null;
-  }
+  useEffect(() => {
+    if (authLoading) return;
+    if (!isAuthenticated) { setLocation("/login"); return; }
+    if (!isAdmin && districtId != null && districtId !== parseInt(id)) {
+      setLocation(`/dashboard/${districtId}`);
+    }
+  }, [authLoading, isAuthenticated, isAdmin, districtId, id, setLocation]);
+
+  if (authLoading || !isAuthenticated) return null;
+  if (!isAdmin && districtId != null && districtId !== parseInt(id)) return null;
 
   const buildParams = (extra: Record<string, string> = {}) => {
     const p = new URLSearchParams();
@@ -236,13 +243,13 @@ export default function ComparablesPage() {
                       <td className="px-3 py-2.5 text-slate-400">{item.county ?? "—"}</td>
                       <td className="px-3 py-2.5 text-slate-400 whitespace-nowrap">{item.from_year}</td>
                       <td className="px-3 py-2.5">
-                        <ProvenanceValue value={item.base_increase_pct != null ? parseFloat(item.base_increase_pct) : null} unit="%" humanVerified={item.human_verified} confidence={item.confidence} sourceUrl={item.source_url} retrievedAt={item.retrieved_at} />
+                        <ProvenanceValue value={item.base_increase_pct != null ? parseFloat(item.base_increase_pct) : null} unit="%" humanVerified={item.human_verified} confidence={item.confidence} pageRef={item.page_ref} sourceUrl={item.source_url} retrievedAt={item.retrieved_at} />
                       </td>
                       <td className="px-3 py-2.5">
-                        <ProvenanceValue value={item.year2_pct != null ? parseFloat(item.year2_pct) : null} unit="%" humanVerified={item.human_verified} confidence={item.confidence} sourceUrl={item.source_url} retrievedAt={item.retrieved_at} />
+                        <ProvenanceValue value={item.year2_pct != null ? parseFloat(item.year2_pct) : null} unit="%" humanVerified={item.human_verified} confidence={item.confidence} pageRef={item.page_ref} sourceUrl={item.source_url} retrievedAt={item.retrieved_at} />
                       </td>
                       <td className="px-3 py-2.5">
-                        <ProvenanceValue value={item.year3_pct != null ? parseFloat(item.year3_pct) : null} unit="%" humanVerified={item.human_verified} confidence={item.confidence} sourceUrl={item.source_url} retrievedAt={item.retrieved_at} />
+                        <ProvenanceValue value={item.year3_pct != null ? parseFloat(item.year3_pct) : null} unit="%" humanVerified={item.human_verified} confidence={item.confidence} pageRef={item.page_ref} sourceUrl={item.source_url} retrievedAt={item.retrieved_at} />
                       </td>
                       <td className="px-3 py-2.5">
                         {item.method

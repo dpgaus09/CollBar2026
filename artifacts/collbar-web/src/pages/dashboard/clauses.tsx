@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useParams, useLocation } from "wouter";
 import { useAuth, useLogout } from "@/hooks/use-auth";
@@ -68,10 +68,16 @@ export default function ClausesPage() {
     enabled: !!id,
   });
 
-  if (!authLoading && !isAuthenticated) { setLocation("/login"); return null; }
-  if (!authLoading && !isAdmin && districtId != null && districtId !== parseInt(id)) {
-    setLocation(`/dashboard/${districtId}`); return null;
-  }
+  useEffect(() => {
+    if (authLoading) return;
+    if (!isAuthenticated) { setLocation("/login"); return; }
+    if (!isAdmin && districtId != null && districtId !== parseInt(id)) {
+      setLocation(`/dashboard/${districtId}`);
+    }
+  }, [authLoading, isAuthenticated, isAdmin, districtId, id, setLocation]);
+
+  if (authLoading || !isAuthenticated) return null;
+  if (!isAdmin && districtId != null && districtId !== parseInt(id)) return null;
 
   const provisions = (data?.provisions ?? []).filter((p) => {
     if (category && p.category !== category) return false;
