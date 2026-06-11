@@ -6,6 +6,7 @@ import {
 } from "recharts";
 import { useAuth, useLogout } from "@/hooks/use-auth";
 import { apiUrl } from "@/lib/api";
+import { ProvenanceValue } from "@/components/provenance";
 
 interface Proposal {
   id: number;
@@ -17,6 +18,7 @@ interface Proposal {
   factfinder_recommendation_pct: string | null;
   year_covered: string | null;
   source_url: string | null;
+  retrieved_at: string | null;
 }
 
 function SubNav({ id, active }: { id: string; active: string }) {
@@ -166,18 +168,29 @@ export default function AskVsGotPage() {
                     <td className="px-3 py-2.5 text-slate-400 font-mono">{p.case_number ?? "—"}</td>
                     <td className="px-3 py-2.5 text-slate-400">{p.year_covered ?? p.report_date?.slice(0, 4) ?? "—"}</td>
                     <td className="px-3 py-2.5 text-slate-300">{p.union_name ?? "—"}</td>
-                    <td className="px-3 py-2.5 text-slate-300">
-                      {p.employer_proposal_pct != null ? `${parseFloat(p.employer_proposal_pct).toFixed(2)}%` : <span className="text-slate-600 italic">—</span>}
+                    <td className="px-3 py-2.5">
+                      <ProvenanceValue
+                        value={p.employer_proposal_pct != null ? parseFloat(p.employer_proposal_pct) : null}
+                        unit="%"
+                        sourceUrl={p.source_url}
+                        retrievedAt={p.retrieved_at}
+                      />
                     </td>
                     <td className="px-3 py-2.5">
-                      {p.union_proposal_pct != null ? (
-                        <span className="text-blue-400 font-mono">{parseFloat(p.union_proposal_pct).toFixed(2)}%</span>
-                      ) : <span className="text-slate-600 italic">—</span>}
+                      <ProvenanceValue
+                        value={p.union_proposal_pct != null ? parseFloat(p.union_proposal_pct) : null}
+                        unit="%"
+                        sourceUrl={p.source_url}
+                        retrievedAt={p.retrieved_at}
+                      />
                     </td>
                     <td className="px-3 py-2.5">
-                      {p.factfinder_recommendation_pct != null ? (
-                        <span className="text-emerald-400 font-mono">{parseFloat(p.factfinder_recommendation_pct).toFixed(2)}%</span>
-                      ) : <span className="text-slate-600 italic">—</span>}
+                      <ProvenanceValue
+                        value={p.factfinder_recommendation_pct != null ? parseFloat(p.factfinder_recommendation_pct) : null}
+                        unit="%"
+                        sourceUrl={p.source_url}
+                        retrievedAt={p.retrieved_at}
+                      />
                     </td>
                     <td className="px-3 py-2.5">
                       {p.source_url ? (

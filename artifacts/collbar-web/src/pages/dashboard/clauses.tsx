@@ -17,6 +17,7 @@ interface Provision {
   confidence: string | null;
   human_verified: boolean;
   source_url: string | null;
+  retrieved_at: string | null;
 }
 
 const CATEGORIES = ["", "compensation", "insurance", "retirement", "leave", "workday", "evaluation", "rif", "grievance", "other"];
@@ -171,6 +172,7 @@ export default function ClausesPage() {
                     pageRef={p.page_ref}
                     humanVerified={p.human_verified}
                     confidence={p.confidence}
+                    retrievedAt={p.retrieved_at}
                   />
                 </div>
                 {p.clause_excerpt && (

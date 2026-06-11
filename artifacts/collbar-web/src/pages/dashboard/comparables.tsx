@@ -22,6 +22,8 @@ interface ComparableItem {
   method: string | null;
   confidence: string | null;
   human_verified: boolean;
+  source_url: string | null;
+  retrieved_at: string | null;
 }
 
 interface ComparablesResponse {
@@ -234,13 +236,13 @@ export default function ComparablesPage() {
                       <td className="px-3 py-2.5 text-slate-400">{item.county ?? "—"}</td>
                       <td className="px-3 py-2.5 text-slate-400 whitespace-nowrap">{item.from_year}</td>
                       <td className="px-3 py-2.5">
-                        <ProvenanceValue value={item.base_increase_pct != null ? parseFloat(item.base_increase_pct) : null} unit="%" humanVerified={item.human_verified} confidence={item.confidence} />
+                        <ProvenanceValue value={item.base_increase_pct != null ? parseFloat(item.base_increase_pct) : null} unit="%" humanVerified={item.human_verified} confidence={item.confidence} sourceUrl={item.source_url} retrievedAt={item.retrieved_at} />
                       </td>
                       <td className="px-3 py-2.5">
-                        <ProvenanceValue value={item.year2_pct != null ? parseFloat(item.year2_pct) : null} unit="%" humanVerified={item.human_verified} confidence={item.confidence} />
+                        <ProvenanceValue value={item.year2_pct != null ? parseFloat(item.year2_pct) : null} unit="%" humanVerified={item.human_verified} confidence={item.confidence} sourceUrl={item.source_url} retrievedAt={item.retrieved_at} />
                       </td>
                       <td className="px-3 py-2.5">
-                        <ProvenanceValue value={item.year3_pct != null ? parseFloat(item.year3_pct) : null} unit="%" humanVerified={item.human_verified} confidence={item.confidence} />
+                        <ProvenanceValue value={item.year3_pct != null ? parseFloat(item.year3_pct) : null} unit="%" humanVerified={item.human_verified} confidence={item.confidence} sourceUrl={item.source_url} retrievedAt={item.retrieved_at} />
                       </td>
                       <td className="px-3 py-2.5 text-slate-500">{item.method ?? "—"}</td>
                     </tr>

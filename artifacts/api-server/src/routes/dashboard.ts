@@ -231,7 +231,7 @@ router.get("/dashboard/districts/:id/factfinding", canAccessDistrict, async (req
       SELECT fp.id, fp.case_number, fp.report_date, fp.union_name,
              fp.employer_proposal_pct, fp.union_proposal_pct,
              fp.factfinder_recommendation_pct, fp.year_covered,
-             sd.source_url
+             sd.source_url, sd.retrieved_at
       FROM factfinding_proposals fp
       LEFT JOIN source_documents sd ON fp.source_doc_id = sd.id
       WHERE fp.district_id = ${districtId}
@@ -310,9 +310,18 @@ router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Resp
           s.id, s.from_year, s.to_year, s.base_increase_pct, s.year2_pct, s.year3_pct,
           s.off_schedule_payment, s.term_years, s.method, s.confidence, s.human_verified,
           d.id AS district_id, d.name AS district_name,
-          d.county, d.district_type, d.enrollment
+          d.county, d.district_type, d.enrollment,
+          sd.source_url, sd.retrieved_at
         FROM settlements s
         JOIN districts d ON s.district_id = d.id
+        LEFT JOIN LATERAL (
+          SELECT c2.source_doc_id
+          FROM contracts c2
+          WHERE c2.district_id = s.district_id
+          ORDER BY c2.effective_end DESC NULLS LAST
+          LIMIT 1
+        ) lc ON true
+        LEFT JOIN source_documents sd ON lc.source_doc_id = sd.id
         WHERE ${where}
         ORDER BY s.from_year DESC, d.name
         LIMIT ${limit} OFFSET ${offset}
