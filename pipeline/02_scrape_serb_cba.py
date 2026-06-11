@@ -213,8 +213,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-pdfs", type=int, default=0,
                         help="Max PDFs to download per run (0 = unlimited)")
-    parser.add_argument("--years-back", type=int, default=6,
-                        help="Only download CBAs from the last N years (default 6)")
+    parser.add_argument("--years-back", type=int, default=0,
+                        help="Only download CBAs from the last N years (0 = all time, default)")
     args = parser.parse_args()
 
     CBA_PDF_DIR.mkdir(parents=True, exist_ok=True)
@@ -234,17 +234,21 @@ def main():
     log.info("School-sector records (T/NT): %d", len(school_records))
     state["cba_docs_found"] = len(school_records)
 
-    # 4 — Year filter: last N years
+    # 4 — Year filter: last N years (0 = all time)
     import datetime
-    cutoff_year = datetime.date.today().year - args.years_back
-    def in_range(rec):
-        try:
-            year = int(rec["start_date"][:4]) if rec["start_date"] else 0
-            return year >= cutoff_year
-        except (ValueError, TypeError):
-            return False
-    recent_records = [r for r in school_records if in_range(r)]
-    log.info("Records in last %d years: %d", args.years_back, len(recent_records))
+    if args.years_back > 0:
+        cutoff_year = datetime.date.today().year - args.years_back
+        def in_range(rec):
+            try:
+                year = int(rec["start_date"][:4]) if rec["start_date"] else 0
+                return year >= cutoff_year
+            except (ValueError, TypeError):
+                return False
+        recent_records = [r for r in school_records if in_range(r)]
+        log.info("Records in last %d years: %d", args.years_back, len(recent_records))
+    else:
+        recent_records = school_records
+        log.info("Records (all time, no year filter): %d", len(recent_records))
 
     # 5 — Build district index for matching
     conn = common.get_db_conn()

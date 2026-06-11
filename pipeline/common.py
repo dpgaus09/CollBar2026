@@ -93,11 +93,15 @@ BROWSER_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
+# Bot UA used for HTML catalog page scraping
+BOT_UA = "CollBarBot/1.0 (hello@collbar.com; Ohio K-12 CB research)"
+
 HEADERS = {
-    "User-Agent": BROWSER_UA,
+    "User-Agent": BOT_UA,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
+# PDF downloads require a browser UA — SERB rejects bot UAs for static PDF paths
 PDF_HEADERS = {
     "User-Agent": BROWSER_UA,
     "Accept": "application/pdf,*/*",

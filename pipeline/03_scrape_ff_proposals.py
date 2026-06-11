@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
 """
-SERB Fact-Finding Wage Proposals scraper.
+SERB Fact-Finding Report scraper.
 
-Attempts to fetch the SERB fact-finding catalog page and extract wage proposal data
-into the factfinding_proposals table. Also downloads individual FF report PDFs.
+Fetches the SERB FF Reports catalog page which embeds all document records as
+HTML-entity-encoded JSON in a hidden div (#js-placeholder-json-data), identical
+in structure to the CBA catalog page. Filters for school-sector BU codes (T, NT),
+downloads PDFs, and inserts rows into factfinding_proposals + source_documents.
 
-The FF catalog page requires JavaScript to render its document list. This script
-tries the server-side HTML first; if only a static summary PDF is available, it
-parses that instead.
+Column order in FF JSON data:
+  0: Case Number  1: "View"  2: URL  3: Page Number  4: Bargaining Unit
+  5: Employer Name  6: Union/Local  7: Neutral  8: Date Issued  9: Group
 
-Usage: python3 pipeline/03_scrape_ff_proposals.py
+Usage: python3 pipeline/03_scrape_ff_proposals.py [--max-pdfs N]
 """
 import re
 import sys
+import json
+import html as html_module
 import logging
+import argparse
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -27,9 +32,6 @@ log = logging.getLogger(__name__)
 FF_CATALOG_URL = (
     "https://serb.ohio.gov/wps/portal/gov/serb/view-document-archive/fact-finding-reports"
 )
-FF_WAGE_URL = (
-    "https://serb.ohio.gov/wps/portal/gov/serb/view-document-archive/ff-wage-proposals"
-)
 FF_STATS_PDF_URL = (
     "https://serb.ohio.gov/static/PDF/FF_Statistics/Fact-Finding_Statistics.pdf"
 )
@@ -37,55 +39,94 @@ FF_STATS_PDF_URL = (
 FF_CACHE = common.DATA_DIR / "serb_ff_raw.html"
 FF_PDF_DIR = common.DATA_DIR / "ff_reports"
 
-# Same row pattern as CBA page — FF may embed data the same way
-FF_ROW_RE = re.compile(
-    r'\["([^"]+)","View","(https://serb\.ohio\.gov/static/PDF/[^"]+\.pdf)"'
-    r'(?:,"[^"]*"){4},'
-    r'"([^"]*)"'  # employer
-    r',"([^"]*)"'  # county
-    r',"([^"]*)"'  # BU
-    r',"(\d*)"'    # unit size
-    r',"([^"]*)"'  # union
-    r',"([^"]*)"'  # start date
-    r',"([^"]*)"'  # end date
-    r',"([^"]*)"\]'  # group
+SCHOOL_BU_CODES = {"T", "NT"}
+
+# JSON data is embedded inside a hidden div, HTML-entity-encoded
+JSON_DIV_RE = re.compile(
+    r'<div[^>]+id=["\']js-placeholder-json-data["\'][^>]*>(.*?)</div>',
+    re.DOTALL | re.IGNORECASE,
 )
 
 
-def try_fetch_ff_page(session: requests.Session) -> tuple[str | None, str]:
-    """Try to fetch the FF catalog page. Returns (html, url_tried)."""
-    urls_to_try = [FF_CATALOG_URL, FF_WAGE_URL]
-    for url in urls_to_try:
+def fetch_ff_page(session: requests.Session) -> str:
+    """Fetch/use cached FF catalog page."""
+    if FF_CACHE.exists():
+        log.info("Using cached FF page: %s", FF_CACHE)
         try:
-            r = common.polite_get(session, url)
-            if r and r.status_code == 200 and len(r.text) > 10000:
-                log.info("FF catalog page loaded: %s (%d bytes)", url, len(r.text))
-                return r.text, url
-            else:
-                log.info("FF catalog not accessible at %s (status=%s, size=%d)",
-                         url, r.status_code if r else "None",
-                         len(r.text) if r else 0)
+            r0 = session.get("https://serb.ohio.gov/", headers=common.HEADERS, timeout=15, allow_redirects=True)
+            log.info("Session warm-up (homepage): HTTP %s", r0.status_code)
         except Exception as e:
-            log.warning("Error fetching %s: %s", url, e)
-    return None, ""
+            log.warning("Session warm-up failed: %s", e)
+        with open(FF_CACHE, encoding="utf-8") as f:
+            return f.read()
+    log.info("Fetching FF catalog page…")
+    r = common.polite_get(session, FF_CATALOG_URL)
+    if not r or r.status_code != 200:
+        raise RuntimeError(f"Failed to fetch FF catalog: HTTP {r.status_code if r else 'None'}")
+    FF_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    with open(FF_CACHE, "w", encoding="utf-8") as f:
+        f.write(r.text)
+    log.info("Saved FF page (%d bytes)", len(r.text))
+    return r.text
 
 
-def try_download_stats_pdf(session: requests.Session) -> bytes | None:
-    """Try to download the fact-finding statistics aggregate PDF."""
+def parse_ff_records(raw_html: str) -> list[dict]:
+    """Extract all FF report rows from the embedded JSON div."""
+    m = JSON_DIV_RE.search(raw_html)
+    if not m:
+        log.warning("Could not find js-placeholder-json-data div in FF page")
+        return []
+    decoded = html_module.unescape(m.group(1).strip())
     try:
-        r = common.polite_get(session, FF_STATS_PDF_URL)
-        if r and r.status_code == 200 and r.content[:4] == b"%PDF":
-            dest = common.DATA_DIR / "ff_statistics.pdf"
-            dest.write_bytes(r.content)
-            log.info("Downloaded FF stats PDF (%d bytes)", len(r.content))
-            return r.content
-        else:
-            log.info("FF stats PDF not available as real PDF (status=%s, content-type=%s)",
-                     r.status_code if r else "None",
-                     r.headers.get("Content-Type", "") if r else "")
+        data = json.loads(decoded)
+    except json.JSONDecodeError as e:
+        log.warning("JSON decode failed for FF data: %s", e)
+        return []
+
+    rows = data.get("data", [])
+    if len(rows) < 2:
+        return []
+
+    # Row 0: column types, Row 1: column names, Rows 2+: data
+    header = rows[1]
+    log.info("FF data header: %s", header)
+    records = []
+    for row in rows[2:]:
+        if not isinstance(row, list) or len(row) < 9:
+            continue
+        records.append({
+            "case_number": str(row[0]).strip(),
+            "url": str(row[2]).strip(),
+            "page_number": str(row[3]).strip(),
+            "bargaining_unit": str(row[4]).strip(),
+            "employer": str(row[5]).strip(),
+            "union": str(row[6]).strip(),
+            "neutral": str(row[7]).strip(),
+            "date_issued": str(row[8]).strip() or None,
+            "group": str(row[9]).strip() if len(row) > 9 else "",
+        })
+    return records
+
+
+def download_ff_pdf(session: requests.Session, url: str, dest: Path) -> bytes | None:
+    """Download an FF report PDF with appropriate headers."""
+    if dest.exists():
+        return dest.read_bytes()
+    try:
+        headers = {**common.PDF_HEADERS,
+                   "Referer": FF_CATALOG_URL}
+        r = common.polite_get(session, url, headers=headers, timeout=120)
+        if not r or r.status_code != 200:
+            log.warning("HTTP %s for %s", r.status_code if r else "None", url)
             return None
+        if "html" in r.headers.get("Content-Type", "").lower():
+            log.warning("Got HTML instead of PDF for %s", url)
+            return None
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(r.content)
+        return r.content
     except Exception as e:
-        log.warning("Error fetching FF stats PDF: %s", e)
+        log.warning("Download error for %s: %s", url, e)
         return None
 
 
@@ -105,81 +146,83 @@ def upsert_source_doc(cur, district_id, source_url, file_hash, storage_key):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--max-pdfs", type=int, default=0,
+                        help="Max FF PDFs to download (0 = unlimited)")
+    args = parser.parse_args()
+
     FF_PDF_DIR.mkdir(parents=True, exist_ok=True)
 
     session = requests.Session()
     state = common.load_crawl_state()
 
-    # Try to fetch the FF catalog page
-    ff_html, ff_url = try_fetch_ff_page(session)
-    state["ff_page_accessible"] = ff_html is not None
+    raw_html = fetch_ff_page(session)
+    state["ff_page_accessible"] = True
+
+    all_records = parse_ff_records(raw_html)
+    log.info("FF records total: %d", len(all_records))
+
+    school_records = [r for r in all_records if r["bargaining_unit"] in SCHOOL_BU_CODES]
+    log.info("School-sector FF records (T/NT): %d", len(school_records))
 
     proposals_loaded = 0
 
-    if ff_html:
-        import html as html_module
-        decoded = html_module.unescape(ff_html)
-        matches = list(FF_ROW_RE.finditer(decoded))
-        log.info("FF page rows parsed: %d", len(matches))
+    if school_records:
+        conn = common.get_db_conn()
+        cur = conn.cursor()
+        pdf_count = 0
 
-        if matches:
-            conn = common.get_db_conn()
-            cur = conn.cursor()
+        for rec in school_records:
+            if args.max_pdfs and pdf_count >= args.max_pdfs:
+                log.info("Reached max-pdfs limit (%d)", args.max_pdfs)
+                break
 
-            for m in matches:
-                case_num = m.group(1)
-                url = m.group(2)
-                employer = m.group(3)
-                report_date = m.group(8) or None
+            url = rec["url"]
+            if not url.startswith("http"):
+                continue
 
-                # Download PDF
-                fname = url.split("/")[-1]
-                dest = FF_PDF_DIR / fname
-                pdf_bytes = None
-                if not dest.exists():
-                    r = common.polite_get(session, url)
-                    if r and r.status_code == 200:
-                        dest.write_bytes(r.content)
-                        pdf_bytes = r.content
-                else:
-                    pdf_bytes = dest.read_bytes()
+            fname = url.split("/")[-1]
+            dest = FF_PDF_DIR / fname
+            pdf_bytes = download_ff_pdf(session, url, dest)
+            pdf_count += 1
 
-                if not pdf_bytes:
-                    continue
+            if not pdf_bytes:
+                continue
 
-                file_hash = common.sha256_bytes(pdf_bytes)
-                storage_key = common.upload_to_object_storage(dest, f"oh/ff/{file_hash}.pdf")
-                doc_id = upsert_source_doc(cur, None, url, file_hash, storage_key)
+            file_hash = common.sha256_bytes(pdf_bytes)
+            storage_key = common.upload_to_object_storage(dest, f"oh/ff/{file_hash}.pdf")
+            doc_id = upsert_source_doc(cur, None, url, file_hash, storage_key)
 
-                # Insert into factfinding_proposals
-                try:
-                    cur.execute(
-                        """
-                        INSERT INTO factfinding_proposals
-                            (case_number, report_date, source_doc_id)
-                        VALUES (%s, %s, %s)
-                        ON CONFLICT DO NOTHING
-                        """,
-                        (case_num, report_date, doc_id),
-                    )
-                    proposals_loaded += 1
-                except Exception as e:
-                    log.warning("FF proposal insert failed: %s", e)
-                    conn.rollback()
-                    continue
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO factfinding_proposals (case_number, report_date, source_doc_id)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (rec["case_number"], rec["date_issued"] or None, doc_id),
+                )
+                proposals_loaded += 1
+            except Exception as e:
+                log.warning("FF proposal insert failed for %s: %s", rec["case_number"], e)
+                conn.rollback()
+                continue
 
-            conn.commit()
-            cur.close()
-            conn.close()
+        conn.commit()
+        cur.close()
+        conn.close()
     else:
-        log.warning(
-            "FF catalog pages not accessible via server-side HTML. "
-            "The SERB fact-finding archive requires JavaScript execution (Playwright) "
-            "to render its document list. Install Playwright system deps to enable this step."
-        )
+        log.warning("No school-sector (T/NT) FF records found — BU codes in page may differ from T/NT")
 
-    # Try the aggregate statistics PDF regardless
-    try_download_stats_pdf(session)
+    # Download aggregate statistics PDF (no DB insert needed)
+    try:
+        r = session.get(FF_STATS_PDF_URL, headers=common.PDF_HEADERS, timeout=30)
+        if r.status_code == 200 and r.content[:4] == b"%PDF":
+            dest = common.DATA_DIR / "ff_statistics.pdf"
+            dest.write_bytes(r.content)
+            log.info("Downloaded FF stats PDF (%d bytes)", len(r.content))
+    except Exception as e:
+        log.warning("FF stats PDF download failed: %s", e)
 
     state["ff_proposals_loaded"] = proposals_loaded
     common.save_crawl_state(state)

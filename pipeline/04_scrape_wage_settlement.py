@@ -124,7 +124,23 @@ def main():
         if dest.exists():
             log.info("Already have wage settlement for %d, skipping download", year)
             downloaded += 1
-            # Still try to parse it
+            # Upsert source_documents row for already-downloaded PDFs
+            file_hash = common.sha256_file(dest)
+            storage_key = f"local:{dest}"
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO source_documents
+                        (doc_type, source_url, file_hash, storage_key, school_year)
+                    VALUES ('wage_settlement_report', %s, %s, %s, %s)
+                    ON CONFLICT (source_url, file_hash) DO NOTHING
+                    """,
+                    (f"local:{dest}", file_hash, storage_key, f"{year}-{str(year+1)[2:]}"),
+                )
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                log.debug("source_documents upsert for %d WSR: %s", year, e)
             parse_wage_tables(dest, f"local:{dest}", conn)
             continue
 
