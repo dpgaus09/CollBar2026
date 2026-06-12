@@ -34,6 +34,8 @@ interface CrawlReport {
     unmatchedEmployerCount: number;
     unmatchedEmployers: string[];
     lastUpdated: string | null;
+    cbaIndexedCount: number;
+    cbaMatchedCount: number;
   };
   tableCounts: Record<string, number>;
 }
@@ -48,6 +50,9 @@ interface ExtractionReport {
   settlementsByMethod: { method: string; count: number }[];
   totalCbaDocs: number;
   processedDocs: number;
+  auditSampleCount: number;
+  auditReviewedCount: number;
+  auditAgreementRate: number | null;
 }
 
 interface ReviewQueueItem {
@@ -60,6 +65,7 @@ interface ReviewQueueItem {
   clause_excerpt: string | null;
   page_ref: number | null;
   confidence: string;
+  is_audit_sample: boolean;
   contract_id: number;
   union_name: string | null;
   unit_scope: string | null;
@@ -531,6 +537,61 @@ function CrawlReportTab() {
         </div>
       </section>
 
+      {/* Coverage funnel */}
+      <section className="space-y-3">
+        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">CBA Coverage Funnel</h2>
+        <div className="rounded-lg border border-slate-800 bg-slate-950 p-5 space-y-3">
+          {[
+            {
+              label: "School-sector docs found (SERB catalog)",
+              value: crawlState.cbaDocsFound,
+              pct: null,
+              color: "text-slate-300",
+            },
+            {
+              label: "PDFs indexed in DB (cumulative)",
+              value: crawlState.cbaIndexedCount,
+              pct: crawlState.cbaDocsFound > 0
+                ? Math.round((crawlState.cbaIndexedCount / crawlState.cbaDocsFound) * 1000) / 10
+                : null,
+              color: "text-sky-400",
+            },
+            {
+              label: "Matched to a district (auto)",
+              value: crawlState.cbaMatchedCount,
+              pct: crawlState.cbaDocsFound > 0
+                ? Math.round((crawlState.cbaMatchedCount / crawlState.cbaDocsFound) * 1000) / 10
+                : null,
+              color: "text-emerald-400",
+            },
+          ].map((row) => (
+            <div key={row.label}>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-slate-400">{row.label}</span>
+                <div className="flex items-center gap-3">
+                  {row.pct !== null && (
+                    <span className="text-xs text-slate-500 font-mono">{row.pct}%</span>
+                  )}
+                  <span className={`text-sm font-mono font-semibold ${row.color}`}>
+                    {row.value.toLocaleString()}
+                  </span>
+                </div>
+              </div>
+              {row.pct !== null && crawlState.cbaDocsFound > 0 && (
+                <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-500 ${
+                      row.color.includes("emerald") ? "bg-emerald-500" : "bg-sky-500"
+                    }`}
+                    style={{ width: `${Math.min(100, row.pct)}%` }}
+                  />
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </section>
+
       <section className="space-y-3">
         <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">District Match Rate</h2>
         <div
@@ -699,8 +760,70 @@ function ExtractionReportTab() {
           <Metric
             label="Review queue"
             value={data.reviewQueueCount}
-            sub="confidence < 0.8, unverified"
+            sub="low-confidence + audit samples"
           />
+        </div>
+      </section>
+
+      {/* Audit quality sampling */}
+      <section className="space-y-3">
+        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Audit Quality Sampling</h2>
+        <div className="rounded-lg border border-slate-800 bg-slate-950 p-5">
+          <div className="grid grid-cols-3 gap-6 mb-4">
+            <div>
+              <p className="text-xs text-slate-500 mb-1">Provisions flagged (5% sample)</p>
+              <p className="text-2xl font-bold font-mono text-slate-200">
+                {data.auditSampleCount.toLocaleString()}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500 mb-1">Human-reviewed</p>
+              <p className="text-2xl font-bold font-mono text-sky-400">
+                {data.auditReviewedCount.toLocaleString()}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500 mb-1">Agreement rate</p>
+              <p className={`text-2xl font-bold font-mono ${
+                data.auditAgreementRate === null
+                  ? "text-slate-600"
+                  : data.auditAgreementRate >= 90
+                  ? "text-emerald-400"
+                  : data.auditAgreementRate >= 75
+                  ? "text-amber-400"
+                  : "text-red-400"
+              }`}>
+                {data.auditAgreementRate !== null ? `${data.auditAgreementRate}%` : "—"}
+              </p>
+            </div>
+          </div>
+          {data.auditSampleCount > 0 && (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-slate-500">
+                  Review progress ({data.auditReviewedCount} / {data.auditSampleCount})
+                </span>
+                <span className="text-xs text-slate-500 font-mono">
+                  {data.auditSampleCount > 0
+                    ? Math.round((data.auditReviewedCount / data.auditSampleCount) * 100)
+                    : 0}%
+                </span>
+              </div>
+              <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-sky-500 transition-all duration-500"
+                  style={{
+                    width: `${Math.min(100, (data.auditReviewedCount / data.auditSampleCount) * 100)}%`,
+                  }}
+                />
+              </div>
+            </div>
+          )}
+          {data.auditSampleCount === 0 && (
+            <p className="text-xs text-slate-600">
+              No audit samples yet — run 06_extract_contracts.py to populate.
+            </p>
+          )}
         </div>
       </section>
 
@@ -997,6 +1120,11 @@ function ReviewQueueTab() {
                     <span className="text-xs font-mono text-blue-400">{item.provision_key}</span>
                     <span className="text-xs text-slate-500">{item.category}</span>
                     <ConfidenceBadge value={item.confidence} />
+                    {item.is_audit_sample && (
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-violet-950 text-violet-400 border border-violet-800">
+                        AUDIT
+                      </span>
+                    )}
                   </div>
                   <div className="text-xs text-slate-500">
                     {item.district_name || "Unknown district"} •{" "}

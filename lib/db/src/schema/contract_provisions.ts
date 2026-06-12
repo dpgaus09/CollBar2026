@@ -29,11 +29,17 @@ export const contractProvisionsTable = pgTable(
     pageRef: integer("page_ref"),
     confidence: numeric("confidence", { precision: 3, scale: 2 }),
     humanVerified: boolean("human_verified").default(false),
+    isAuditSample: boolean("is_audit_sample").notNull().default(false),
+    auditVerdict: text("audit_verdict"),
   },
   (t) => [
     check(
       "contract_provisions_category_check",
       sql`${t.category} IN ('compensation','insurance','retirement','leave','workday','evaluation','rif','grievance','other')`,
+    ),
+    check(
+      "contract_provisions_audit_verdict_check",
+      sql`${t.auditVerdict} IN ('agree','disagree')`,
     ),
   ],
 );

@@ -13,7 +13,9 @@ Usage:
 import argparse
 import json
 import logging
+import math
 import os
+import random
 import re
 import sys
 import time
@@ -32,6 +34,13 @@ PROMPT_VERSION = "v1"
 MODEL = "claude-haiku-4-5"
 MAX_TEXT_CHARS = 80_000  # truncate context sent to LLM
 MAX_TOKENS = 8192
+
+# Anthropic claude-3-5-haiku pricing (USD per 1M tokens) — update if rates change.
+COST_PER_1M_INPUT_TOKENS: float = 0.80
+COST_PER_1M_OUTPUT_TOKENS: float = 4.00
+
+# Fraction of high-confidence provisions flagged per extraction run for human auditing.
+AUDIT_SAMPLE_RATE: float = 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -208,13 +217,16 @@ def load_prompt() -> str:
     return PROMPT_FILE.read_text(encoding="utf-8")
 
 
-def call_anthropic(system_prompt: str, text: str) -> Optional[str]:
-    """Call Anthropic Claude and return the raw response text, or None."""
+def call_anthropic(system_prompt: str, text: str) -> tuple[Optional[str], int, int]:
+    """
+    Call Anthropic Claude and return (response_text, input_tokens, output_tokens).
+    Returns (None, 0, 0) on failure.
+    """
     try:
         import anthropic as _anthropic
     except ImportError:
         log.error("anthropic SDK not installed — pip install anthropic")
-        return None
+        return None, 0, 0
 
     base_url = os.environ.get("AI_INTEGRATIONS_ANTHROPIC_BASE_URL", "")
     api_key = os.environ.get("AI_INTEGRATIONS_ANTHROPIC_API_KEY", "dummy")
@@ -242,10 +254,12 @@ def call_anthropic(system_prompt: str, text: str) -> Optional[str]:
             ],
         )
         block = response.content[0]
-        return block.text if block.type == "text" else None
+        text_out = block.text if block.type == "text" else None
+        usage = response.usage
+        return text_out, usage.input_tokens, usage.output_tokens
     except Exception as e:
         log.warning("Anthropic API error: %s", e)
-        return None
+        return None, 0, 0
 
 
 def extract_json_from_response(raw: str) -> str:
@@ -265,10 +279,12 @@ def extract_json_from_response(raw: str) -> str:
 # DB operations
 # ---------------------------------------------------------------------------
 
-def get_unprocessed_docs(conn, doc_id: Optional[int] = None):
+def get_unprocessed_docs(conn, doc_id: Optional[int] = None, priority: bool = False):
     """
     Return source_document rows for cba_pdf docs with no successful extraction_run.
     If doc_id is given, return only that row.
+    When priority=True, contracts with school_year >= '2023-24' (likely expiring
+    2026-2027) are processed first.
     """
     cur = conn.cursor()
     if doc_id:
@@ -281,8 +297,14 @@ def get_unprocessed_docs(conn, doc_id: Optional[int] = None):
             (doc_id,),
         )
     else:
+        order_clause = (
+            "ORDER BY CASE WHEN sd.school_year >= '2023-24' THEN 0 ELSE 1 END ASC,"
+            " sd.school_year DESC NULLS LAST, sd.id"
+            if priority
+            else "ORDER BY sd.id"
+        )
         cur.execute(
-            """
+            f"""
             SELECT sd.id, sd.source_url, sd.storage_key, sd.district_id, sd.school_year
             FROM source_documents sd
             WHERE sd.doc_type = 'cba_pdf'
@@ -292,7 +314,7 @@ def get_unprocessed_docs(conn, doc_id: Optional[int] = None):
                   WHERE er.status = 'success'
                     AND er.source_doc_id IS NOT NULL
               )
-            ORDER BY sd.id
+            {order_clause}
             """
         )
     rows = cur.fetchall()
@@ -403,6 +425,31 @@ def insert_provisions(cur, contract_id: int, provisions) -> int:
         except Exception as e:
             log.debug("Provision insert error: %s", e)
     return inserted
+
+
+def mark_audit_samples(cur, contract_id: int, sample_rate: float = AUDIT_SAMPLE_RATE) -> int:
+    """
+    Mark a random fraction of high-confidence provisions (confidence >= 0.8) as
+    audit samples for human spot-checking. Returns the number of provisions flagged.
+    """
+    cur.execute(
+        """
+        SELECT id FROM contract_provisions
+        WHERE contract_id = %s AND confidence >= 0.8 AND NOT is_audit_sample
+        """,
+        (contract_id,),
+    )
+    high_conf_ids = [row[0] for row in cur.fetchall()]
+    if not high_conf_ids:
+        return 0
+    n_sample = max(1, math.ceil(len(high_conf_ids) * sample_rate))
+    sample_ids = random.sample(high_conf_ids, min(n_sample, len(high_conf_ids)))
+    for sid in sample_ids:
+        cur.execute(
+            "UPDATE contract_provisions SET is_audit_sample = true WHERE id = %s",
+            (sid,),
+        )
+    return len(sample_ids)
 
 
 # Attribute access helpers that work for both Pydantic models and plain dicts
@@ -614,13 +661,19 @@ def derive_settlements(conn):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Phase 3 LLM extraction pipeline")
     parser.add_argument("--max-docs", type=int, default=0,
                         help="Max CBA PDFs to process (0 = unlimited)")
+    parser.add_argument("--batch", type=int, default=0, dest="batch",
+                        help="Alias for --max-docs: process at most N docs this run")
     parser.add_argument("--doc-id", type=int, default=None,
                         help="Process a specific source_document id only")
     parser.add_argument("--dry-run", action="store_true",
                         help="Parse PDFs and call LLM but do not write to DB")
+    parser.add_argument("--cost-cap", type=float, default=0.0, metavar="USD",
+                        help="Hard-stop when accumulated LLM cost exceeds USD (0 = no cap)")
+    parser.add_argument("--priority", action="store_true",
+                        help="Process contracts expiring 2026-2027 first (school_year >= 2023-24)")
     args = parser.parse_args()
 
     if not PROMPT_FILE.exists():
@@ -630,20 +683,39 @@ def main():
     system_prompt = load_prompt()
     conn = common.get_db_conn()
 
-    docs = get_unprocessed_docs(conn, args.doc_id)
-    log.info("Unprocessed cba_pdf docs: %d", len(docs))
+    docs = get_unprocessed_docs(conn, args.doc_id, priority=args.priority)
+    log.info("Unprocessed cba_pdf docs: %d%s", len(docs),
+             " (priority order: 2026-2027 expiries first)" if args.priority else "")
 
-    if args.max_docs:
-        docs = docs[:args.max_docs]
-        log.info("Limiting to %d docs", args.max_docs)
+    max_docs = args.batch or args.max_docs
+    if max_docs:
+        docs = docs[:max_docs]
+        log.info("Limiting to %d docs", max_docs)
+
+    if args.cost_cap:
+        log.info("Cost cap: $%.2f USD", args.cost_cap)
 
     attempts = 0
     successes = 0
     failures = 0
     contracts_inserted = 0
     provisions_inserted = 0
+    audit_samples_marked = 0
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_cost_usd = 0.0
+    cost_cap_hit = False
 
     for source_doc_id, source_url, storage_key, district_id, school_year in docs:
+        # --- Cost cap check (before LLM call) ---
+        if args.cost_cap and total_cost_usd >= args.cost_cap:
+            log.warning(
+                "Cost cap $%.2f reached (spent $%.4f) — stopping after %d docs",
+                args.cost_cap, total_cost_usd, attempts,
+            )
+            cost_cap_hit = True
+            break
+
         attempts += 1
         log.info(
             "[%d/%d] Processing doc %d: %s",
@@ -690,8 +762,12 @@ def main():
         # --- Step 3: LLM call (with one retry) ---
         result = None
         last_error = None
+        doc_input_tokens = 0
+        doc_output_tokens = 0
         for attempt in range(2):
-            raw = call_anthropic(system_prompt, chunked_text)
+            raw, in_tok, out_tok = call_anthropic(system_prompt, chunked_text)
+            doc_input_tokens += in_tok
+            doc_output_tokens += out_tok
             if raw is None:
                 last_error = "Anthropic API returned no response"
                 time.sleep(2 ** attempt)
@@ -704,6 +780,19 @@ def main():
             log.warning("Attempt %d: JSON validation failed for doc %d", attempt+1, source_doc_id)
             time.sleep(1)
 
+        # Accumulate cost for this doc
+        doc_cost = (
+            doc_input_tokens * COST_PER_1M_INPUT_TOKENS
+            + doc_output_tokens * COST_PER_1M_OUTPUT_TOKENS
+        ) / 1_000_000
+        total_input_tokens += doc_input_tokens
+        total_output_tokens += doc_output_tokens
+        total_cost_usd += doc_cost
+        log.info(
+            "Doc %d LLM usage: %d in + %d out tokens, $%.4f (running total: $%.4f)",
+            source_doc_id, doc_input_tokens, doc_output_tokens, doc_cost, total_cost_usd,
+        )
+
         if result is None:
             log.warning("Extraction failed for doc %d: %s", source_doc_id, last_error)
             update_extraction_run(cur, run_id, "failed", last_error)
@@ -712,10 +801,11 @@ def main():
             failures += 1
             continue
 
-        # --- Step 4: DB insert ---
+        # --- Step 4: DB insert + audit sampling ---
         contracts_list = result.contracts if PYDANTIC_OK else result.get("contracts", [])  # type: ignore[union-attr]
         doc_contracts = 0
         doc_provisions = 0
+        doc_audit_samples = 0
         for c in contracts_list:
             contract_id = upsert_contract(cur, district_id, c, source_doc_id)
             if contract_id is None:
@@ -728,16 +818,22 @@ def main():
             doc_provisions += n
             conn.commit()
 
+            # Flag a random 5% of high-confidence provisions for human audit
+            n_audit = mark_audit_samples(cur, contract_id)
+            doc_audit_samples += n_audit
+            conn.commit()
+
         contracts_inserted += doc_contracts
         provisions_inserted += doc_provisions
+        audit_samples_marked += doc_audit_samples
         update_extraction_run(cur, run_id, "success")
         conn.commit()
         cur.close()
         successes += 1
 
         log.info(
-            "Doc %d done: %d contracts, %d provisions",
-            source_doc_id, doc_contracts, doc_provisions,
+            "Doc %d done: %d contracts, %d provisions (%d audit samples)",
+            source_doc_id, doc_contracts, doc_provisions, doc_audit_samples,
         )
         # Be polite to the API
         time.sleep(0.5)
@@ -759,7 +855,13 @@ def main():
     print(f"  Failures                : {failures:>8,}")
     print(f"  Contracts inserted      : {contracts_inserted:>8,}")
     print(f"  Provisions inserted     : {provisions_inserted:>8,}")
+    print(f"  Audit samples flagged   : {audit_samples_marked:>8,}")
     print(f"  Settlements derived     : {settlements_derived:>8,}")
+    print(f"  LLM input tokens        : {total_input_tokens:>8,}")
+    print(f"  LLM output tokens       : {total_output_tokens:>8,}")
+    print(f"  Estimated LLM cost      :  ${total_cost_usd:>8.4f} USD")
+    if cost_cap_hit:
+        print(f"  [STOPPED: cost cap ${args.cost_cap:.2f} reached]")
     if args.dry_run:
         print("  [DRY RUN — no DB writes]")
     print("=" * 60 + "\n")

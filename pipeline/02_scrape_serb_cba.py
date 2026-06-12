@@ -149,7 +149,13 @@ def main():
                         help="Max PDFs to download per run (0 = unlimited)")
     parser.add_argument("--years-back", type=int, default=0,
                         help="Only download CBAs from the last N years (0 = all time, default)")
+    parser.add_argument("--force-refresh", action="store_true",
+                        help="Delete cached catalog page and re-fetch from SERB")
     args = parser.parse_args()
+
+    if args.force_refresh and CBA_CACHE.exists():
+        CBA_CACHE.unlink()
+        log.info("Deleted cached catalog page — will re-fetch from SERB")
 
     CBA_PDF_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -309,12 +315,30 @@ def main():
 
     total_attempted = downloaded_count + failed_count
     match_rate = (matched_count / max(1, matched_count + unmatched_count)) * 100
+    total_in_db = downloaded_count + skipped_count  # newly + previously downloaded
+
     log.info(
         "Done — downloaded: %d, skipped: %d, failed: %d | "
         "matched: %d, unmatched: %d (%.1f%%)",
         downloaded_count, skipped_count, failed_count,
         matched_count, unmatched_count, match_rate,
     )
+
+    found = state.get("cba_docs_found", 0)
+    print("\n" + "=" * 60)
+    print("  SERB School-Sector CBA Coverage Report")
+    print("=" * 60)
+    print(f"  School-sector docs found (catalog)  : {found:>8,}")
+    print(f"  PDFs in DB (new + prior runs)        : {total_in_db:>8,}")
+    print(f"  PDF downloads failed this run        : {failed_count:>8,}")
+    print(f"  Matched to a district (auto)         : {matched_count:>8,}")
+    print(f"  Unmatched / needs manual review      : {unmatched_count:>8,}")
+    if found > 0:
+        coverage_pct = total_in_db / found * 100
+        match_pct_of_found = matched_count / found * 100
+        print(f"  Download coverage                    : {coverage_pct:>7.1f}%")
+        print(f"  District match rate (of found)       : {match_pct_of_found:>7.1f}%")
+    print("=" * 60 + "\n")
 
 
 if __name__ == "__main__":

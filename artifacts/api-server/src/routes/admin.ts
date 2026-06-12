@@ -150,6 +150,19 @@ router.get("/admin/crawl-report", requireAdminToken, async (_req, res) => {
   const total = matched + unmatched;
   const matchRate = total > 0 ? Math.round((matched / total) * 1000) / 10 : null;
 
+  // Live counts straight from the DB (more accurate than crawl_state.json)
+  const cbaIdxRows = await db.execute(
+    sql.raw(`SELECT COUNT(*)::int AS n FROM source_documents WHERE doc_type = 'cba_pdf'`),
+  );
+  const cbaIndexedCount = (cbaIdxRows.rows[0] as { n: number })?.n ?? 0;
+
+  const cbaMatchRows = await db.execute(
+    sql.raw(
+      `SELECT COUNT(*)::int AS n FROM source_documents WHERE doc_type = 'cba_pdf' AND district_id IS NOT NULL`,
+    ),
+  );
+  const cbaMatchedCount = (cbaMatchRows.rows[0] as { n: number })?.n ?? 0;
+
   res.json({
     crawlState: {
       districtsLoaded: crawlState["districts_loaded"] ?? 0,
@@ -174,6 +187,8 @@ router.get("/admin/crawl-report", requireAdminToken, async (_req, res) => {
         ? (crawlState["unmatched_employers"] as string[]).slice(0, 50)
         : [],
       lastUpdated: crawlState["last_updated"] ?? null,
+      cbaIndexedCount,
+      cbaMatchedCount,
     },
     tableCounts,
   });
@@ -238,6 +253,29 @@ router.get("/admin/extraction-report", requireAdminToken, async (_req, res) => {
     );
     const processedDocs = (procRows.rows[0] as { n: number })?.n ?? 0;
 
+    const auditSampRows = await db.execute(
+      sql.raw(`SELECT COUNT(*)::int AS n FROM contract_provisions WHERE is_audit_sample = true`),
+    );
+    const auditSampleCount = (auditSampRows.rows[0] as { n: number })?.n ?? 0;
+
+    const auditRevRows = await db.execute(
+      sql.raw(
+        `SELECT COUNT(*)::int AS n FROM contract_provisions WHERE is_audit_sample = true AND human_verified = true`,
+      ),
+    );
+    const auditReviewedCount = (auditRevRows.rows[0] as { n: number })?.n ?? 0;
+
+    const auditAgrRows = await db.execute(
+      sql.raw(
+        `SELECT COUNT(*)::int AS n FROM contract_provisions WHERE is_audit_sample = true AND audit_verdict = 'agree'`,
+      ),
+    );
+    const auditAgreedCount = (auditAgrRows.rows[0] as { n: number })?.n ?? 0;
+    const auditAgreementRate =
+      auditReviewedCount > 0
+        ? Math.round((auditAgreedCount / auditReviewedCount) * 1000) / 10
+        : null;
+
     res.json({
       runCounts,
       totalContracts,
@@ -248,6 +286,9 @@ router.get("/admin/extraction-report", requireAdminToken, async (_req, res) => {
       settlementsByMethod,
       totalCbaDocs,
       processedDocs,
+      auditSampleCount,
+      auditReviewedCount,
+      auditAgreementRate,
     });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -285,6 +326,7 @@ router.get("/admin/review-queue", requireAdminToken, async (req, res) => {
               cp.clause_excerpt,
               cp.page_ref,
               cp.confidence,
+              cp.is_audit_sample,
               c.id              AS contract_id,
               c.union_name,
               c.unit_scope,
@@ -296,10 +338,10 @@ router.get("/admin/review-queue", requireAdminToken, async (req, res) => {
             JOIN contracts c ON cp.contract_id = c.id
             LEFT JOIN source_documents sd ON c.source_doc_id = sd.id
             LEFT JOIN districts d ON c.district_id = d.id
-            WHERE cp.confidence < 0.8
+            WHERE (cp.confidence < 0.8 OR cp.is_audit_sample = true)
               AND NOT cp.human_verified
               AND cp.category = ${category}
-            ORDER BY cp.confidence ASC, cp.id
+            ORDER BY cp.is_audit_sample DESC, cp.confidence ASC, cp.id
             LIMIT ${limit} OFFSET ${offset}
           `
         : sql`
@@ -313,6 +355,7 @@ router.get("/admin/review-queue", requireAdminToken, async (req, res) => {
               cp.clause_excerpt,
               cp.page_ref,
               cp.confidence,
+              cp.is_audit_sample,
               c.id              AS contract_id,
               c.union_name,
               c.unit_scope,
@@ -324,17 +367,17 @@ router.get("/admin/review-queue", requireAdminToken, async (req, res) => {
             JOIN contracts c ON cp.contract_id = c.id
             LEFT JOIN source_documents sd ON c.source_doc_id = sd.id
             LEFT JOIN districts d ON c.district_id = d.id
-            WHERE cp.confidence < 0.8
+            WHERE (cp.confidence < 0.8 OR cp.is_audit_sample = true)
               AND NOT cp.human_verified
-            ORDER BY cp.confidence ASC, cp.id
+            ORDER BY cp.is_audit_sample DESC, cp.confidence ASC, cp.id
             LIMIT ${limit} OFFSET ${offset}
           `,
     );
 
     const countRows = await db.execute(
       category
-        ? sql`SELECT COUNT(*)::int AS n FROM contract_provisions cp WHERE cp.confidence < 0.8 AND NOT cp.human_verified AND cp.category = ${category}`
-        : sql`SELECT COUNT(*)::int AS n FROM contract_provisions cp WHERE cp.confidence < 0.8 AND NOT cp.human_verified`,
+        ? sql`SELECT COUNT(*)::int AS n FROM contract_provisions cp WHERE (cp.confidence < 0.8 OR cp.is_audit_sample = true) AND NOT cp.human_verified AND cp.category = ${category}`
+        : sql`SELECT COUNT(*)::int AS n FROM contract_provisions cp WHERE (cp.confidence < 0.8 OR cp.is_audit_sample = true) AND NOT cp.human_verified`,
     );
     const total = (countRows.rows[0] as { n: number })?.n ?? 0;
 
@@ -466,8 +509,24 @@ router.patch("/admin/review-queue/:id", requireAdminToken, async (req, res) => {
   }
 
   try {
+    // Check whether this provision is flagged as an audit sample (must not be deleted on reject)
+    const sampCheck = await db.execute(
+      sql`SELECT is_audit_sample FROM contract_provisions WHERE id = ${id}`,
+    );
+    const isAuditSample =
+      ((sampCheck.rows[0] as { is_audit_sample?: boolean } | undefined)?.is_audit_sample) ?? false;
+
     if (action === "reject") {
-      await db.execute(sql`DELETE FROM contract_provisions WHERE id = ${id}`);
+      if (isAuditSample) {
+        // Preserve audit samples — mark as disagree instead of deleting so the audit trail is intact.
+        await db.execute(
+          sql`UPDATE contract_provisions
+              SET human_verified = true, audit_verdict = 'disagree'
+              WHERE id = ${id}`,
+        );
+      } else {
+        await db.execute(sql`DELETE FROM contract_provisions WHERE id = ${id}`);
+      }
     } else if (action === "correct") {
       if (correctedValue === undefined) {
         res.status(400).json({ error: "correctedValue is required for action=correct" });
@@ -477,23 +536,28 @@ router.patch("/admin/review-queue/:id", requireAdminToken, async (req, res) => {
       if (!isNaN(numericVal)) {
         await db.execute(
           sql`UPDATE contract_provisions
-              SET human_verified = true,
-                  value_text    = ${correctedValue},
-                  value_numeric = ${numericVal}
+              SET human_verified  = true,
+                  value_text      = ${correctedValue},
+                  value_numeric   = ${numericVal},
+                  audit_verdict   = ${isAuditSample ? "disagree" : null}
               WHERE id = ${id}`,
         );
       } else {
         await db.execute(
           sql`UPDATE contract_provisions
-              SET human_verified = true,
-                  value_text    = ${correctedValue}
+              SET human_verified  = true,
+                  value_text      = ${correctedValue},
+                  audit_verdict   = ${isAuditSample ? "disagree" : null}
               WHERE id = ${id}`,
         );
       }
     } else {
       // approve
       await db.execute(
-        sql`UPDATE contract_provisions SET human_verified = true WHERE id = ${id}`,
+        sql`UPDATE contract_provisions
+            SET human_verified = true,
+                audit_verdict  = ${isAuditSample ? "agree" : null}
+            WHERE id = ${id}`,
       );
     }
     res.json({ ok: true });
