@@ -4,7 +4,7 @@
   "il_failed": 4,
   "il_skipped": 0,
   "il_no_url": 194,
-  "last_updated": "2026-06-13T19:41:45Z",
+  "last_updated": "2026-06-13T19:44:42Z",
   "per_district": {
     "07016806060": {
       "status": "no_url",
@@ -881,6 +881,72 @@
     "11021306026": {
       "status": "failed",
       "timestamp": "2026-06-13T19:41:45Z"
+    },
+    "39055001026": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:41:49Z"
+    },
+    "07016217016": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:41:59Z"
+    },
+    "05016025002": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:42:17Z"
+    },
+    "54092225017": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:42:20Z"
+    },
+    "11021305026": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:42:20Z"
+    },
+    "13095015004": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:42:22Z"
+    },
+    "47052275026": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:42:23Z"
+    },
+    "07016125002": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:42:34Z"
+    },
+    "51084010026": {
+      "status": "found",
+      "url": "https://www.auburn.k12.il.us/vimages/shared/vnews/stories/471e255ecba55/5%20220.pdf",
+      "found_via": "direct_crawl",
+      "storage_key": "local:/home/runner/workspace/pipeline/data/il_cba/5f45f4e34a6dc12ede494717822e7e517cf4451e647c9fb16a5df6fca6f33ab9.pdf",
+      "file_hash": "5f45f4e34a6dc12ede494717822e7e517cf4451e647c9fb16a5df6fca6f33ab9",
+      "doc_id": "82",
+      "timestamp": "2026-06-13T19:43:16Z"
+    },
+    "31045131022": {
+      "status": "found",
+      "url": "https://www.d131.org/wp-content/uploads/2026/05/2026-2030-East-Aurora-Council-IFT_AFT-Local-604-Contractual-Agreement-FINAL-052926.pdf",
+      "found_via": "direct_crawl",
+      "storage_key": "local:/home/runner/workspace/pipeline/data/il_cba/3f13e5af621c0ba576bcff56ea1c26d62c6ab31fae39148766b4b3f704e5ae9f.pdf",
+      "file_hash": "3f13e5af621c0ba576bcff56ea1c26d62c6ab31fae39148766b4b3f704e5ae9f",
+      "doc_id": "83",
+      "timestamp": "2026-06-13T19:43:48Z"
+    },
+    "31045129022": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:44:03Z"
+    },
+    "13014021002": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:44:09Z"
+    },
+    "05016037002": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:44:41Z"
+    },
+    "51084005026": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:44:42Z"
     }
   },
   "il_found_via_search": 0,
