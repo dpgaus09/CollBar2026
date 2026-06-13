@@ -1,7 +1,0 @@
-```json
-{
-  "contracts": []
-}
-```
-
-The provided text contains only repeated DocuSign envelope ID headers with no substantive collective bargaining agreement content. No contract data, union names, salary schedules, benefit provisions, or other CBA terms could be extracted from this document.
