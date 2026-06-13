@@ -22,6 +22,24 @@ const CRAWL_STATE_PATH = join(
   "crawl_state.json",
 );
 
+const IL_CBA_CRAWL_STATE_PATH = join(
+  process.cwd(),
+  "..",
+  "..",
+  "pipeline",
+  "state",
+  "il_cba_crawl.json",
+);
+
+const IL_UNFOUND_CSV_PATH = join(
+  process.cwd(),
+  "..",
+  "..",
+  "pipeline",
+  "data",
+  "il_cba_unfound.csv",
+);
+
 const TABLES = [
   "districts",
   "source_documents",
@@ -192,6 +210,121 @@ router.get("/admin/crawl-report", requireAdminToken, async (_req, res) => {
     },
     tableCounts,
   });
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/il-cba-coverage
+// ---------------------------------------------------------------------------
+router.get("/admin/il-cba-coverage", requireAdminToken, async (_req, res) => {
+  let crawlState: Record<string, unknown> = {};
+  if (existsSync(IL_CBA_CRAWL_STATE_PATH)) {
+    try {
+      crawlState = JSON.parse(readFileSync(IL_CBA_CRAWL_STATE_PATH, "utf-8"));
+    } catch {
+      crawlState = {};
+    }
+  }
+
+  // Live count from DB: IL districts with a cba_pdf
+  const foundRows = await db.execute(
+    sql.raw(`
+      SELECT COUNT(DISTINCT sd.district_id)::int AS n
+      FROM source_documents sd
+      JOIN districts d ON d.id = sd.district_id
+      WHERE sd.doc_type = 'cba_pdf' AND d.state = 'IL'
+    `),
+  );
+  const dbFound = (foundRows.rows[0] as { n: number })?.n ?? 0;
+
+  const urlRows = await db.execute(
+    sql.raw(`SELECT COUNT(*)::int AS n FROM districts WHERE state = 'IL' AND website_url IS NOT NULL`),
+  );
+  const districtsWithUrl = (urlRows.rows[0] as { n: number })?.n ?? 0;
+
+  const noUrlRows = await db.execute(
+    sql.raw(`SELECT COUNT(*)::int AS n FROM districts WHERE state = 'IL' AND website_url IS NULL`),
+  );
+  const noUrl = (noUrlRows.rows[0] as { n: number })?.n ?? 0;
+
+  const attempted   = (crawlState["il_attempted"]  as number) ?? 0;
+  const found       = dbFound;
+  const failed      = (crawlState["il_failed"]     as number) ?? 0;
+  const skipped     = (crawlState["il_skipped"]    as number) ?? 0;
+  const lastUpdated = (crawlState["last_updated"]   as string)  ?? null;
+  const coveragePct = districtsWithUrl > 0
+    ? Math.round((found / districtsWithUrl) * 1000) / 10
+    : null;
+
+  res.json({
+    districtsWithUrl,
+    attempted,
+    found,
+    failed,
+    skipped,
+    noUrl,
+    coveragePct,
+    lastUpdated,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/il-cba-unfound.csv
+// ---------------------------------------------------------------------------
+router.get("/admin/il-cba-unfound.csv", requireAdminToken, async (_req, res) => {
+  // If the pre-built file exists, stream it directly
+  if (existsSync(IL_UNFOUND_CSV_PATH)) {
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="il_cba_unfound.csv"',
+    );
+    const { createReadStream } = await import("fs");
+    createReadStream(IL_UNFOUND_CSV_PATH).pipe(res);
+    return;
+  }
+
+  // Otherwise generate on the fly from the DB
+  const rows = await db.execute(
+    sql.raw(`
+      SELECT
+        d.name               AS district_name,
+        d.county             AS county,
+        d.enrollment         AS enrollment,
+        d.website_url        AS website_url,
+        MAX(s.to_year)       AS last_settlement_year
+      FROM districts d
+      LEFT JOIN settlements s ON s.district_id = d.id
+      WHERE d.state = 'IL'
+        AND d.website_url IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM source_documents sd
+          WHERE sd.district_id = d.id AND sd.doc_type = 'cba_pdf'
+        )
+      GROUP BY d.id, d.name, d.county, d.enrollment, d.website_url
+      ORDER BY d.name
+    `),
+  );
+
+  res.setHeader("Content-Type", "text/csv");
+  res.setHeader(
+    "Content-Disposition",
+    'attachment; filename="il_cba_unfound.csv"',
+  );
+
+  const header = "district_name,county,enrollment,website_url,last_settlement_year\n";
+  const body = (rows.rows as {
+    district_name: string; county: string | null; enrollment: number | null;
+    website_url: string | null; last_settlement_year: string | null;
+  }[])
+    .map((r) => {
+      const esc = (v: string | null | number) =>
+        v == null ? "" : `"${String(v).replace(/"/g, '""')}"`;
+      return [esc(r.district_name), esc(r.county), esc(r.enrollment),
+              esc(r.website_url), esc(r.last_settlement_year)].join(",");
+    })
+    .join("\n");
+
+  res.send(header + body);
 });
 
 // ---------------------------------------------------------------------------

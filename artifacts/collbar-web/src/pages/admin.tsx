@@ -55,6 +55,17 @@ interface ExtractionReport {
   auditAgreementRate: number | null;
 }
 
+interface IlCbaCoverage {
+  districtsWithUrl: number;
+  attempted: number;
+  found: number;
+  failed: number;
+  skipped: number;
+  noUrl: number;
+  coveragePct: number | null;
+  lastUpdated: string | null;
+}
+
 interface ReviewQueueItem {
   id: number;
   category: string;
@@ -168,6 +179,19 @@ function useCrawlReport() {
         return r.json();
       }),
     refetchInterval: 20_000,
+    retry: false,
+  });
+}
+
+function useIlCbaCoverage() {
+  return useQuery<IlCbaCoverage>({
+    queryKey: ["/api/admin/il-cba-coverage"],
+    queryFn: () =>
+      fetch(apiUrl("/api/admin/il-cba-coverage"), { credentials: "include" }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    refetchInterval: 30_000,
     retry: false,
   });
 }
@@ -460,6 +484,7 @@ function CrawlReportTab() {
   const [showLogin, setShowLogin] = useState(false);
   const { data: session, refetch: refetchSession } = useAdminSession();
   const { data, isLoading, isError, refetch } = useCrawlReport();
+  const { data: ilCba } = useIlCbaCoverage();
 
   if (!session?.authenticated) {
     return (
@@ -690,6 +715,77 @@ function CrawlReportTab() {
           </div>
         </section>
       )}
+
+      {/* IL CBA Crawl Coverage */}
+      <section className="space-y-3">
+        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
+          IL CBA Crawl Coverage
+        </h2>
+        {ilCba ? (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <Metric
+                label="Districts with URL"
+                value={ilCba.districtsWithUrl}
+                sub={`${ilCba.noUrl.toLocaleString()} still missing URL`}
+              />
+              <Metric
+                label="Attempted"
+                value={ilCba.attempted}
+                sub="this + prior runs"
+              />
+              <Metric
+                label="PDFs found"
+                value={ilCba.found}
+                sub={ilCba.coveragePct !== null ? `${ilCba.coveragePct}% of crawlable` : "—"}
+              />
+              <Metric
+                label="No PDF found"
+                value={ilCba.failed}
+                sub="eligible for FOIA"
+              />
+            </div>
+
+            {ilCba.districtsWithUrl > 0 && (
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs text-slate-400">CBA PDF coverage (crawlable districts)</span>
+                  <span className="text-xs font-mono text-slate-400">
+                    {ilCba.coveragePct !== null ? `${ilCba.coveragePct}%` : "—"}
+                  </span>
+                </div>
+                <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-500 bg-sky-500"
+                    style={{ width: `${Math.min(100, ilCba.coveragePct ?? 0)}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-slate-500">
+                {ilCba.lastUpdated
+                  ? `Last crawled: ${new Date(ilCba.lastUpdated).toLocaleString()}`
+                  : "No crawl data — run pipeline/11_crawl_il_cbas.py"}
+              </span>
+              <a
+                href={apiUrl("/api/admin/il-cba-unfound.csv")}
+                download="il_cba_unfound.csv"
+                className="text-xs px-3 py-1.5 rounded border border-slate-700 hover:border-sky-600 text-slate-400 hover:text-sky-400 transition-colors"
+              >
+                ↓ Download Unfound List (CSV)
+              </a>
+            </div>
+          </div>
+        ) : (
+          <div className="rounded-lg border border-slate-800 bg-slate-950 p-5 text-xs text-slate-500">
+            No IL CBA crawl data yet — run{" "}
+            <code className="font-mono text-slate-400">pipeline/11_crawl_il_cbas.py</code> to
+            begin collecting district CBAs.
+          </div>
+        )}
+      </section>
     </div>
   );
 }
