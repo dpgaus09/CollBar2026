@@ -1,0 +1,32 @@
+Build an Illinois CBA acquisition pipeline. I am not a programmer — build it
+end to end and report results. Do NOT ask me to run shell commands.
+
+Goal: collect the current collective bargaining agreement PDF for each
+Illinois district, so the existing extraction pipeline (06_extract_contracts.py)
+can fill insurance/leave/retirement/clause data the same way it does for Ohio.
+
+Illinois has NO central contract repository, but every district must post its
+CBA on its own website (105 ILCS 5/10-20.47 transparency requirements). So:
+
+1. Seed the crawl list from our existing IL districts (tss_annual / districts,
+   state='IL') joined to website URLs. If we don't have URLs, first ingest the
+   ISBE Directory of Educational Entities (I will upload it to
+   pipeline/data/il_directory/ — it has RCDT + website for every district).
+2. pipeline/11_crawl_il_cbas.py: for each district website, crawl to find the
+   collective bargaining agreement PDF. Strategy: fetch the homepage, follow
+   links whose text/href matches (case-insensitive) "collective bargaining",
+   "CBA", "union contract", "negotiated agreement", "IEA", "IFT", "teacher
+   contract", "board policy" → then find linked .pdf files on those pages.
+   Score candidate PDFs by filename/link-text match; keep the best.
+3. Be polite: 1 request / 2 sec per domain, identifying User-Agent
+   "CollBarBot/1.0 (hello@collbar.com)", 15s timeout, resumable crawl-state
+   file, exponential backoff. Never hammer a site.
+4. For each found PDF: store to object storage, insert a source_documents row
+   (doc_type='cba_pdf', district_id, source_url, sha256 hash, retrieved_at);
+   skip on duplicate hash.
+5. Output a coverage report: districts attempted, PDFs found, % coverage,
+   and a CSV of districts where NO contract was found (these become the FOIA
+   list). Prioritize crawling districts whose contract_expires is in 2026 or
+   2027 first.
+Acceptance: report shows coverage %, found PDFs are in source_documents with
+provenance, unfound-districts CSV is downloadable from the admin panel.
