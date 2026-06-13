@@ -187,8 +187,8 @@ def _extract_links(soup: BeautifulSoup, base_url: str) -> list[dict]:
     return links
 
 
-def _extract_pdf_candidates(soup: BeautifulSoup, base_url: str) -> list[dict]:
-    """Find all PDF links, scored by CBA relevance."""
+def _extract_pdf_candidates(soup: BeautifulSoup, base_url: str, homepage: str) -> list[dict]:
+    """Find all same-domain PDF links on a page, scored by CBA relevance."""
     candidates = []
     for a in soup.find_all("a", href=True):
         href = a.get("href", "").strip()
@@ -196,6 +196,10 @@ def _extract_pdf_candidates(soup: BeautifulSoup, base_url: str) -> list[dict]:
             continue
         abs_url = urljoin(base_url, href)
         if not abs_url.startswith(("http://", "https://")):
+            continue
+        # Only collect PDF links that stay on the district's domain
+        if not _same_domain(homepage, abs_url):
+            log.debug("  Rejecting off-domain PDF candidate: %s", abs_url)
             continue
         is_pdf = (
             ".pdf" in abs_url.lower().split("?")[0] or
@@ -239,8 +243,8 @@ def _crawl_district(session: requests.Session, homepage: str, dry_run: bool) -> 
 
     soup0 = BeautifulSoup(html, "html.parser")
 
-    # Check for PDF candidates directly on the homepage
-    pdf_candidates = _extract_pdf_candidates(soup0, r.url)
+    # Check for PDF candidates directly on the homepage (same-domain enforced inside)
+    pdf_candidates = _extract_pdf_candidates(soup0, r.url, homepage)
 
     # Collect high-scoring internal links to follow
     all_links = _extract_links(soup0, r.url)
@@ -286,7 +290,7 @@ def _crawl_district(session: requests.Session, homepage: str, dry_run: bool) -> 
             continue
 
         soup2 = BeautifulSoup(html2, "html.parser")
-        new_pdfs = _extract_pdf_candidates(soup2, r2.url)
+        new_pdfs = _extract_pdf_candidates(soup2, r2.url, homepage)
         pdf_candidates.extend(new_pdfs)
         log.info("    Found %d PDF candidates on hop page", len(new_pdfs))
 
@@ -391,6 +395,21 @@ def _load_districts(conn) -> list[dict]:
     """)
     cols = ["id", "name", "state_district_id", "website_url", "county", "enrollment",
             "latest_to_year"]
+    rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+    cur.close()
+    return rows
+
+
+def _load_il_no_url_districts(conn) -> list[dict]:
+    """Load IL districts that have no website_url, for state record-keeping."""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name, state_district_id
+        FROM districts
+        WHERE state = 'IL' AND website_url IS NULL
+        ORDER BY name
+    """)
+    cols = ["id", "name", "state_district_id"]
     rows = [dict(zip(cols, row)) for row in cur.fetchall()]
     cur.close()
     return rows
@@ -509,6 +528,17 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
     state = _load_crawl_state()
     state["il_no_url"] = no_url_count
 
+    # Record no_url entries in per_district so the schema is complete
+    no_url_districts = _load_il_no_url_districts(conn)
+    ts_now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    for d in no_url_districts:
+        rcdts = d["state_district_id"]
+        if rcdts not in state["per_district"]:
+            state["per_district"][rcdts] = {
+                "status":    "no_url",
+                "timestamp": ts_now,
+            }
+
     session = requests.Session()
 
     attempted = 0
@@ -558,6 +588,19 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
                 "status":    "found",
                 "url":       pdf_url,
                 "dry_run":   True,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            _save_crawl_state(state)
+            continue
+
+        # Final domain guard before download (defense-in-depth)
+        if not _same_domain(homepage, pdf_url):
+            log.info("  Rejecting off-domain PDF URL (final check): %s", pdf_url)
+            failed += 1
+            state["per_district"][rcdts] = {
+                "status":    "failed",
+                "url":       pdf_url,
+                "reason":    "off_domain",
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
             _save_crawl_state(state)
