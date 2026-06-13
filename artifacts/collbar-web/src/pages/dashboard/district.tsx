@@ -590,7 +590,7 @@ export default function DistrictDashboardPage() {
                 {district.county && <span>{district.county} County</span>}
                 {district.district_type && <span className="capitalize">{district.district_type}</span>}
                 {district.enrollment ? (
-                  <span title="Source: Ohio Dept. of Education administrative records">
+                  <span title={`Source: ${district.state === "IL" ? "ISBE" : "Ohio Dept. of Education"} administrative records`}>
                     {district.enrollment.toLocaleString()} students
                     <span className="text-slate-600 ml-1">(state data)</span>
                   </span>
@@ -598,7 +598,7 @@ export default function DistrictDashboardPage() {
                   <span className="italic text-slate-600">Enrollment unknown</span>
                 )}
                 {district.avg_teacher_salary ? (
-                  <span title="Source: Ohio Dept. of Education administrative records">
+                  <span title={`Source: ${district.state === "IL" ? "ISBE EIS" : "Ohio Dept. of Education"} administrative records`}>
                     Avg salary: ${parseFloat(district.avg_teacher_salary).toLocaleString()}
                     <span className="text-slate-600 ml-1">(state data)</span>
                   </span>
@@ -692,12 +692,23 @@ export default function DistrictDashboardPage() {
                         <ProvenanceRow {...provRow(getVal(comp, "base_salary_increase_yr1"), "Yr 1 Increase", "%")} />
                         <ProvenanceRow {...provRow(getVal(comp, "base_salary_increase_yr2"), "Yr 2 Increase", "%")} />
                         <ProvenanceRow {...provRow(getVal(comp, "base_salary_increase_yr3"), "Yr 3 Increase", "%")} />
+                        {district.state === "IL" && (
+                          <>
+                            <ProvenanceRow {...provRow(getVal(comp, "salary_lanes_count"), "Salary Lanes")} />
+                            <ProvenanceRow {...provRow(getVal(comp, "lane_advancement_allowed"), "Lane Advancement")} />
+                          </>
+                        )}
                         {comp
                           .filter(
-                            (p) =>
-                              !["ba_min_salary", "ba_max_salary", "ma_min_salary", "ma_max_salary",
+                            (p) => {
+                              const excluded = [
+                                "ba_min_salary", "ba_max_salary", "ma_min_salary", "ma_max_salary",
                                 "salary_steps", "base_salary_increase_yr1", "base_salary_increase_yr2",
-                                "base_salary_increase_yr3"].includes(p.provision_key),
+                                "base_salary_increase_yr3",
+                                ...(district.state === "IL" ? ["salary_lanes_count", "lane_advancement_allowed"] : []),
+                              ];
+                              return !excluded.includes(p.provision_key);
+                            },
                           )
                           .slice(0, 2)
                           .map((p) => (
@@ -754,10 +765,25 @@ export default function DistrictDashboardPage() {
                 )}
               </DataCard>
 
-              {/* Card 3: Retirement — STRS pickup, severance vs. county medians */}
-              <DataCard title="Retirement">
+              {/* Card 3: Retirement — TRS/IMRF (IL) or STRS/SERS (OH) fields */}
+              <DataCard title={district.state === "IL" ? "Retirement — TRS/IMRF" : "Retirement"}>
                 {ret.length === 0 ? (
                   <p className="text-slate-600 text-xs italic">Not yet extracted</p>
+                ) : district.state === "IL" ? (
+                  <div className="space-y-0">
+                    <ProvenanceRow {...provRow(getVal(ret, "retirement_system"), "Retirement System")} />
+                    <ProvenanceRow {...provRow(getVal(ret, "trs_tier"), "TRS Tier")} />
+                    <ProvenanceRow {...provRow(getVal(ret, "retirement_pickup_pct"), "Employer TRS Pickup", "%")} />
+                    {ret
+                      .filter((p) => !["retirement_system", "trs_tier", "retirement_pickup_pct"].includes(p.provision_key))
+                      .slice(0, 5)
+                      .map((p) => (
+                        <ProvenanceRow
+                          key={p.id}
+                          {...provRow(p, p.provision_key.replace(/_/g, " "), undefined, retMedians?.medians)}
+                        />
+                      ))}
+                  </div>
                 ) : (
                   <div className="space-y-0">
                     {ret.slice(0, 8).map((p) => (
