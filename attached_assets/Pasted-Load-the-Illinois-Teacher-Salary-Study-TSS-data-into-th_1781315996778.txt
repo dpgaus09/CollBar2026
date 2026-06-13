@@ -1,0 +1,65 @@
+Load the Illinois Teacher Salary Study (TSS) data into the database. I am not
+a programmer — do this end to end and report results. Do NOT ask me to run
+shell commands.
+
+The 11 Illinois TSS Excel files are already uploaded in pipeline/data/il_tss/:
+  teacher_salary_data_15-16.xls   -> school_year 2015-16
+  TSS_2017_FINAL.xlsx             -> school_year 2016-17
+  TSS_2018.xlsx                   -> school_year 2017-18
+  TSS-2019.xlsx                   -> school_year 2018-19
+  TSS-2020.xlsx                   -> school_year 2019-20
+  TSS-2021.xlsx                   -> school_year 2020-21
+  TSS-2022.xlsx                   -> school_year 2021-22
+  TSS-2023.xlsx                   -> school_year 2022-23
+  TSS-2024.xlsx                   -> school_year 2023-24
+  TSS-2025.xlsx                   -> school_year 2024-25
+  TSS-2026.xlsx                   -> school_year 2025-26
+
+Build a robust loader at pipeline/load_il_tss.py and a tss_annual table, then
+run it on all 11 files. Requirements, because these files drift in format
+across years:
+
+1. tss_annual columns: state (default 'IL'), state_district_id (the 11-digit
+   RCDT code as TEXT), school_year, district_name, enrollment_range,
+   affiliation, ba_begin, ba_max, ba_years_to_max, ma_begin, ma_max,
+   ma_years_to_max, highest_scheduled_salary, trs_board_paid_pct,
+   contract_expires (DATE), personal_days, sick_days, payload (JSONB holding
+   the entire source row), loaded_at. UNIQUE (state, state_district_id,
+   school_year) so re-runs upsert instead of duplicating.
+
+2. Auto-detect the data sheet and header row: the correct sheet is the one
+   whose header row contains a cell matching "RCDT"; the header is not always
+   the first row (older files have a title row above it).
+
+3. Column names vary by year — resolve each field by checking BOTH the modern
+   verbose header AND the legacy short code, case-insensitive:
+   ba_begin: "Bachelor's Beginning" or code "BB"
+   ba_max:   "Bachelor's Maximum"   or "BM"
+   ma_begin: "Master's Beginning"   or "MB"
+   ma_max:   "Master's Maximum"     or "MM"
+   years-to-max: "...Years..." or "BYTM"/"MYTM"
+   trs_board_paid_pct: "Board Paid TRS"/"Retirement" or "TPBP"
+   contract_expires: "Expiration" or "ExP"
+   highest_scheduled_salary: "Highest Schedule" or "HSS"
+   personal_days/sick_days: "Personal"/"Sick" or "DP"/"DS"
+   If a field is absent in a given year, store NULL — never crash.
+
+4. Normalize the RCDT: strip non-digits, left-pad to 11 chars to restore
+   leading zeros Excel dropped. Skip rows whose RCDT isn't 9-11 digits
+   (these are title/footer rows).
+
+5. Range-sanitize numerics so a malformed cell can't overflow a column:
+   salaries 10,000-500,000; years-to-max 0-60; trs pct 0-100; sick 0-400;
+   personal 0-100. Anything outside range -> NULL. Parse expiration dates in
+   M/YYYY or M/D/YYYY; ignore years outside 2000-2050.
+
+6. .xls (the 2015-16 file) needs the xlrd engine; .xlsx needs openpyxl.
+   Install whatever's missing.
+
+7. Also upsert a districts row (state='IL', state_district_id, name) for each
+   district so the dashboard can link to them.
+
+After loading all 11 files, print a summary table: for each school_year, the
+number of districts loaded and the count of non-null ba_begin and
+contract_expires. Then report the grand total of tss_annual rows and the
+distinct district count. Show me that summary when done.
