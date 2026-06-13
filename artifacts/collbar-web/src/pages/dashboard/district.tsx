@@ -209,6 +209,12 @@ function TopBar({ district, id }: { district: DistrictDetail | undefined; id: st
         </span>
       </div>
       <div className="flex items-center gap-4">
+        <a
+          href={`${import.meta.env.BASE_URL}peer-sets`}
+          className="text-xs text-slate-500 hover:text-slate-300"
+        >
+          Peer Sets
+        </a>
         {isAdmin && (
           <a
             href={`${import.meta.env.BASE_URL}expiration-calendar`}

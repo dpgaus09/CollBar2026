@@ -34,6 +34,12 @@ function TopBar() {
         <span className="text-slate-600 text-xs">Ohio K-12 CBA Database</span>
       </div>
       <div className="flex items-center gap-4">
+        <a
+          href={`${import.meta.env.BASE_URL}peer-sets`}
+          className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
+        >
+          Peer Sets
+        </a>
         {isAdmin && (
           <a
             href={`${import.meta.env.BASE_URL}expiration-calendar`}

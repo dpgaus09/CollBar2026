@@ -293,7 +293,25 @@ router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Resp
   const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10));
   const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10)));
   const offset = (page - 1) * limit;
+  const peerSetId = req.query.peer_set_id ? parseInt(String(req.query.peer_set_id), 10) : null;
 
+  // Resolve peer set district IDs if requested
+  let peerDistrictIds: number[] | null = null;
+  let peerSetName: string | null = null;
+  if (peerSetId && !isNaN(peerSetId)) {
+    const userId = req.session.userId!;
+    const psRows = await db.execute(sql`
+      SELECT name, district_ids FROM peer_sets
+      WHERE id = ${peerSetId} AND user_id = ${userId}
+    `);
+    if (psRows.rows.length > 0) {
+      const ps = psRows.rows[0] as { name: string; district_ids: number[] };
+      peerSetName = ps.name;
+      peerDistrictIds = (ps.district_ids ?? []).map(Number).filter(Boolean);
+    }
+  }
+
+  // Build WHERE conditions
   const conds: Array<SQL | null> = [
     sql`s.base_increase_pct IS NOT NULL`,
     county ? sql`d.county = ${county}` : null,
@@ -302,14 +320,27 @@ router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Resp
     yearTo ? sql`s.to_year <= ${yearTo}` : null,
     band ? bandSql(band) : null,
   ];
+
+  // Add peer set filter
+  if (peerDistrictIds !== null) {
+    if (peerDistrictIds.length === 0) {
+      // Empty peer set → no results
+      res.json({ items: [], total: 0, page, limit, pages: 0, medians: null, peer_set_name: peerSetName });
+      return;
+    }
+    const idSql = sql.join(peerDistrictIds.map((id) => sql`${id}`), sql`, `);
+    conds.push(sql`d.id IN (${idSql})`);
+  }
+
   const where = buildWhere(conds);
 
   try {
-    const [dataRows, countRows] = await Promise.all([
+    const [dataRows, countRows, mediansRows] = await Promise.all([
       db.execute(sql`
         SELECT
           s.id, s.from_year, s.to_year, s.base_increase_pct, s.year2_pct, s.year3_pct,
-          s.off_schedule_payment, s.term_years, s.method, s.confidence, s.human_verified, s.page_ref,
+          s.off_schedule_payment, s.insurance_changed, s.term_years,
+          s.method, s.confidence, s.human_verified, s.page_ref,
           d.id AS district_id, d.name AS district_name,
           d.county, d.district_type, d.enrollment,
           sd.source_url, sd.retrieved_at
@@ -333,16 +364,31 @@ router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Resp
         JOIN districts d ON s.district_id = d.id
         WHERE ${where}
       `),
+      db.execute(sql`
+        SELECT
+          percentile_cont(0.5) WITHIN GROUP (ORDER BY s.base_increase_pct::numeric) AS median_base,
+          percentile_cont(0.5) WITHIN GROUP (ORDER BY s.year2_pct::numeric)         AS median_yr2,
+          percentile_cont(0.5) WITHIN GROUP (ORDER BY s.year3_pct::numeric)         AS median_yr3,
+          percentile_cont(0.5) WITHIN GROUP (ORDER BY s.off_schedule_payment::numeric) AS median_lump,
+          percentile_cont(0.5) WITHIN GROUP (ORDER BY s.term_years::numeric)        AS median_term,
+          AVG(s.base_increase_pct::numeric)::numeric(10,4)                          AS avg_base,
+          COUNT(*)::int                                                              AS n,
+          COUNT(DISTINCT s.district_id)::int                                        AS district_count
+        FROM settlements s
+        JOIN districts d ON s.district_id = d.id
+        WHERE ${where}
+      `),
     ]);
 
     const total = (countRows.rows[0] as { n: number })?.n ?? 0;
+    const medians = mediansRows.rows[0] ?? null;
 
     if (format === "csv") {
       const rows = dataRows.rows as Record<string, unknown>[];
       const headers = [
         "district_name", "county", "district_type", "enrollment",
         "from_year", "to_year", "base_increase_pct", "year2_pct", "year3_pct",
-        "off_schedule_payment", "term_years", "method",
+        "off_schedule_payment", "insurance_changed", "term_years", "method",
       ];
       const csv = [
         headers.join(","),
@@ -361,7 +407,15 @@ router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Resp
       return;
     }
 
-    res.json({ items: dataRows.rows, total, page, limit, pages: Math.ceil(total / limit) });
+    res.json({
+      items: dataRows.rows,
+      total,
+      page,
+      limit,
+      pages: Math.ceil(total / limit),
+      medians,
+      peer_set_name: peerSetName,
+    });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

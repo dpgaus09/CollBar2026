@@ -12,6 +12,7 @@ import ClausesPage from "@/pages/dashboard/clauses";
 import ComparablesPage from "@/pages/dashboard/comparables";
 import AskVsGotPage from "@/pages/dashboard/ask-vs-got";
 import ExpirationCalendarPage from "@/pages/expiration-calendar";
+import PeerSetsPage from "@/pages/peer-sets";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -68,6 +69,9 @@ function Router() {
       <Route path="/dashboard/:id/clauses" component={ClausesPage} />
       <Route path="/dashboard/:id/comparables" component={ComparablesPage} />
       <Route path="/dashboard/:id/ask-vs-got" component={AskVsGotPage} />
+
+      {/* Peer sets */}
+      <Route path="/peer-sets" component={PeerSetsPage} />
 
       {/* Admin calendar */}
       <Route path="/expiration-calendar" component={ExpirationCalendarPage} />

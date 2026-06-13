@@ -9,3 +9,4 @@ export * from "./users";
 export * from "./benchmarks";
 export * from "./alerts";
 export * from "./cdss_staging";
+export * from "./peer_sets";
