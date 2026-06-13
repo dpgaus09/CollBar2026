@@ -1,0 +1,41 @@
+Build a scheduled daily job that refreshes the ISBE Directory of Educational
+Entities. I am not a programmer — build it end to end and report results. Do
+NOT ask me to run shell commands.
+
+Source URL (stable, updated nightly by ISBE):
+https://www.isbe.net/_layouts/Download.aspx?SourceUrl=/Documents/dir_ed_entities.xls
+
+1. Create pipeline/12_refresh_il_directory.py that:
+   - Downloads the file from the URL above with User-Agent
+     "CollBarBot/1.0 (hello@collbar.com)", 30s timeout, 3 retries with
+     exponential backoff. Save it to object storage with a date-stamped key:
+     il_directory/dir_ed_entities_{YYYY-MM-DD}.xls (provenance archive).
+   - Computes the file's SHA-256 and compares to the last stored hash in a
+     directory_refresh_log table (id, run_at, file_hash, row_count,
+     new_districts, updated_districts, with_website, changed BOOLEAN, status,
+     error). If the hash is unchanged from the previous run, log "no change"
+     and stop without reprocessing.
+   - If changed: parse the .xls with the xlrd engine, auto-detect the header
+     row (the row containing "RCDT"), normalize each RCDT to 11 digits, and
+     UPSERT into the districts table for state='IL': name, county, district
+     type, and website URL (plus address/administrator fields if present).
+     Only insert new districts and update changed fields — never delete
+     existing rows, and never alter IDs other tables reference.
+   - Log: total row_count, count of new districts, count of updated districts,
+     and count of districts now having a website URL.
+
+2. Schedule it to run every day at 7:00 AM America/Chicago (set the timezone
+   explicitly — not server UTC). Use this project's Replit Scheduled
+   Deployment / cron mechanism. Note: this requires the app to be on a
+   reserved-VM/always-on deployment to fire reliably; if it is not, tell me
+   that and how to enable it rather than silently configuring a job that
+   won't run.
+
+3. Add an admin panel card "Directory Refresh" showing: last run time, status,
+   changed-or-not, current count of IL districts with a website URL, and the
+   most recent error if the last run failed. Include a "Run now" button that
+   triggers the job manually.
+
+Acceptance: I can click "Run now" and see the log update with row counts; the
+schedule is registered for 7 AM Central; the admin card shows the latest
+status.
