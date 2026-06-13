@@ -18,6 +18,7 @@ export const districtsTable = pgTable(
     state: char("state", { length: 2 }).notNull().default("OH"),
     stateDistrictId: text("state_district_id").notNull(),
     name: text("name").notNull(),
+    slug: text("slug"),
     county: text("county"),
     districtType: text("district_type"),
     enrollment: integer("enrollment"),

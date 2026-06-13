@@ -13,6 +13,9 @@ import ComparablesPage from "@/pages/dashboard/comparables";
 import AskVsGotPage from "@/pages/dashboard/ask-vs-got";
 import ExpirationCalendarPage from "@/pages/expiration-calendar";
 import PeerSetsPage from "@/pages/peer-sets";
+import SignupPage from "@/pages/signup";
+import PlansPage from "@/pages/plans";
+import TrackerPage from "@/pages/tracker";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -58,6 +61,11 @@ function Router() {
   return (
     <Switch>
       <Route path="/" component={Home} />
+
+      {/* Public */}
+      <Route path="/tracker" component={TrackerPage} />
+      <Route path="/signup" component={SignupPage} />
+      <Route path="/plans" component={PlansPage} />
 
       {/* Auth */}
       <Route path="/login" component={LoginPage} />

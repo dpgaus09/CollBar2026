@@ -18,6 +18,7 @@ export const usersTable = pgTable(
     id: bigserial("id", { mode: "bigint" }).primaryKey(),
     email: text("email").notNull(),
     role: text("role").default("district_user"),
+    plan: text("plan").default("free").notNull(),
     districtId: bigint("district_id", { mode: "bigint" }).references(
       () => districtsTable.id,
     ),
@@ -28,6 +29,10 @@ export const usersTable = pgTable(
     check(
       "users_role_check",
       sql`${t.role} IN ('admin','district_user')`,
+    ),
+    check(
+      "users_plan_check",
+      sql`${t.plan} IN ('free','pro')`,
     ),
   ],
 );

@@ -9,6 +9,7 @@ declare module "express-session" {
     userRole?: "admin" | "district_user";
     userDistrictId?: number | null;
     userEmail?: string;
+    userPlan?: "free" | "pro";
   }
 }
 
@@ -191,10 +192,10 @@ router.get("/auth/verify", async (req: Request, res: Response) => {
 
   try {
     const rows = await db.execute(
-      sql`SELECT id, email, role, district_id FROM users WHERE id = ${entry.userId}`,
+      sql`SELECT id, email, role, district_id, plan FROM users WHERE id = ${entry.userId}`,
     );
     const user = rows.rows[0] as
-      | { id: number; email: string; role: string; district_id: number | null }
+      | { id: number; email: string; role: string; district_id: number | null; plan: string | null }
       | undefined;
 
     if (!user) {
@@ -210,7 +211,8 @@ router.get("/auth/verify", async (req: Request, res: Response) => {
       // Normalize to Number: postgres bigint comes back as string from node-postgres
       req.session.userDistrictId = user!.district_id != null ? Number(user!.district_id) : null;
       req.session.userEmail = user!.email;
-      res.json({ ok: true, role: user!.role, districtId: user!.district_id });
+      req.session.userPlan = (user!.plan ?? "free") as "free" | "pro";
+      res.json({ ok: true, role: user!.role, districtId: user!.district_id, plan: user!.plan ?? "free" });
     });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -229,9 +231,96 @@ router.get("/auth/me", (req: Request, res: Response) => {
     authenticated: true,
     userId: req.session.userId,
     role: req.session.userRole,
+    plan: req.session.userPlan ?? "free",
     districtId: req.session.userDistrictId,
     email: req.session.userEmail,
   });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/auth/signup — create free account then issue magic link
+// ---------------------------------------------------------------------------
+router.post("/auth/signup", async (req: Request, res: Response) => {
+  const { email, district_id } = req.body as { email?: string; district_id?: number };
+
+  if (!email || !email.includes("@")) {
+    res.status(400).json({ error: "Valid email required" });
+    return;
+  }
+
+  const normalEmail = email.toLowerCase().trim();
+  const now = Date.now();
+
+  const rl = rateLimits.get(normalEmail);
+  if (rl && now - rl.windowStart < RATE_LIMIT_WINDOW_MS) {
+    if (rl.count >= RATE_LIMIT_MAX) {
+      res.status(429).json({ error: "Too many requests — try again in an hour." });
+      return;
+    }
+    rl.count++;
+  } else {
+    rateLimits.set(normalEmail, { count: 1, windowStart: now });
+  }
+
+  try {
+    // Validate district_id if provided
+    let validDistrictId: number | null = null;
+    if (district_id && Number.isInteger(Number(district_id))) {
+      const dRows = await db.execute(
+        sql`SELECT id FROM districts WHERE id = ${Number(district_id)} LIMIT 1`,
+      );
+      if (dRows.rows.length > 0) validDistrictId = Number(district_id);
+    }
+
+    // Upsert user — create if new, update district_id if it changes
+    const upsertRows = await db.execute(
+      sql`INSERT INTO users (email, role, plan, district_id)
+          VALUES (${normalEmail}, 'district_user', 'free', ${validDistrictId})
+          ON CONFLICT (email) DO UPDATE
+            SET district_id = COALESCE(EXCLUDED.district_id, users.district_id)
+          RETURNING id, email, role, plan, district_id`,
+    );
+
+    const user = upsertRows.rows[0] as {
+      id: number; email: string; role: string; plan: string; district_id: number | null;
+    };
+
+    cleanupExpired();
+    const token = randomBytes(32).toString("hex");
+    magicLinks.set(token, { userId: user.id, expiresAt: now + TOKEN_EXPIRY_MS });
+
+    const configuredUrl = process.env.APP_URL;
+    if (!configuredUrl && process.env.NODE_ENV === "production") {
+      res.status(503).json({ error: "APP_URL environment variable is not configured." });
+      return;
+    }
+    const base =
+      configuredUrl ??
+      ((req.headers.origin as string | undefined) ??
+        `${(req.headers["x-forwarded-proto"] as string | undefined) ?? "http"}://${req.headers.host ?? "localhost"}`);
+    const magicLink = `${base}/auth/verify?token=${token}`;
+
+    const isDev = process.env.NODE_ENV !== "production";
+    if (isDev) {
+      res.json({
+        message: "Account created. Magic link generated (dev mode).",
+        magicLink,
+      });
+      return;
+    }
+
+    try {
+      await sendMagicLinkEmail(normalEmail, magicLink);
+      res.json({ message: "Account created. Check your email for a sign-in link." });
+    } catch (emailErr) {
+      res.status(503).json({
+        error: String(emailErr),
+        hint: "Configure RESEND_API_KEY in Replit Secrets to enable email delivery.",
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 // ---------------------------------------------------------------------------

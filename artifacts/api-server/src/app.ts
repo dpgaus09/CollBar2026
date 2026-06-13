@@ -3,6 +3,7 @@ import cors from "cors";
 import session from "express-session";
 import pinoHttp from "pino-http";
 import router from "./routes";
+import publicHtmlRouter from "./routes/public-html";
 import { logger } from "./lib/logger";
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
@@ -89,6 +90,9 @@ app.use((_req, res, next) => {
   }
   next();
 });
+
+// Public server-rendered HTML pages (no /api prefix, before auth middleware)
+app.use(publicHtmlRouter);
 
 app.use("/api", router);
 

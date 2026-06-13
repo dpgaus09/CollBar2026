@@ -5,6 +5,7 @@ export interface AuthUser {
   authenticated: boolean;
   userId?: number;
   role?: "admin" | "district_user";
+  plan?: "free" | "pro";
   districtId?: number | null;
   email?: string;
 }
@@ -25,6 +26,8 @@ export function useAuth() {
     isLoading,
     isAuthenticated: data?.authenticated ?? false,
     isAdmin: data?.role === "admin",
+    plan: data?.plan ?? "free",
+    isPro: data?.role === "admin" || data?.plan === "pro",
     districtId: data?.districtId ?? null,
     email: data?.email,
     refetch,
