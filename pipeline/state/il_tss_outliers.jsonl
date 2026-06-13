@@ -1,0 +1,7 @@
+{"rcdt": "07016159002", "district_name": "ESD 159", "from_year": "2021-22", "to_year": "2022-23", "ba_begin_prev": 35945.0, "ba_begin_curr": 45179.0, "ba_pct": 25.6892, "reason": "delta_out_of_range"}
+{"rcdt": "09010197004", "district_name": "Prairieview-Ogden CCSD 197", "from_year": "2015-16", "to_year": "2016-17", "ba_begin_prev": 42056.0, "ba_begin_curr": 32000.0, "ba_pct": -23.911, "reason": "delta_out_of_range"}
+{"rcdt": "13058007004", "district_name": "Iuka CCSD 7", "from_year": "2016-17", "to_year": "2017-18", "ba_begin_prev": 36722.0, "ba_begin_curr": 33000.0, "ba_pct": -10.1356, "reason": "delta_out_of_range"}
+{"rcdt": "13058111002", "district_name": "Salem SD 111", "from_year": "2019-20", "to_year": "2020-21", "ba_begin_prev": 32674.0, "ba_begin_curr": 40874.0, "ba_pct": 25.0964, "reason": "delta_out_of_range"}
+{"rcdt": "34049001002", "district_name": "Winthrop Harbor SD 1", "from_year": "2022-23", "to_year": "2023-24", "ba_begin_prev": 34084.0, "ba_begin_curr": 45872.0, "ba_pct": 34.5851, "reason": "delta_out_of_range"}
+{"rcdt": "48072316004", "district_name": "Limestone Walters CCSD 316", "from_year": "2019-20", "to_year": "2020-21", "ba_begin_prev": 50797.0, "ba_begin_curr": 45348.0, "ba_pct": -10.727, "reason": "delta_out_of_range"}
+{"rcdt": "51084014026", "district_name": "Riverton CUSD 14", "from_year": "2015-16", "to_year": "2016-17", "ba_begin_prev": 40573.0, "ba_begin_curr": 34553.0, "ba_pct": -14.8375, "reason": "delta_out_of_range"}
