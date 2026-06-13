@@ -1094,4 +1094,75 @@ router.get("/admin/il-crawl-status", requireAdminToken, (_req, res) => {
   res.json({ running, pid: _crawlPid, tail: tailLines });
 });
 
+// ---------------------------------------------------------------------------
+// Directory Refresh — exported spawn helper (used by cron in index.ts) + routes
+// ---------------------------------------------------------------------------
+
+const DIR_REFRESH_SCRIPT = join(PIPELINE_DIR, "12_refresh_il_directory.py");
+const DIR_REFRESH_LOG    = join(PIPELINE_DIR, "logs", "il_dir_refresh.log");
+let _refreshPid: number | null = null;
+
+export function spawnDirectoryRefresh(): { status: string; pid: number | null } {
+  if (_refreshPid !== null) {
+    try {
+      process.kill(_refreshPid, 0);
+      return { status: "already_running", pid: _refreshPid };
+    } catch {
+      _refreshPid = null;
+    }
+  }
+
+  mkdirSync(join(PIPELINE_DIR, "logs"), { recursive: true });
+  const logFd = openSync(DIR_REFRESH_LOG, "a");
+
+  const child = spawn(
+    "python3",
+    ["-u", DIR_REFRESH_SCRIPT],
+    {
+      cwd: PIPELINE_DIR,
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: { ...process.env, PYTHONPATH: PIPELINE_DIR },
+    },
+  );
+  child.unref();
+  _refreshPid = child.pid ?? null;
+  return { status: "started", pid: _refreshPid };
+}
+
+router.post("/admin/run-directory-refresh", requireAdminToken, (_req, res) => {
+  try {
+    const result = spawnDirectoryRefresh();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+router.get("/admin/directory-refresh-status", requireAdminToken, async (_req, res) => {
+  let running = false;
+  if (_refreshPid !== null) {
+    try { process.kill(_refreshPid, 0); running = true; } catch { _refreshPid = null; }
+  }
+
+  try {
+    const [latestRows, countRows] = await Promise.all([
+      db.execute(sql.raw(`
+        SELECT id, run_at, file_hash, row_count, new_districts, updated_districts,
+               with_website, changed, status, error
+        FROM directory_refresh_log
+        ORDER BY run_at DESC LIMIT 1
+      `)),
+      db.execute(sql.raw(
+        `SELECT COUNT(*)::int AS n FROM districts WHERE state = 'IL' AND website_url IS NOT NULL`,
+      )),
+    ]);
+    const latest = (latestRows.rows[0] as Record<string, unknown>) ?? null;
+    const ilWithUrl = (countRows.rows[0] as { n: number }).n;
+    res.json({ running, pid: _refreshPid, latest, il_with_url: ilWithUrl });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 export default router;

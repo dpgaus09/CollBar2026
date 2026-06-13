@@ -1,5 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
+import { schedule } from "node-cron";
+import { spawnDirectoryRefresh } from "./routes/admin";
 
 const rawPort = process.env["PORT"];
 
@@ -23,3 +25,14 @@ app.listen(port, (err) => {
 
   logger.info({ port }, "Server listening");
 });
+
+// Daily ISBE directory refresh — 7:00 AM America/Chicago
+schedule(
+  "0 7 * * *",
+  () => {
+    logger.info("Cron: starting daily ISBE directory refresh");
+    spawnDirectoryRefresh();
+  },
+  { timezone: "America/Chicago" },
+);
+logger.info("Cron registered: ISBE directory refresh at 07:00 America/Chicago daily");

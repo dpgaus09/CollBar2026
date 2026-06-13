@@ -90,6 +90,24 @@ interface IlCbaDistrictLogResponse {
   pages: number;
 }
 
+interface DirectoryRefreshStatus {
+  running: boolean;
+  pid: number | null;
+  il_with_url: number;
+  latest: {
+    id: number;
+    run_at: string;
+    file_hash: string | null;
+    row_count: number | null;
+    new_districts: number | null;
+    updated_districts: number | null;
+    with_website: number | null;
+    changed: boolean | null;
+    status: string;
+    error: string | null;
+  } | null;
+}
+
 interface ReviewQueueItem {
   id: number;
   category: string;
@@ -247,6 +265,21 @@ function useExtractionReport() {
         return r.json();
       }),
     refetchInterval: 30_000,
+    retry: false,
+  });
+}
+
+function useDirectoryRefreshStatus() {
+  return useQuery<DirectoryRefreshStatus>({
+    queryKey: ["/api/admin/directory-refresh-status"],
+    queryFn: () =>
+      fetch(apiUrl("/api/admin/directory-refresh-status"), { credentials: "include" }).then(
+        (r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        },
+      ),
+    refetchInterval: (query) => (query.state.data?.running ? 3_000 : 30_000),
     retry: false,
   });
 }
@@ -776,6 +809,107 @@ function IlCbaDistrictLogTable() {
   );
 }
 
+function DirectoryRefreshCard() {
+  const queryClient = useQueryClient();
+  const { data, refetch } = useDirectoryRefreshStatus();
+
+  const runNow = useMutation({
+    mutationFn: () =>
+      fetch(apiUrl("/api/admin/run-directory-refresh"), {
+        method: "POST",
+        credentials: "include",
+      }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/directory-refresh-status"] });
+      refetch();
+    },
+  });
+
+  const running   = data?.running ?? false;
+  const latest    = data?.latest ?? null;
+  const ilWithUrl = data?.il_with_url ?? 0;
+
+  const statusColor =
+    running                          ? "text-amber-400"
+    : latest?.status === "success"   ? "text-emerald-400"
+    : latest?.status === "no_change" ? "text-sky-400"
+    : latest?.status === "error"     ? "text-red-400"
+    : "text-slate-500";
+
+  const statusLabel = running ? "running…" : (latest?.status ?? "never run");
+
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-950 p-5 space-y-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            {running && (
+              <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+            )}
+            <span className={`text-sm font-mono font-medium ${statusColor}`}>{statusLabel}</span>
+          </div>
+          <div className="text-xs text-slate-500">
+            {latest?.run_at
+              ? `Last run: ${new Date(latest.run_at).toLocaleString()}`
+              : "No runs yet — click Run now to test"}
+          </div>
+        </div>
+        <button
+          onClick={() => runNow.mutate()}
+          disabled={running || runNow.isPending}
+          className="shrink-0 text-xs px-3 py-1.5 rounded border border-slate-700 hover:border-sky-600 text-slate-400 hover:text-sky-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {running ? "Running…" : runNow.isPending ? "Starting…" : "Run now"}
+        </button>
+      </div>
+
+      {latest && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+          <div className="space-y-0.5">
+            <div className="text-slate-500">With website URL</div>
+            <div className="text-slate-200 font-mono font-semibold">
+              {ilWithUrl.toLocaleString()}
+            </div>
+          </div>
+          <div className="space-y-0.5">
+            <div className="text-slate-500">Rows parsed</div>
+            <div className="text-slate-200 font-mono font-semibold">
+              {latest.row_count !== null ? latest.row_count.toLocaleString() : "—"}
+            </div>
+          </div>
+          <div className="space-y-0.5">
+            <div className="text-slate-500">New districts</div>
+            <div className="text-slate-200 font-mono font-semibold">
+              {latest.new_districts !== null ? latest.new_districts.toLocaleString() : "—"}
+            </div>
+          </div>
+          <div className="space-y-0.5">
+            <div className="text-slate-500">Updated</div>
+            <div className="text-slate-200 font-mono font-semibold">
+              {latest.updated_districts !== null ? latest.updated_districts.toLocaleString() : "—"}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {latest?.changed === false && latest?.status === "no_change" && (
+        <p className="text-xs text-sky-400">
+          File unchanged since last run — no districts updated.
+        </p>
+      )}
+
+      {latest?.status === "error" && latest?.error && (
+        <p className="text-xs text-red-400 font-mono truncate" title={latest.error}>
+          ✗ {latest.error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function CrawlReportTab() {
   const [showLogin, setShowLogin] = useState(false);
   const { data: session, refetch: refetchSession } = useAdminSession();
@@ -1082,6 +1216,19 @@ function CrawlReportTab() {
             begin collecting district CBAs.
           </div>
         )}
+      </section>
+
+      {/* ISBE Directory Refresh */}
+      <section className="space-y-3">
+        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
+          ISBE Directory Refresh
+        </h2>
+        <p className="text-xs text-slate-500">
+          Downloads the ISBE district directory daily at 7 AM Central and upserts district
+          website URLs, names, and county info. SHA-256 deduplicated — unchanged files are
+          logged but not reprocessed. Schedule fires only on a reserved VM deployment.
+        </p>
+        <DirectoryRefreshCard />
       </section>
 
       {/* Per-district crawl log */}

@@ -4,3 +4,5 @@
 - [Replit background processes](replit-bg-processes.md) — Replit kills detached/nohup/fork child processes between tool calls; only managed workflows survive long-running tasks.
 - [ISBE directory XLS format](isbe-directory-format.md) — sheet "1 Public Dist & Sch"; RCDTS = 9-digit RCD col + 2-digit Type col = 11 digits; filter RecType=='Dist' AND School=='0000'.
 - [IL CBA search fallback](il-cba-search-fallback.md) — Serper (primary) → Google CSE → DuckDuckGo; SERPER_API_KEY now set; run --search-fallback after direct crawl finishes.
+- [Cron requires Reserved VM](cron-reserved-vm.md) — node-cron in api-server fires only on Reserved VM; artifact.toml must add serve="vm" before deploying for cron to run.
+- [ISBE connectivity from repl](isbe-connectivity.md) — isbe.net is unreachable from the sandbox (ConnectTimeoutError); only testable once deployed on a Reserved VM.
