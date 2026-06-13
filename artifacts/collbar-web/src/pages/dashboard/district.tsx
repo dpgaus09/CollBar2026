@@ -18,6 +18,7 @@ interface DistrictDetail {
   county: string | null;
   district_type: string | null;
   enrollment: number | null;
+  state: string;
   enrollmentBand: string;
   avg_teacher_salary: string | null;
   currentContract: {
@@ -118,12 +119,13 @@ function useSettlements(id: string) {
   });
 }
 
-function useCountyMedians(county: string | null) {
+function useCountyMedians(county: string | null, state: string | null = null) {
   return useQuery<MedianResult>({
-    queryKey: [`/api/dashboard/medians-county`, county],
+    queryKey: [`/api/dashboard/medians-county`, county, state],
     queryFn: () => {
       const params = new URLSearchParams();
       if (county) params.set("county", county);
+      if (state) params.set("state", state);
       return fetch(`${apiUrl("/api/dashboard/medians")}?${params}`, {
         credentials: "include",
       }).then((r) => r.json());
@@ -132,12 +134,13 @@ function useCountyMedians(county: string | null) {
   });
 }
 
-function useBandMedians(band: string) {
+function useBandMedians(band: string, state: string | null = null) {
   return useQuery<MedianResult>({
-    queryKey: [`/api/dashboard/medians-band`, band],
+    queryKey: [`/api/dashboard/medians-band`, band, state],
     queryFn: () => {
       const params = new URLSearchParams();
       if (band && band !== "unknown") params.set("band", band);
+      if (state) params.set("state", state);
       return fetch(`${apiUrl("/api/dashboard/medians")}?${params}`, {
         credentials: "include",
       }).then((r) => r.json());
@@ -150,13 +153,15 @@ function useProvisionMedians(
   category: string,
   county: string | null,
   band: string,
+  state: string | null = null,
 ) {
   return useQuery<ProvisionMediansResult>({
-    queryKey: [`/api/dashboard/provision-medians`, category, county, band],
+    queryKey: [`/api/dashboard/provision-medians`, category, county, band, state],
     queryFn: () => {
       const params = new URLSearchParams({ category });
       if (county) params.set("county", county);
       if (band && band !== "unknown") params.set("band", band);
+      if (state) params.set("state", state);
       return fetch(`${apiUrl("/api/dashboard/provision-medians")}?${params}`, {
         credentials: "include",
       }).then((r) => r.json());
@@ -483,12 +488,13 @@ export default function DistrictDashboardPage() {
   const { data: settlementsData } = useSettlements(id);
   const county = district?.county ?? null;
   const band = district?.enrollmentBand ?? "unknown";
+  const districtState = district?.state ?? null;
 
-  const { data: countyMedians } = useCountyMedians(county);
-  const { data: bandMedians } = useBandMedians(band);
-  const { data: insMedians } = useProvisionMedians("insurance", county, band);
-  const { data: retMedians } = useProvisionMedians("retirement", county, band);
-  const { data: leaveMedians } = useProvisionMedians("leave", county, band);
+  const { data: countyMedians } = useCountyMedians(county, districtState);
+  const { data: bandMedians } = useBandMedians(band, districtState);
+  const { data: insMedians } = useProvisionMedians("insurance", county, band, districtState);
+  const { data: retMedians } = useProvisionMedians("retirement", county, band, districtState);
+  const { data: leaveMedians } = useProvisionMedians("leave", county, band, districtState);
 
   if (authLoading || !isAuthenticated) return null;
   if (!isAdmin && districtId != null && districtId !== parseInt(id)) return null;

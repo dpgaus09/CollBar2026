@@ -1,2 +1,1 @@
-- [Drizzle schema sync rule](drizzle-schema-sync.md) — raw ALTER TABLE migrations must also update the Drizzle TS schema file or test_drizzle_schema_matches_db fails.
-- [Phase 8 public layer](phase8-public.md) — SSR HTML from Express, Vite proxy, slug/plan schema, county field format quirk.
+- [Phase 9B state scoping](phase9b-state-scoping.md) — IL/OH must never mix in comparables, peer-sets, medians, PDF, or public pages.

@@ -234,6 +234,7 @@ export interface ChartPoint {
 
 export interface BoardPacketProps {
   districtName: string;
+  districtState?: string;
   peerSetName: string;
   generatedAt: string;
   focalSettlements: SettlementRow[];
@@ -403,6 +404,7 @@ function Cell({
 
 export function BoardPacketPDF({
   districtName,
+  districtState = "OH",
   peerSetName,
   generatedAt,
   focalSettlements,
@@ -773,11 +775,9 @@ export function BoardPacketPDF({
           <View style={[styles.section, { marginTop: 12 }]}>
             <Text style={styles.sectionTitle}>Methodology Notes</Text>
             <Text style={styles.footnoteText}>
-              Settlements are extracted from SERB-filed collective bargaining
-              agreements using a two-stage pipeline: (1) automated extraction by
-              an LLM with structured prompts for compensation provisions; (2)
-              human review of flagged records. Values marked "AI" have not yet
-              received human verification.
+              {districtState === "IL"
+                ? "Settlements are derived from the Illinois State Board of Education (ISBE) Teacher Salary Study, which collects district-reported compensation data annually. Values are aggregated to compute year-over-year base salary increase percentages."
+                : "Settlements are extracted from SERB-filed collective bargaining agreements using a two-stage pipeline: (1) automated extraction by an LLM with structured prompts for compensation provisions; (2) human review of flagged records. Values marked \"AI\" have not yet received human verification."}
             </Text>
             <Text style={[styles.footnoteText, { marginTop: 4 }]}>
               Medians are computed using PERCENTILE_CONT(0.5) across all
@@ -804,7 +804,7 @@ export function BoardPacketPDF({
             }}
           >
             <Text style={{ fontSize: 7, color: palette.lightSlate }}>
-              CollBar · Ohio K-12 Collective Bargaining Database
+              CollBar · {districtState === "IL" ? "Illinois" : "Ohio"} K-12 Collective Bargaining Database
             </Text>
             <Text style={{ fontSize: 7, color: palette.lightSlate }}>
               Generated {generatedAt} · For internal board use only

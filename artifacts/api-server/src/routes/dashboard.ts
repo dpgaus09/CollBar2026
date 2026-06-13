@@ -82,19 +82,30 @@ function buildWhere(conditions: Array<SQL | null | undefined>): SQL {
 // GET /api/dashboard/districts
 // ---------------------------------------------------------------------------
 router.get("/dashboard/districts", requireAuth, async (req: Request, res: Response) => {
+  const stateFilter = req.query.state ? String(req.query.state).toUpperCase() : null;
   try {
     let rows;
     if (req.session.userRole === "admin") {
-      rows = await db.execute(sql`
-        SELECT id, name, county, district_type, enrollment, updated_at
-        FROM districts
-        ORDER BY name
-        LIMIT 500
-      `);
+      if (stateFilter) {
+        rows = await db.execute(sql`
+          SELECT id, name, county, district_type, enrollment, state, updated_at
+          FROM districts
+          WHERE state = ${stateFilter}
+          ORDER BY name
+          LIMIT 1000
+        `);
+      } else {
+        rows = await db.execute(sql`
+          SELECT id, name, county, district_type, enrollment, state, updated_at
+          FROM districts
+          ORDER BY name
+          LIMIT 1000
+        `);
+      }
     } else {
       const districtId = req.session.userDistrictId;
       rows = await db.execute(sql`
-        SELECT id, name, county, district_type, enrollment, updated_at
+        SELECT id, name, county, district_type, enrollment, state, updated_at
         FROM districts
         WHERE id = ${districtId}
       `);
@@ -114,7 +125,7 @@ router.get("/dashboard/districts/:id", canAccessDistrict, async (req: Request, r
 
   try {
     const distRows = await db.execute(sql`
-      SELECT id, name, county, district_type, enrollment, avg_teacher_salary, valuation, website_url, updated_at
+      SELECT id, name, county, district_type, enrollment, state, avg_teacher_salary, valuation, website_url, updated_at
       FROM districts
       WHERE id = ${districtId}
     `);
@@ -122,7 +133,7 @@ router.get("/dashboard/districts/:id", canAccessDistrict, async (req: Request, r
 
     const district = distRows.rows[0] as {
       id: number; name: string; county: string | null; district_type: string | null;
-      enrollment: number | null; avg_teacher_salary: string | null; updated_at: string;
+      enrollment: number | null; state: string; avg_teacher_salary: string | null; updated_at: string;
     };
 
     const contractRows = await db.execute(sql`
@@ -252,9 +263,11 @@ router.get("/dashboard/medians", requireAuth, async (req: Request, res: Response
   const band = req.query.band ? String(req.query.band) : null;
   const yearFrom = req.query.yearFrom ? String(req.query.yearFrom) : null;
   const yearTo = req.query.yearTo ? String(req.query.yearTo) : null;
+  const state = req.query.state ? String(req.query.state).toUpperCase() : null;
 
   const conds: Array<SQL | null> = [
     sql`s.base_increase_pct IS NOT NULL`,
+    state ? sql`d.state = ${state}` : null,
     county ? sql`d.county = ${county}` : null,
     yearFrom ? sql`s.from_year >= ${yearFrom}` : null,
     yearTo ? sql`s.to_year <= ${yearTo}` : null,
@@ -289,6 +302,7 @@ router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Resp
   const districtType = req.query.districtType ? String(req.query.districtType) : null;
   const yearFrom = req.query.yearFrom ? String(req.query.yearFrom) : null;
   const yearTo = req.query.yearTo ? String(req.query.yearTo) : null;
+  const state = req.query.state ? String(req.query.state).toUpperCase() : null;
   const format = req.query.format ? String(req.query.format) : "json";
   const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10));
   const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10)));
@@ -314,6 +328,7 @@ router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Resp
   // Build WHERE conditions
   const conds: Array<SQL | null> = [
     sql`s.base_increase_pct IS NOT NULL`,
+    state ? sql`d.state = ${state}` : null,
     county ? sql`d.county = ${county}` : null,
     districtType ? sql`d.district_type = ${districtType}` : null,
     yearFrom ? sql`s.from_year >= ${yearFrom}` : null,
@@ -465,11 +480,12 @@ router.get("/dashboard/expiration-calendar", requireAdmin, async (_req: Request,
 // ---------------------------------------------------------------------------
 // GET /api/dashboard/counties
 // ---------------------------------------------------------------------------
-router.get("/dashboard/counties", requireAuth, async (_req: Request, res: Response) => {
+router.get("/dashboard/counties", requireAuth, async (req: Request, res: Response) => {
+  const stateFilter = req.query.state ? String(req.query.state).toUpperCase() : null;
   try {
-    const rows = await db.execute(sql`
-      SELECT DISTINCT county FROM districts WHERE county IS NOT NULL ORDER BY county
-    `);
+    const rows = stateFilter
+      ? await db.execute(sql`SELECT DISTINCT county FROM districts WHERE county IS NOT NULL AND state = ${stateFilter} ORDER BY county`)
+      : await db.execute(sql`SELECT DISTINCT county FROM districts WHERE county IS NOT NULL ORDER BY county`);
     res.json({ counties: (rows.rows as { county: string }[]).map((r) => r.county) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -479,11 +495,12 @@ router.get("/dashboard/counties", requireAuth, async (_req: Request, res: Respon
 // ---------------------------------------------------------------------------
 // GET /api/dashboard/district-types
 // ---------------------------------------------------------------------------
-router.get("/dashboard/district-types", requireAuth, async (_req: Request, res: Response) => {
+router.get("/dashboard/district-types", requireAuth, async (req: Request, res: Response) => {
+  const stateFilter = req.query.state ? String(req.query.state).toUpperCase() : null;
   try {
-    const rows = await db.execute(sql`
-      SELECT DISTINCT district_type FROM districts WHERE district_type IS NOT NULL ORDER BY district_type
-    `);
+    const rows = stateFilter
+      ? await db.execute(sql`SELECT DISTINCT district_type FROM districts WHERE district_type IS NOT NULL AND state = ${stateFilter} ORDER BY district_type`)
+      : await db.execute(sql`SELECT DISTINCT district_type FROM districts WHERE district_type IS NOT NULL ORDER BY district_type`);
     res.json({ districtTypes: (rows.rows as { district_type: string }[]).map((r) => r.district_type) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -500,6 +517,7 @@ router.get("/dashboard/provision-medians", requireAuth, async (req: Request, res
   const category = req.query.category ? String(req.query.category) : null;
   const county = req.query.county ? String(req.query.county) : null;
   const band = req.query.band ? String(req.query.band) : null;
+  const state = req.query.state ? String(req.query.state).toUpperCase() : null;
 
   if (!category) {
     res.status(400).json({ error: "category query parameter is required" });
@@ -509,6 +527,7 @@ router.get("/dashboard/provision-medians", requireAuth, async (req: Request, res
   const conds: Array<SQL | null> = [
     sql`cp.category = ${category}`,
     sql`cp.value_numeric IS NOT NULL`,
+    state ? sql`d.state = ${state}` : null,
     county ? sql`d.county = ${county}` : null,
     band ? bandSql(band) : null,
   ];

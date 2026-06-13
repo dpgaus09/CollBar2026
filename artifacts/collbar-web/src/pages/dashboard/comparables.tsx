@@ -120,6 +120,21 @@ function fmtMoney(v: string | number | null | undefined): string {
 }
 
 // ---------------------------------------------------------------------------
+// District state hook
+// ---------------------------------------------------------------------------
+
+function useDistrictState(id: string) {
+  return useQuery<{ state: string }>({
+    queryKey: [`/api/dashboard/districts/${id}/state`, id],
+    queryFn: () =>
+      fetch(apiUrl(`/api/dashboard/districts/${id}`), { credentials: "include" })
+        .then((r) => r.json())
+        .then((d: { state?: string }) => ({ state: d.state ?? "OH" })),
+    enabled: !!id,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
@@ -145,6 +160,9 @@ export default function ComparablesPage() {
   const [page, setPage] = useState(1);
   const [selectedPeerSetId, setSelectedPeerSetId] = useState(initialPeerSetId);
 
+  const { data: districtStateData } = useDistrictState(id);
+  const districtState = districtStateData?.state ?? null;
+
   useEffect(() => {
     if (authLoading) return;
     if (!isAuthenticated) { setLocation("/login"); return; }
@@ -163,6 +181,7 @@ export default function ComparablesPage() {
 
   const buildParams = (extra: Record<string, string> = {}) => {
     const p = new URLSearchParams();
+    if (districtState) p.set("state", districtState);
     if (county) p.set("county", county);
     if (band) p.set("band", band);
     if (districtType) p.set("districtType", districtType);
@@ -186,15 +205,21 @@ export default function ComparablesPage() {
   });
 
   const { data: counties } = useQuery<{ counties: string[] }>({
-    queryKey: ["/api/dashboard/counties"],
-    queryFn: () =>
-      fetch(apiUrl("/api/dashboard/counties"), { credentials: "include" }).then((r) => r.json()),
+    queryKey: ["/api/dashboard/counties", districtState],
+    queryFn: () => {
+      const p = new URLSearchParams();
+      if (districtState) p.set("state", districtState);
+      return fetch(`${apiUrl("/api/dashboard/counties")}?${p}`, { credentials: "include" }).then((r) => r.json());
+    },
   });
 
   const { data: dTypes } = useQuery<{ districtTypes: string[] }>({
-    queryKey: ["/api/dashboard/district-types"],
-    queryFn: () =>
-      fetch(apiUrl("/api/dashboard/district-types"), { credentials: "include" }).then((r) => r.json()),
+    queryKey: ["/api/dashboard/district-types", districtState],
+    queryFn: () => {
+      const p = new URLSearchParams();
+      if (districtState) p.set("state", districtState);
+      return fetch(`${apiUrl("/api/dashboard/district-types")}?${p}`, { credentials: "include" }).then((r) => r.json());
+    },
   });
 
   const csvUrl = `${apiUrl("/api/dashboard/comparables")}?${buildParams({ page: "1" })}&format=csv&limit=10000`;

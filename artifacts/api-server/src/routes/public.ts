@@ -44,6 +44,7 @@ interface TrackerStats {
   newest: Array<{
     district_name: string;
     county: string | null;
+    state: string | null;
     from_year: string | null;
     base_increase_pct: string | null;
     term_years: string | null;
@@ -54,7 +55,7 @@ interface TrackerStats {
   computed_at: string;
 }
 
-let _statsCache: { data: TrackerStats; expires: number } | null = null;
+const _statsCacheMap = new Map<string, { data: TrackerStats; expires: number }>();
 const STATS_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 const BAND_LABELS: Record<string, string> = {
@@ -66,7 +67,8 @@ const BAND_LABELS: Record<string, string> = {
 };
 const BAND_ORDER = ["tiny", "small", "medium", "large", "xlarge"];
 
-async function computeTrackerStats(): Promise<TrackerStats> {
+async function computeTrackerStats(state?: string): Promise<TrackerStats> {
+  const sc = state ? `AND d.state = '${state.replace(/'/g, "''")}'` : "";
   const [globalRows, bandRows, newestRows] = await Promise.all([
     db.execute(sql.raw(`
       SELECT
@@ -78,7 +80,8 @@ async function computeTrackerStats(): Promise<TrackerStats> {
         MIN(s.from_year)                                             AS year_min,
         MAX(s.from_year)                                             AS year_max
       FROM settlements s
-      WHERE s.base_increase_pct IS NOT NULL
+      JOIN districts d ON s.district_id = d.id
+      WHERE s.base_increase_pct IS NOT NULL ${sc}
     `)),
     db.execute(sql.raw(`
       SELECT
@@ -95,7 +98,7 @@ async function computeTrackerStats(): Promise<TrackerStats> {
       FROM settlements s
       JOIN districts d ON s.district_id = d.id
       WHERE s.base_increase_pct IS NOT NULL
-        AND d.enrollment IS NOT NULL
+        AND d.enrollment IS NOT NULL ${sc}
       GROUP BY band
       ORDER BY MIN(d.enrollment)
     `)),
@@ -103,6 +106,7 @@ async function computeTrackerStats(): Promise<TrackerStats> {
       SELECT
         d.name   AS district_name,
         d.county,
+        d.state,
         d.slug   AS district_slug,
         s.from_year,
         s.base_increase_pct,
@@ -117,7 +121,7 @@ async function computeTrackerStats(): Promise<TrackerStats> {
         ORDER BY c2.effective_end DESC NULLS LAST LIMIT 1
       ) lc ON true
       LEFT JOIN source_documents sd ON lc.source_doc_id = sd.id
-      WHERE s.base_increase_pct IS NOT NULL
+      WHERE s.base_increase_pct IS NOT NULL ${sc}
       ORDER BY s.id DESC
       LIMIT 30
     `)),
@@ -147,6 +151,7 @@ async function computeTrackerStats(): Promise<TrackerStats> {
     newest: (newestRows.rows as Array<Record<string, unknown>>).map((r) => ({
       district_name: String(r.district_name ?? ""),
       county: r.county ? String(r.county) : null,
+      state: r.state ? String(r.state) : null,
       from_year: r.from_year ? String(r.from_year) : null,
       base_increase_pct: r.base_increase_pct != null ? String(r.base_increase_pct) : null,
       term_years: r.term_years != null ? String(r.term_years) : null,
@@ -158,21 +163,26 @@ async function computeTrackerStats(): Promise<TrackerStats> {
   };
 }
 
-async function getTrackerStats(): Promise<TrackerStats> {
-  if (_statsCache && _statsCache.expires > Date.now()) {
-    return _statsCache.data;
+async function getTrackerStats(state?: string): Promise<TrackerStats> {
+  const key = state ?? "__all__";
+  const cached = _statsCacheMap.get(key);
+  if (cached && cached.expires > Date.now()) {
+    return cached.data;
   }
-  const data = await computeTrackerStats();
-  _statsCache = { data, expires: Date.now() + STATS_TTL_MS };
+  const data = await computeTrackerStats(state);
+  _statsCacheMap.set(key, { data, expires: Date.now() + STATS_TTL_MS });
   return data;
 }
 
 // Refresh daily
 setInterval(
   () => {
-    computeTrackerStats()
-      .then((data) => { _statsCache = { data, expires: Date.now() + STATS_TTL_MS }; })
-      .catch((err) => logger.warn({ err }, "tracker stats refresh failed"));
+    for (const st of [undefined, "OH", "IL"]) {
+      const key = st ?? "__all__";
+      computeTrackerStats(st)
+        .then((data) => { _statsCacheMap.set(key, { data, expires: Date.now() + STATS_TTL_MS }); })
+        .catch((err) => logger.warn({ err, state: st }, "tracker stats refresh failed"));
+    }
   },
   24 * 60 * 60 * 1000,
 );
@@ -184,9 +194,10 @@ setInterval(
 router.get(
   "/public/tracker-stats",
   publicRateLimit,
-  async (_req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     try {
-      const stats = await getTrackerStats();
+      const stateParam = req.query.state ? String(req.query.state).toUpperCase() : undefined;
+      const stats = await getTrackerStats(stateParam);
       res
         .setHeader("Cache-Control", "public, max-age=3600, s-maxage=3600")
         .json(stats);
@@ -210,7 +221,7 @@ router.get(
     try {
       const districtRows = await db.execute(
         sql.raw(
-          `SELECT id, name, county, district_type, enrollment, slug
+          `SELECT id, name, county, district_type, enrollment, slug, state
            FROM districts WHERE slug = '${slug.replace(/'/g, "''")}' LIMIT 1`,
         ),
       );
@@ -220,7 +231,7 @@ router.get(
       }
       const d = districtRows.rows[0] as {
         id: bigint; name: string; county: string | null;
-        district_type: string | null; enrollment: number | null; slug: string;
+        district_type: string | null; enrollment: number | null; slug: string; state: string;
       };
       const districtId = Number(d.id);
 
@@ -248,6 +259,7 @@ router.get(
           FROM districts d2
           WHERE d2.county = '${(d.county ?? "").replace(/'/g, "''")}'
             AND d2.id != ${districtId}
+            AND d2.state = '${(d.state ?? "OH").replace(/'/g, "''")}'
           ORDER BY RANDOM()
           LIMIT 3
         `)),

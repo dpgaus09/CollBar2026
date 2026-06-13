@@ -11,6 +11,7 @@ interface District {
   county: string | null;
   district_type: string | null;
   enrollment: number | null;
+  state: string;
 }
 
 function useDistricts() {
@@ -103,14 +104,17 @@ function AdminDistrictPicker({
   setSearch: (s: string) => void;
 }) {
   const [, setLocation] = useLocation();
+  const [stateFilter, setStateFilter] = useState<"" | "OH" | "IL">("");
   const { data, isLoading, isError } = useDistricts();
 
-  const filtered = (data?.districts ?? []).filter(
-    (d) =>
-      !search ||
+  const filtered = (data?.districts ?? []).filter((d) => {
+    if (stateFilter && d.state !== stateFilter) return false;
+    if (!search) return true;
+    return (
       d.name.toLowerCase().includes(search.toLowerCase()) ||
-      (d.county ?? "").toLowerCase().includes(search.toLowerCase()),
-  );
+      (d.county ?? "").toLowerCase().includes(search.toLowerCase())
+    );
+  });
 
   return (
     <div className="space-y-6">
@@ -119,6 +123,22 @@ function AdminDistrictPicker({
         <p className="text-xs text-slate-500 mt-1">
           {data?.districts.length.toLocaleString() ?? "—"} districts in the database
         </p>
+      </div>
+
+      <div className="flex gap-1">
+        {(["", "OH", "IL"] as const).map((s) => (
+          <button
+            key={s || "all"}
+            onClick={() => setStateFilter(s)}
+            className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
+              stateFilter === s
+                ? "bg-blue-600 text-white"
+                : "bg-slate-800 text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            {s || "All"}
+          </button>
+        ))}
       </div>
 
       <input
@@ -159,8 +179,13 @@ function AdminDistrictPicker({
                 {d.district_type ? ` · ${d.district_type}` : ""}
               </div>
             </div>
-            <div className="text-xs text-slate-600 font-mono">
-              {d.enrollment ? `${d.enrollment.toLocaleString()} students` : ""}
+            <div className="flex items-center gap-2">
+              <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${d.state === "IL" ? "bg-sky-900/40 text-sky-400" : "bg-slate-800 text-slate-500"}`}>
+                {d.state}
+              </span>
+              <span className="text-xs text-slate-600 font-mono">
+                {d.enrollment ? `${d.enrollment.toLocaleString()} students` : ""}
+              </span>
             </div>
           </button>
         ))}

@@ -239,11 +239,23 @@ function footer(): string {
 // GET /tracker
 // ---------------------------------------------------------------------------
 
-router.get("/tracker", async (_req: Request, res: Response) => {
+router.get("/tracker", async (req: Request, res: Response) => {
   try {
-    const stats = await getTrackerStats();
+    const stateParam = req.query.state ? String(req.query.state).toUpperCase() : undefined;
+    const validState = stateParam === "OH" || stateParam === "IL" ? stateParam : undefined;
+    const stats = await getTrackerStats(validState);
 
     const hasData = stats.total_settlements > 0;
+    const stateLabel = validState === "IL" ? "Illinois" : validState === "OH" ? "Ohio" : "Ohio & Illinois";
+
+    const stateTabs = [["", "All"], ["OH", "Ohio"], ["IL", "Illinois"]].map(([s, label]) => {
+      const href = BASE_URL + "/tracker" + (s ? "?state=" + s : "");
+      const active = (validState ?? "") === s;
+      const style = active
+        ? "padding:6px 14px;border-radius:5px;font-size:12px;font-weight:600;font-family:inherit;text-decoration:none;background:#1d4ed8;color:#fff"
+        : "padding:6px 14px;border-radius:5px;font-size:12px;font-weight:600;font-family:inherit;text-decoration:none;background:#1e293b;color:#64748b;border:1px solid #334155";
+      return `<a href="${esc(href)}" style="${style}">${esc(label)}</a>`;
+    }).join("\n      ");
 
     const bandRows = stats.band_medians
       .map((b) => {
@@ -264,7 +276,7 @@ router.get("/tracker", async (_req: Request, res: Response) => {
     const newestRows = stats.newest
       .map((s) => {
         const slugHref = s.district_slug
-          ? `<a href="${BASE_URL}/oh/${esc(s.district_slug)}">${esc(s.district_name)}</a>`
+          ? `<a href="${BASE_URL}/${(s.state ?? "oh").toLowerCase()}/${esc(s.district_slug)}">${esc(s.district_name)}</a>`
           : esc(s.district_name);
         const srcLink = s.source_url
           ? `<a href="${esc(s.source_url)}" target="_blank" rel="noopener noreferrer">↗</a>`
@@ -289,9 +301,9 @@ router.get("/tracker", async (_req: Request, res: Response) => {
 ${nav()}
 <div class="container">
   <div class="hero">
-    <p class="breadcrumb">Ohio K-12 Collective Bargaining Data</p>
-    <h1 class="hero-title">Ohio K-12 Settlement Tracker</h1>
-    <p class="hero-sub">Verified base-salary increase data from SERB filings and public district contracts &nbsp;&middot;&nbsp; Updated daily</p>
+    <p class="breadcrumb">${esc(stateLabel)} K-12 Collective Bargaining Data</p>
+    <h1 class="hero-title">${esc(stateLabel)} K-12 Settlement Tracker</h1>
+    <p class="hero-sub">Verified base-salary increase data from ${validState === "IL" ? "ISBE filings" : "SERB filings"} and public district contracts &nbsp;&middot;&nbsp; Updated daily</p>
   </div>
 
   ${
@@ -301,6 +313,10 @@ ${nav()}
         </div></div>`
       : ""
   }
+
+  <div style="display:flex;gap:8px;margin-bottom:4px">
+    ${stateTabs}
+  </div>
 
   <div class="stats-grid">
     <div class="stat-card">
@@ -378,11 +394,11 @@ ${footer()}`;
       .setHeader("Content-Type", "text/html; charset=utf-8")
       .send(
         page({
-          title: "Ohio K-12 Settlement Tracker | CollBar",
-          description:
-            "Real-time database of Ohio K-12 collective bargaining settlements. " +
-            "Browse base salary increases, contract terms, and statewide medians by district size.",
-          canonical: `${BASE_URL}/tracker`,
+          title: `${esc(stateLabel)} K-12 Settlement Tracker | CollBar`,
+          description: validState === "IL"
+            ? "Real-time database of Illinois K-12 collective bargaining settlements. Browse base salary increases and statewide medians by district size."
+            : "Real-time database of Ohio K-12 collective bargaining settlements. Browse base salary increases, contract terms, and statewide medians by district size.",
+          canonical: `${BASE_URL}/tracker` + (validState ? `?state=${validState}` : ""),
           body,
         }),
       );
@@ -405,7 +421,7 @@ router.get("/oh/:slug", async (req: Request, res: Response) => {
     const districtRows = await db.execute(
       sql.raw(
         `SELECT id, name, county, district_type, enrollment, slug
-         FROM districts WHERE slug = '${rawSlug.replace(/'/g, "''")}' LIMIT 1`,
+         FROM districts WHERE slug = '${rawSlug.replace(/'/g, "''")}' AND state = 'OH' LIMIT 1`,
       ),
     );
     if (districtRows.rows.length === 0) {
@@ -453,6 +469,7 @@ router.get("/oh/:slug", async (req: Request, res: Response) => {
         FROM districts d2
         WHERE d2.county = '${(d.county ?? "").replace(/'/g, "''")}'
           AND d2.id != ${districtId}
+          AND d2.state = 'OH'
         ORDER BY RANDOM() LIMIT 3
       `)),
     ]);
@@ -636,22 +653,236 @@ ${footer()}`;
 });
 
 // ---------------------------------------------------------------------------
+// GET /il/:slug
+// ---------------------------------------------------------------------------
+
+router.get("/il/:slug", async (req: Request, res: Response) => {
+  const rawSlug = String(req.params.slug ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "");
+  if (!rawSlug) { res.status(404).send("Not found"); return; }
+
+  try {
+    const districtRows = await db.execute(
+      sql.raw(
+        `SELECT id, name, county, district_type, enrollment, slug
+         FROM districts WHERE slug = '${rawSlug.replace(/'/g, "\'\''")}' AND state = 'IL' LIMIT 1`,
+      ),
+    );
+    if (districtRows.rows.length === 0) {
+      res.status(404).send(
+        page({
+          title: "District Not Found | CollBar",
+          description: "This district page could not be found.",
+          canonical: `${BASE_URL}/il/${rawSlug}`,
+          body: `${nav()}<div class="container"><div class="section" style="text-align:center;color:#64748b;padding:80px 0">
+            <p style="font-size:48px;margin-bottom:16px">404</p>
+            <p>District not found.</p>
+            <p style="margin-top:16px"><a href="${BASE_URL}/tracker">← Back to Tracker</a></p>
+          </div></div>${footer()}`,
+        }),
+      );
+      return;
+    }
+
+    const d = districtRows.rows[0] as {
+      id: bigint; name: string; county: string | null;
+      district_type: string | null; enrollment: number | null; slug: string;
+    };
+    const districtId = Number(d.id);
+
+    const [settleRows, contractRows, compRows] = await Promise.all([
+      db.execute(sql.raw(`
+        SELECT from_year, to_year, base_increase_pct, year2_pct, year3_pct, term_years, human_verified
+        FROM settlements
+        WHERE district_id = ${districtId} AND base_increase_pct IS NOT NULL
+        ORDER BY from_year DESC NULLS LAST, id DESC LIMIT 1
+      `)),
+      db.execute(sql.raw(`
+        SELECT effective_start, effective_end, term_years, union_name
+        FROM contracts WHERE district_id = ${districtId}
+        ORDER BY effective_end DESC NULLS LAST LIMIT 1
+      `)),
+      db.execute(sql.raw(`
+        SELECT d2.name, d2.county, d2.slug,
+          (SELECT base_increase_pct FROM settlements
+           WHERE district_id = d2.id AND base_increase_pct IS NOT NULL
+           ORDER BY from_year DESC LIMIT 1) AS base_pct,
+          (SELECT term_years FROM settlements
+           WHERE district_id = d2.id AND base_increase_pct IS NOT NULL
+           ORDER BY from_year DESC LIMIT 1) AS term_years
+        FROM districts d2
+        WHERE d2.county = '${(d.county ?? "").replace(/'/g, "\'\''")}' 
+          AND d2.id != ${districtId}
+          AND d2.state = 'IL'
+        ORDER BY RANDOM() LIMIT 3
+      `)),
+    ]);
+
+    const s = (settleRows.rows[0] ?? null) as Record<string, unknown> | null;
+    const c = (contractRows.rows[0] ?? null) as Record<string, unknown> | null;
+    const comps = compRows.rows as Array<Record<string, unknown>>;
+
+    const expiryDays = c ? daysUntil(c.effective_end as string) : null;
+    const expiryLabel =
+      expiryDays == null
+        ? ""
+        : expiryDays < 0
+          ? `<span class="badge badge-red">Expired ${Math.abs(expiryDays)} days ago</span>`
+          : expiryDays <= 30
+            ? `<span class="badge badge-amber">Expires in ${expiryDays} days</span>`
+            : `<span class="badge badge-green">Expires in ${expiryDays} days</span>`;
+
+    const formatDate = (v: unknown) => {
+      if (!v) return "—";
+      const d2 = new Date(String(v));
+      return isNaN(d2.getTime())
+        ? String(v)
+        : d2.toLocaleDateString("en-US", { month: "short", year: "numeric" });
+    };
+
+    const contractBlock = c
+      ? `
+        <div class="card">
+          <div class="card-header">Current Contract</div>
+          <div class="card-body">
+            <dl class="contract-row">
+              <div style="display:flex;gap:8px;align-items:baseline">
+                <dt>Period</dt>
+                <dd>${esc(formatDate(c.effective_start))} – ${esc(formatDate(c.effective_end))}</dd>
+                ${expiryLabel}
+              </div>
+            </dl>
+            <dl class="contract-row" style="margin-top:8px">
+              ${c.term_years ? `<div><dt>Term</dt><dd>${esc(fmtTerm(c.term_years as string))}</dd></div>` : ""}
+              ${c.union_name ? `<div><dt>Union</dt><dd>${esc(c.union_name as string)}</dd></div>` : ""}
+            </dl>
+          </div>
+        </div>`
+      : `<div class="card"><div class="card-body" style="color:#475569">No contract on file yet.</div></div>`;
+
+    const settlementBlock = s
+      ? `
+        <div class="card">
+          <div class="card-header">Latest Settlement &mdash; ${esc(s.from_year as string)} – ${esc(s.to_year as string)}</div>
+          <div class="card-body">
+            <div style="display:flex;flex-wrap:wrap;gap:24px;align-items:flex-end">
+              <div>
+                <div class="settle-value">${fmtPct(s.base_increase_pct as string)}</div>
+                <div class="settle-sub">Year 1 base increase</div>
+              </div>
+              ${s.year2_pct ? `<div><div style="font-size:18px;font-weight:700;color:#93c5fd">${fmtPct(s.year2_pct as string)}</div><div class="settle-sub">Year 2</div></div>` : ""}
+              ${s.year3_pct ? `<div><div style="font-size:18px;font-weight:700;color:#94a3b8">${fmtPct(s.year3_pct as string)}</div><div class="settle-sub">Year 3</div></div>` : ""}
+              ${s.term_years ? `<div><div style="font-size:18px;font-weight:700;color:#94a3b8">${fmtTerm(s.term_years as string)}</div><div class="settle-sub">Term</div></div>` : ""}
+              <div style="margin-left:auto">
+                ${s.human_verified ? `<span class="badge badge-green">✓ Human verified</span>` : `<span class="badge badge-blue">AI extracted</span>`}
+              </div>
+            </div>
+          </div>
+        </div>`
+      : `<div class="card"><div class="card-body" style="color:#475569">No settlement data extracted yet. Extraction pipeline coming soon.</div></div>`;
+
+    const signupHref = `${BASE_URL}/signup?district=${esc(rawSlug)}`;
+
+    const compCards = comps.map((comp) => `
+        <div class="comp-card">
+          <div class="comp-name">${esc(comp.name as string)}</div>
+          <div class="comp-county">${esc(comp.county as string ?? "—")}</div>
+          <div class="comp-blur-wrap">
+            <div class="comp-blur-values">
+              <div>
+                <div class="comp-blur-label">Base %</div>
+                <div class="comp-blur-val">${comp.base_pct ? fmtPct(comp.base_pct as string) : "3.40%"}</div>
+              </div>
+              <div>
+                <div class="comp-blur-label">Term</div>
+                <div class="comp-blur-val">${comp.term_years ? fmtTerm(comp.term_years as string) : "3.0 yr"}</div>
+              </div>
+            </div>
+            <div class="comp-overlay">
+              <a href="${signupHref}">Unlock</a>
+            </div>
+          </div>
+        </div>`).join("\n");
+
+    const body = `
+${nav()}
+<div class="container">
+  <div class="hero">
+    <p class="breadcrumb"><a href="${BASE_URL}/tracker?state=IL">← Illinois K-12 Settlement Tracker</a></p>
+    <h1 class="hero-title">${esc(d.name)}</h1>
+    <div class="district-meta">
+      ${d.county ? `<span>📍 ${esc(d.county)}</span>` : ""}
+      ${d.district_type ? `<span>${esc(d.district_type.replace(/_/g, " "))}</span>` : ""}
+      ${d.enrollment ? `<span>${d.enrollment.toLocaleString()} students</span>` : ""}
+    </div>
+  </div>
+
+  ${contractBlock}
+  ${settlementBlock}
+
+  <div class="card">
+    <div class="card-header">Comparable Districts in ${esc(d.county ?? "Region")}
+      <span style="font-weight:400;margin-left:8px">&mdash; create a free account to see full data</span>
+    </div>
+    <div class="card-body">
+      ${comps.length > 0
+        ? `<div class="comp-grid">${compCards}</div>`
+        : `<p style="color:#475569;text-align:center;padding:20px 0">No comparable districts found in this county.</p>`}
+      <div style="margin-top:12px;text-align:center">
+        <a href="${signupHref}" class="btn btn-primary" style="font-size:12px;padding:8px 18px">See all comparables</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="cta-bar">
+    <div class="cta-title">See the full picture for ${esc(d.name)}</div>
+    <div class="cta-sub">
+      Free account: settlement history, key clauses, contract expiration alerts,
+      and statewide comparables — all for your district.
+    </div>
+    <a href="${esc(signupHref)}" class="btn btn-primary">Create free account</a>
+    <a href="${BASE_URL}/login" class="btn btn-ghost">Already have one? Sign in</a>
+  </div>
+</div>
+${footer()}`;
+
+    res
+      .setHeader("Cache-Control", "public, max-age=3600, s-maxage=3600")
+      .setHeader("Content-Type", "text/html; charset=utf-8")
+      .send(
+        page({
+          title: `${d.name} — Illinois K-12 Contract Data | CollBar`,
+          description:
+            `Settlement data and contract information for ${d.name}` +
+            (d.county ? `, ${d.county}` : "") +
+            `. Latest salary increases, term length, and comparable Illinois districts on CollBar.`,
+          canonical: `${BASE_URL}/il/${rawSlug}`,
+          body,
+        }),
+      );
+  } catch (err) {
+    res.status(500).send(`<html><body><pre>Error: ${esc(String(err))}</pre></body></html>`);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /sitemap.xml
 // ---------------------------------------------------------------------------
 
 router.get("/sitemap.xml", async (_req: Request, res: Response) => {
   try {
     const rows = await db.execute(sql.raw(
-      `SELECT slug, updated_at FROM districts WHERE slug IS NOT NULL ORDER BY name`,
+      `SELECT slug, state, updated_at FROM districts WHERE slug IS NOT NULL ORDER BY name`,
     ));
     const today = new Date().toISOString().slice(0, 10);
-    const urls = (rows.rows as Array<{ slug: string; updated_at: unknown }>).map((r) => {
+    const urls = (rows.rows as Array<{ slug: string; state: string; updated_at: unknown }>).map((r) => {
       const lastmod = r.updated_at
         ? new Date(String(r.updated_at)).toISOString().slice(0, 10)
         : today;
       return `
   <url>
-    <loc>${BASE_URL}/oh/${esc(r.slug)}</loc>
+    <loc>${BASE_URL}/${(r.state ?? 'oh').toLowerCase()}/${esc(r.slug)}</loc>
     <lastmod>${lastmod}</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>

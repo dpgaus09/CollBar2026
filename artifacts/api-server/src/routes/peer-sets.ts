@@ -107,8 +107,10 @@ router.get(
     const districtType = req.query.districtType
       ? String(req.query.districtType)
       : null;
+    const state = req.query.state ? String(req.query.state).toUpperCase() : null;
 
     const parts: string[] = [];
+    if (state) parts.push(`state = '${state.replace(/'/g, "''")}'`);
     if (county) parts.push(`county = '${county.replace(/'/g, "''")}'`);
     if (districtType)
       parts.push(`district_type = '${districtType.replace(/'/g, "''")}'`);
@@ -152,18 +154,28 @@ router.get(
   requireAuth,
   async (req: Request, res: Response) => {
     const q = String(req.query.q ?? "").trim();
+    const state = req.query.state ? String(req.query.state).toUpperCase() : null;
     if (q.length < 2) {
       res.json({ districts: [] });
       return;
     }
     try {
-      const rows = await db.execute(sql`
-        SELECT id, name, county, district_type, enrollment
-        FROM districts
-        WHERE name ILIKE ${"%" + q + "%"} OR county ILIKE ${"%" + q + "%"}
-        ORDER BY name
-        LIMIT 20
-      `);
+      const rows = state
+        ? await db.execute(sql`
+            SELECT id, name, county, district_type, enrollment
+            FROM districts
+            WHERE (name ILIKE ${"%" + q + "%"} OR county ILIKE ${"%" + q + "%"})
+              AND state = ${state}
+            ORDER BY name
+            LIMIT 20
+          `)
+        : await db.execute(sql`
+            SELECT id, name, county, district_type, enrollment
+            FROM districts
+            WHERE name ILIKE ${"%" + q + "%"} OR county ILIKE ${"%" + q + "%"}
+            ORDER BY name
+            LIMIT 20
+          `);
       res.json({ districts: rows.rows });
     } catch (err) {
       res.status(500).json({ error: String(err) });
@@ -209,6 +221,20 @@ router.post("/peer-sets", requireAuth, async (req: Request, res: Response) => {
   }
 
   const ids = district_ids.map(Number).filter((n) => !isNaN(n));
+
+  if (ids.length > 0) {
+    const idList = ids.join(",");
+    const stateRows = await db.execute(sql.raw(
+      `SELECT DISTINCT state FROM districts WHERE id IN (${idList})`,
+    ));
+    const states = (stateRows.rows as { state: string }[]).map((r) => r.state);
+    if (states.length > 1) {
+      res.status(400).json({
+        error: `Peer sets cannot mix states. Found: ${states.join(", ")}. All districts must be from the same state.`,
+      });
+      return;
+    }
+  }
 
   try {
     const rows = await db.execute(sql`
@@ -283,6 +309,21 @@ router.put(
     };
 
     const ids = (district_ids ?? ps.district_ids).map(Number).filter((n) => !isNaN(n));
+
+    if (ids.length > 0) {
+      const idList = ids.join(",");
+      const stateRows = await db.execute(sql.raw(
+        `SELECT DISTINCT state FROM districts WHERE id IN (${idList})`,
+      ));
+      const states = (stateRows.rows as { state: string }[]).map((r) => r.state);
+      if (states.length > 1) {
+        res.status(400).json({
+          error: `Peer sets cannot mix states. Found: ${states.join(", ")}. All districts must be from the same state.`,
+        });
+        return;
+      }
+    }
+
     const newName = name?.trim() ?? ps.name;
     const newFilters = filters_json ?? ps.filters_json;
     const arrLit = ids.length > 0 ? `{${ids.join(",")}}` : "{}";
@@ -399,13 +440,18 @@ router.get(
 
       const allSettlements = settlementRows.rows as unknown as SettlementRow[];
 
-      // Focal district name
+      // Focal district name + state
       let districtName = "District";
+      let districtState = "OH";
       if (districtId) {
         const dr = await db.execute(
-          sql`SELECT name FROM districts WHERE id = ${districtId} LIMIT 1`,
+          sql`SELECT name, state FROM districts WHERE id = ${districtId} LIMIT 1`,
         );
-        if (dr.rows.length > 0) districtName = (dr.rows[0] as { name: string }).name;
+        if (dr.rows.length > 0) {
+          const dr0 = dr.rows[0] as { name: string; state: string };
+          districtName = dr0.name;
+          districtState = dr0.state ?? "OH";
+        }
       }
 
       const focalSettlements = districtId
@@ -420,6 +466,7 @@ router.get(
 
       const props: BoardPacketProps = {
         districtName,
+        districtState,
         peerSetName: ps.name,
         generatedAt: new Date().toLocaleDateString("en-US", {
           year: "numeric",

@@ -21,6 +21,7 @@ interface PeerSet {
   name: string;
   district_ids: number[];
   filters_json: {
+    state?: string;
     county?: string;
     band?: string;
     district_type?: string;
@@ -58,6 +59,7 @@ function BuilderModal({
   onClose: () => void;
 }) {
   const [name, setName] = useState(initial?.name ?? "");
+  const [state, setState] = useState<"OH" | "IL">((initial?.filters_json?.state as "OH" | "IL") ?? "OH");
   const [county, setCounty] = useState(initial?.filters_json?.county ?? "");
   const [band, setBand] = useState(initial?.filters_json?.band ?? "");
   const [districtType, setDistrictType] = useState(
@@ -75,9 +77,10 @@ function BuilderModal({
   // Preview count (districts matching filters)
   const hasFilter = county || band || districtType;
   const { data: preview } = useQuery<{ districts: District[]; total: number }>({
-    queryKey: ["/api/peer-sets/preview", county, band, districtType],
+    queryKey: ["/api/peer-sets/preview", state, county, band, districtType],
     queryFn: () => {
       const p = new URLSearchParams();
+      p.set("state", state);
       if (county) p.set("county", county);
       if (band) p.set("band", band);
       if (districtType) p.set("districtType", districtType);
@@ -90,27 +93,27 @@ function BuilderModal({
 
   // Search results
   const { data: searchResults } = useQuery<{ districts: District[] }>({
-    queryKey: ["/api/peer-sets/districts/search", searchQ],
+    queryKey: ["/api/peer-sets/districts/search", state, searchQ],
     queryFn: () =>
       fetch(
-        `${apiUrl("/api/peer-sets/districts/search")}?q=${encodeURIComponent(searchQ)}`,
+        `${apiUrl("/api/peer-sets/districts/search")}?state=${encodeURIComponent(state)}&q=${encodeURIComponent(searchQ)}`,
         { credentials: "include" },
       ).then((r) => r.json()),
     enabled: searchQ.length >= 2,
   });
 
-  // Counties & types for filter dropdowns
+  // Counties & types for filter dropdowns (state-scoped)
   const { data: counties } = useQuery<{ counties: string[] }>({
-    queryKey: ["/api/dashboard/counties"],
+    queryKey: ["/api/dashboard/counties", state],
     queryFn: () =>
-      fetch(apiUrl("/api/dashboard/counties"), { credentials: "include" }).then(
+      fetch(`${apiUrl("/api/dashboard/counties")}?state=${encodeURIComponent(state)}`, { credentials: "include" }).then(
         (r) => r.json(),
       ),
   });
   const { data: dTypes } = useQuery<{ districtTypes: string[] }>({
-    queryKey: ["/api/dashboard/district-types"],
+    queryKey: ["/api/dashboard/district-types", state],
     queryFn: () =>
-      fetch(apiUrl("/api/dashboard/district-types"), {
+      fetch(`${apiUrl("/api/dashboard/district-types")}?state=${encodeURIComponent(state)}`, {
         credentials: "include",
       }).then((r) => r.json()),
   });
@@ -146,6 +149,7 @@ function BuilderModal({
       name: name.trim(),
       district_ids: allIds,
       filters_json: {
+        state,
         ...(county ? { county } : {}),
         ...(band ? { band } : {}),
         ...(districtType ? { district_type: districtType } : {}),
@@ -187,6 +191,23 @@ function BuilderModal({
               placeholder="e.g. Small Districts — Cuyahoga County"
               className="w-full text-sm bg-slate-800 border border-slate-700 rounded px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:border-blue-500"
             />
+          </div>
+
+          {/* State selector */}
+          <div>
+            <label className="block text-xs text-slate-400 mb-1.5 font-medium">State</label>
+            <div className="flex gap-2">
+              {(["OH", "IL"] as const).map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => { setState(s); setCounty(""); setDistrictType(""); }}
+                  className={`px-4 py-1.5 text-xs rounded font-medium transition-colors ${state === s ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-400 hover:text-slate-200"}`}
+                >
+                  {s === "OH" ? "Ohio" : "Illinois"}
+                </button>
+              ))}
+            </div>
           </div>
 
           {/* Filters */}
