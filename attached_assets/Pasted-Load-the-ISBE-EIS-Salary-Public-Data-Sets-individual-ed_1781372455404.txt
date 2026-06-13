@@ -1,0 +1,49 @@
+Load the ISBE EIS Salary Public Data Sets — individual educator salary
+records — into the database. I am not a programmer; build end to end and
+report results. Do NOT ask me to run shell commands.
+
+Files are uploaded in pipeline/data/il_eis/ (one .xlsx per year, e.g.
+2021-EIS-Salary-Public-Data-Set.xlsx). Verified structure — single sheet,
+header on row 1, 16 columns: School Year, RCDTS, Entity Name, Last Name,
+First Name, Middle Name, Position Description, Base Salary, Sick Days,
+Vacation Day, Bonus, Annuities, Retirement Enhancements, Other Benefits,
+Full Time Equivalent, FTE Salary. Each row is one educator. ~148k rows/year.
+
+PRIVACY: store ONLY district-level aggregates. Do NOT persist individual
+names (Last/First/Middle Name) anywhere in the database or logs.
+
+Build:
+1. Table il_eis_district (state_district_id TEXT, school_year VARCHAR(7),
+   teacher_headcount INT, teacher_fte NUMERIC, avg_teacher_salary NUMERIC,
+   median_teacher_salary NUMERIC, p25_salary NUMERIC, p75_salary NUMERIC,
+   total_teacher_base_payroll NUMERIC, avg_sick_days NUMERIC,
+   all_staff_headcount INT, all_staff_fte NUMERIC, loaded_at),
+   UNIQUE (state_district_id, school_year).
+2. pipeline/load_il_eis.py: for each file, normalize RCDTS (strip non-digits,
+   zero-pad to 15, take first 11). Classify "teacher" as any row whose
+   Position Description contains 'Teacher' (case-insensitive) — this
+   includes Special Education Teacher, Bilingual Education Teacher, ESL
+   Teacher, Resource Teacher, etc. Per district per year compute the teacher
+   aggregates (FTE-weighted average salary = sum(FTE Salary × FTE)/sum(FTE);
+   median and 25th/75th percentiles of FTE Salary; sum of FTE; headcount;
+   sum of Base Salary). Also compute all-staff headcount and FTE for context.
+   Range-sanitize salaries 10,000-500,000; drop rows with null/zero FTE from
+   salary stats. Upsert. Derive school_year from the "School Year" column.
+3. Run on all uploaded files. Correctness check: 2021 should show ~861
+   districts, ~130,876 teacher FTE, statewide FTE-weighted avg ≈ $69,486.
+   Report districts and teacher FTE per year.
+4. UPGRADE the cost-impact estimate: where il_eis_district has
+   avg_teacher_salary for the district+year, use the REAL average salary
+   (not the TSS midpoint) in the settlement cost-impact calc, and change the
+   footnote to "Calculated from ISBE EIS actual salary data." Fall back to
+   the TSS midpoint (labeled "modeled") only when EIS is unavailable.
+5. Add an "EIS cross-check" to each IL settlement: compute the year-over-year
+   change in avg_teacher_salary from il_eis_district for the same district,
+   store as eis_observed_change_pct on the settlement. On the admin settlement
+   audit view, show our tss_diff base_increase_pct next to this EIS-observed
+   change; flag settlements where the two differ by more than 2 percentage
+   points as "review — possible schedule restructuring."
+
+Report: rows/districts loaded per year, the 2021 correctness check, how many
+settlements now have a real (non-modeled) cost impact, and how many got
+flagged by the EIS cross-check.

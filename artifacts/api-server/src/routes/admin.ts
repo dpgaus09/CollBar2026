@@ -566,4 +566,107 @@ router.patch("/admin/review-queue/:id", requireAdminToken, async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// GET /admin/il-eis-crosscheck
+// IL settlements with EIS cross-check: our base_increase_pct vs EIS-observed
+// salary change, flagged when they differ by > 2 pp.
+// ---------------------------------------------------------------------------
+router.get("/admin/il-eis-crosscheck", requireAdminToken, async (req, res) => {
+  const flaggedOnly = req.query.flagged_only !== "false";
+  const page  = Math.max(1, parseInt(String(req.query.page  ?? "1"),  10));
+  const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "100"), 10)));
+  const offset = (page - 1) * limit;
+
+  try {
+    const rows = await db.execute(sql`
+      SELECT
+        d.name                                        AS district_name,
+        d.state_district_id,
+        d.slug,
+        s.id                                          AS settlement_id,
+        s.from_year,
+        s.to_year,
+        s.base_increase_pct,
+        eis_curr.avg_teacher_salary                   AS eis_avg_salary,
+        eis_prev.avg_teacher_salary                   AS eis_prev_avg_salary,
+        CASE WHEN eis_prev.avg_teacher_salary > 0
+          THEN ROUND(
+            ((eis_curr.avg_teacher_salary - eis_prev.avg_teacher_salary)
+             / eis_prev.avg_teacher_salary) * 100, 2)
+          ELSE NULL
+        END                                           AS eis_observed_change_pct,
+        CASE
+          WHEN s.base_increase_pct IS NOT NULL
+               AND eis_curr.avg_teacher_salary IS NOT NULL
+               AND eis_prev.avg_teacher_salary > 0
+               AND ABS(
+                 s.base_increase_pct -
+                 ROUND(((eis_curr.avg_teacher_salary - eis_prev.avg_teacher_salary)
+                        / eis_prev.avg_teacher_salary) * 100, 2)
+               ) > 2
+          THEN true
+          ELSE false
+        END                                           AS eis_flag
+      FROM settlements s
+      JOIN districts d ON d.id = s.district_id
+      JOIN il_eis_district eis_curr
+        ON eis_curr.state_district_id = d.state_district_id
+        AND eis_curr.school_year = s.from_year
+      JOIN il_eis_district eis_prev
+        ON eis_prev.state_district_id = d.state_district_id
+        AND eis_prev.school_year =
+          (CAST(LEFT(s.from_year, 4) AS INT) - 1)::TEXT
+          || '-' ||
+          RIGHT(CAST(LEFT(s.from_year, 4) AS INT)::TEXT, 2)
+      WHERE d.state = 'IL'
+        AND s.base_increase_pct IS NOT NULL
+        AND eis_curr.avg_teacher_salary IS NOT NULL
+        AND eis_prev.avg_teacher_salary > 0
+        ${flaggedOnly ? sql`AND ABS(
+            s.base_increase_pct -
+            ROUND(((eis_curr.avg_teacher_salary - eis_prev.avg_teacher_salary)
+                   / eis_prev.avg_teacher_salary) * 100, 2)
+          ) > 2` : sql``}
+      ORDER BY ABS(
+        COALESCE(s.base_increase_pct, 0) -
+        ROUND(((eis_curr.avg_teacher_salary - eis_prev.avg_teacher_salary)
+               / eis_prev.avg_teacher_salary) * 100, 2)
+      ) DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `);
+
+    const countRow = await db.execute(sql`
+      SELECT COUNT(*)::int AS n
+      FROM settlements s
+      JOIN districts d ON d.id = s.district_id
+      JOIN il_eis_district eis_curr
+        ON eis_curr.state_district_id = d.state_district_id AND eis_curr.school_year = s.from_year
+      JOIN il_eis_district eis_prev
+        ON eis_prev.state_district_id = d.state_district_id
+        AND eis_prev.school_year =
+          (CAST(LEFT(s.from_year, 4) AS INT) - 1)::TEXT || '-' ||
+          RIGHT(CAST(LEFT(s.from_year, 4) AS INT)::TEXT, 2)
+      WHERE d.state = 'IL'
+        AND s.base_increase_pct IS NOT NULL
+        AND eis_curr.avg_teacher_salary IS NOT NULL
+        AND eis_prev.avg_teacher_salary > 0
+        ${flaggedOnly ? sql`AND ABS(
+            s.base_increase_pct -
+            ROUND(((eis_curr.avg_teacher_salary - eis_prev.avg_teacher_salary)
+                   / eis_prev.avg_teacher_salary) * 100, 2)
+          ) > 2` : sql``}
+    `);
+
+    res.json({
+      items: rows.rows,
+      total: (countRow.rows[0] as { n: number }).n,
+      page,
+      limit,
+      pages: Math.ceil((countRow.rows[0] as { n: number }).n / limit),
+    });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 export default router;

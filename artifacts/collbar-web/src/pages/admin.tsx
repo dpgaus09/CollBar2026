@@ -1256,6 +1256,191 @@ function ReviewQueueTab() {
 }
 
 // ---------------------------------------------------------------------------
+// EIS Cross-Check Tab
+// ---------------------------------------------------------------------------
+
+interface EisXCheckItem {
+  district_name: string;
+  state_district_id: string;
+  slug: string;
+  settlement_id: number;
+  from_year: string;
+  to_year: string;
+  base_increase_pct: string | null;
+  eis_avg_salary: string | null;
+  eis_prev_avg_salary: string | null;
+  eis_observed_change_pct: string | null;
+  eis_flag: boolean;
+}
+
+interface EisXCheckResponse {
+  items: EisXCheckItem[];
+  total: number;
+  page: number;
+  limit: number;
+  pages: number;
+}
+
+function useEisXCheck(page: number, flaggedOnly: boolean) {
+  return useQuery<EisXCheckResponse>({
+    queryKey: ["/api/admin/il-eis-crosscheck", page, flaggedOnly],
+    queryFn: () => {
+      const p = new URLSearchParams({
+        page: String(page),
+        limit: "100",
+        flagged_only: String(flaggedOnly),
+      });
+      return fetch(apiUrl(`/api/admin/il-eis-crosscheck?${p}`), { credentials: "include" }).then(
+        (r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        },
+      );
+    },
+    retry: false,
+  });
+}
+
+function DiffBadge({ our, eis }: { our: string | null; eis: string | null }) {
+  if (our == null || eis == null) return <span className="text-slate-600">—</span>;
+  const diff = Math.abs(parseFloat(our) - parseFloat(eis));
+  const color = diff > 5 ? "text-red-400" : diff > 2 ? "text-amber-400" : "text-emerald-400";
+  return (
+    <span className={`font-mono ${color}`}>
+      {diff.toFixed(1)} pp
+    </span>
+  );
+}
+
+function EisXCheckTab() {
+  const [page, setPage] = useState(1);
+  const [flaggedOnly, setFlaggedOnly] = useState(true);
+  const { data: session } = useAdminSession();
+  const { data, isLoading, isError } = useEisXCheck(page, flaggedOnly);
+
+  if (!session?.authenticated) return <LoginRequiredCard onLogin={() => {}} />;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="space-y-1">
+          <p className="text-xs text-slate-400">
+            IL settlements cross-checked against ISBE EIS actual salary data. Sorted by largest gap.
+          </p>
+          {data && (
+            <p className="text-xs text-slate-600">
+              {data.total.toLocaleString()} settlement{data.total !== 1 ? "s" : ""}{" "}
+              {flaggedOnly ? "flagged (diff > 2 pp)" : "with EIS coverage"}
+            </p>
+          )}
+        </div>
+        <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={flaggedOnly}
+            onChange={(e) => { setFlaggedOnly(e.target.checked); setPage(1); }}
+            className="accent-amber-500"
+          />
+          Flagged only (diff &gt; 2 pp)
+        </label>
+      </div>
+
+      {isLoading && <div className="text-xs text-slate-600 py-4">Loading…</div>}
+      {isError && <div className="text-xs text-red-400 py-4">Failed to load EIS cross-check data.</div>}
+
+      {data && data.items.length === 0 && (
+        <div className="text-xs text-slate-600 py-4">No settlements match the current filter.</div>
+      )}
+
+      {data && data.items.length > 0 && (
+        <div className="rounded-lg border border-slate-800 overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-slate-800 bg-slate-900">
+                <th className="px-3 py-2 text-left text-slate-400 font-medium">District</th>
+                <th className="px-3 py-2 text-center text-slate-400 font-medium">Period</th>
+                <th className="px-3 py-2 text-right text-slate-400 font-medium">Our Pct</th>
+                <th className="px-3 py-2 text-right text-slate-400 font-medium">EIS Observed</th>
+                <th className="px-3 py-2 text-right text-slate-400 font-medium">Gap</th>
+                <th className="px-3 py-2 text-center text-slate-400 font-medium">EIS Avg Sal</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/50">
+              {data.items.map((item) => {
+                const ourPct = item.base_increase_pct != null ? parseFloat(item.base_increase_pct) : null;
+                const eisPct = item.eis_observed_change_pct != null ? parseFloat(item.eis_observed_change_pct) : null;
+                return (
+                  <tr
+                    key={item.settlement_id}
+                    className={`hover:bg-slate-900/40 ${item.eis_flag ? "bg-amber-950/10" : "bg-slate-950"}`}
+                  >
+                    <td className="px-3 py-2.5">
+                      <a
+                        href={apiUrl(`/dashboard/${item.slug ?? item.state_district_id}`)}
+                        className="text-blue-400 hover:text-blue-300 font-medium"
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {item.district_name}
+                      </a>
+                    </td>
+                    <td className="px-3 py-2.5 text-center text-slate-400 font-mono">
+                      {item.from_year}
+                      {item.to_year && item.to_year !== item.from_year ? ` → ${item.to_year}` : ""}
+                    </td>
+                    <td className="px-3 py-2.5 text-right font-mono text-slate-200">
+                      {ourPct != null ? `+${ourPct.toFixed(2)}%` : "—"}
+                    </td>
+                    <td className="px-3 py-2.5 text-right font-mono text-slate-300">
+                      {eisPct != null ? `${eisPct > 0 ? "+" : ""}${eisPct.toFixed(2)}%` : "—"}
+                    </td>
+                    <td className="px-3 py-2.5 text-right">
+                      <DiffBadge our={item.base_increase_pct} eis={item.eis_observed_change_pct} />
+                    </td>
+                    <td className="px-3 py-2.5 text-center text-slate-400 font-mono">
+                      {item.eis_avg_salary != null
+                        ? `$${Math.round(parseFloat(item.eis_avg_salary)).toLocaleString()}`
+                        : "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {data && data.pages > 1 && (
+        <div className="flex items-center justify-center gap-2 pt-2">
+          <button
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={page === 1}
+            className="text-xs px-3 py-1 rounded border border-slate-700 text-slate-400 hover:text-slate-200 disabled:opacity-40"
+          >
+            ← Prev
+          </button>
+          <span className="text-xs text-slate-500">
+            {page} / {data.pages}
+          </span>
+          <button
+            onClick={() => setPage((p) => Math.min(data.pages, p + 1))}
+            disabled={page === data.pages}
+            className="text-xs px-3 py-1 rounded border border-slate-700 text-slate-400 hover:text-slate-200 disabled:opacity-40"
+          >
+            Next →
+          </button>
+        </div>
+      )}
+
+      <p className="text-[10px] text-slate-700 italic pt-2">
+        EIS observed change = YoY change in ISBE EIS district-level FTE-weighted avg teacher salary.
+        Gap &gt; 2 pp may indicate salary schedule restructuring rather than a uniform base increase.
+      </p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page shell with tab routing
 // ---------------------------------------------------------------------------
 
@@ -1511,7 +1696,7 @@ function AlertsTab() {
 // Page shell with tab routing
 // ---------------------------------------------------------------------------
 
-type TabKey = "overview" | "crawl-report" | "extraction-report" | "review-queue" | "alerts";
+type TabKey = "overview" | "crawl-report" | "extraction-report" | "review-queue" | "alerts" | "eis-crosscheck";
 
 function useAlertsPendingCount() {
   return useQuery<{ pendingCount: number }>({
@@ -1531,6 +1716,7 @@ const TABS: { key: TabKey; label: string; path: string }[] = [
   { key: "extraction-report", label: "Extraction", path: "/admin/extraction-report" },
   { key: "review-queue", label: "Review Queue", path: "/admin/review-queue" },
   { key: "alerts", label: "Alerts", path: "/admin/alerts" },
+  { key: "eis-crosscheck", label: "EIS Cross-Check", path: "/admin/eis-crosscheck" },
 ];
 
 function activeTab(location: string): TabKey {
@@ -1538,6 +1724,7 @@ function activeTab(location: string): TabKey {
   if (location.includes("review-queue")) return "review-queue";
   if (location.includes("extraction-report")) return "extraction-report";
   if (location.includes("crawl-report")) return "crawl-report";
+  if (location.includes("eis-crosscheck")) return "eis-crosscheck";
   return "overview";
 }
 
@@ -1630,6 +1817,7 @@ export default function AdminPage() {
         {tab === "extraction-report" && <ExtractionReportTab />}
         {tab === "review-queue" && <ReviewQueueTab />}
         {tab === "alerts" && <AlertsTab />}
+        {tab === "eis-crosscheck" && <EisXCheckTab />}
       </main>
     </div>
   );

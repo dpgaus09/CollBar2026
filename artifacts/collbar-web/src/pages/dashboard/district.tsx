@@ -64,6 +64,9 @@ interface Settlement {
   source_url: string | null;
   retrieved_at: string | null;
   est_annual_cost_impact: string | null;
+  cost_impact_source: "eis" | "tss" | null;
+  eis_observed_change_pct: string | null;
+  eis_flag: boolean;
 }
 
 interface MedianResult {
@@ -462,17 +465,30 @@ function SettlementTable({ settlements }: { settlements: Settlement[] }) {
             />
           </div>
           {s.est_annual_cost_impact != null ? (
-            <div className="text-[10px] text-amber-400/80 pb-2 -mt-1">
-              <span className="font-medium">Est. annual cost impact:</span>{" "}
-              ${Number(s.est_annual_cost_impact).toLocaleString()}
-              <span className="text-slate-600 ml-1">*</span>
+            <div className="text-[10px] pb-2 -mt-1 space-y-0.5">
+              <div className="text-amber-400/80">
+                <span className="font-medium">Est. annual cost impact:</span>{" "}
+                ${Number(s.est_annual_cost_impact).toLocaleString()}
+                <span className="text-slate-600 ml-1">
+                  *{s.cost_impact_source === "eis" ? " (EIS)" : " (modeled)"}
+                </span>
+              </div>
+              {s.eis_flag && s.eis_observed_change_pct != null && (
+                <div className="text-amber-500/90">
+                  ⚠ EIS observed {Number(s.eis_observed_change_pct) > 0 ? "+" : ""}
+                  {Number(s.eis_observed_change_pct).toFixed(1)}% vs our{" "}
+                  {s.base_increase_pct ? `+${Number(s.base_increase_pct).toFixed(1)}%` : "—"} — review: possible schedule restructuring
+                </div>
+              )}
             </div>
           ) : null}
         </div>
       ))}
       {hasAnyImpact && (
         <p className="text-[10px] text-slate-600 italic pt-3">
-          * Modeled from ISBE Class Size Report FTE and ISBE TSS salary data. Shown as an estimate only.
+          {settlements.some((s) => s.cost_impact_source === "eis")
+            ? "* Calculated from ISBE EIS actual salary data and ISBE Class Size Report FTE. Shown as an estimate only."
+            : "* Modeled from ISBE TSS salary schedule midpoint and ISBE Class Size Report FTE. Shown as an estimate only."}
         </p>
       )}
     </div>

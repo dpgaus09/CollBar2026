@@ -206,29 +206,58 @@ router.get("/dashboard/districts/:id/settlements", canAccessDistrict, async (req
   const districtId = parseInt(String(req.params.id), 10);
   if (isNaN(districtId)) { res.status(400).json({ error: "Invalid district id" }); return; }
   try {
-    // Settlements have no direct source_doc link; derive provenance from the
-    // most recent contract whose period overlaps the settlement's to_year.
-    // For IL districts, also compute estimated annual cost impact:
-    //   base_increase_pct/100 * teacher_fte * avg(ba_begin, highest_scheduled_salary)
+    // Settlements: compute cost impact using EIS real salary (preferred) or TSS midpoint fallback.
+    // Also include EIS cross-check (YoY salary change vs. our base_increase_pct).
     const rows = await db.execute(sql`
       SELECT s.id, s.from_year, s.to_year, s.base_increase_pct, s.year2_pct, s.year3_pct,
              s.off_schedule_payment, s.insurance_changed, s.term_years,
              s.method, s.confidence, s.human_verified, s.page_ref, s.notes,
              sd.source_url, sd.retrieved_at,
+             -- Cost impact: EIS real salary preferred; TSS midpoint as fallback
              CASE
-               WHEN d.state = 'IL'
-                    AND s.base_increase_pct IS NOT NULL
+               WHEN d.state = 'IL' AND s.base_increase_pct IS NOT NULL
+                    AND fte.teacher_fte IS NOT NULL AND eis.avg_teacher_salary IS NOT NULL
+               THEN ROUND((s.base_increase_pct / 100.0) * fte.teacher_fte * eis.avg_teacher_salary, 0)
+               WHEN d.state = 'IL' AND s.base_increase_pct IS NOT NULL
                     AND fte.teacher_fte IS NOT NULL
-                    AND tss.ba_begin IS NOT NULL
-                    AND tss.highest_scheduled_salary IS NOT NULL
+                    AND tss.ba_begin IS NOT NULL AND tss.highest_scheduled_salary IS NOT NULL
                THEN ROUND(
-                 (s.base_increase_pct / 100.0) *
-                 fte.teacher_fte *
-                 ((tss.ba_begin + tss.highest_scheduled_salary) / 2.0),
-                 0
+                 (s.base_increase_pct / 100.0) * fte.teacher_fte *
+                 ((tss.ba_begin + tss.highest_scheduled_salary) / 2.0), 0
                )
                ELSE NULL
-             END AS est_annual_cost_impact
+             END AS est_annual_cost_impact,
+             -- Salary source label for the footnote
+             CASE
+               WHEN d.state = 'IL' AND eis.avg_teacher_salary IS NOT NULL
+                    AND fte.teacher_fte IS NOT NULL THEN 'eis'
+               WHEN d.state = 'IL' AND tss.ba_begin IS NOT NULL
+                    AND fte.teacher_fte IS NOT NULL THEN 'tss'
+               ELSE NULL
+             END AS cost_impact_source,
+             -- EIS cross-check: YoY change in district avg teacher salary from EIS data
+             CASE
+               WHEN d.state = 'IL' AND eis.avg_teacher_salary IS NOT NULL
+                    AND eis_prev.avg_teacher_salary > 0
+               THEN ROUND(
+                 ((eis.avg_teacher_salary - eis_prev.avg_teacher_salary)
+                  / eis_prev.avg_teacher_salary) * 100, 2
+               )
+               ELSE NULL
+             END AS eis_observed_change_pct,
+             -- Flag when settlement pct and EIS-observed change differ by > 2pp
+             CASE
+               WHEN d.state = 'IL' AND s.base_increase_pct IS NOT NULL
+                    AND eis.avg_teacher_salary IS NOT NULL
+                    AND eis_prev.avg_teacher_salary > 0
+                    AND ABS(
+                      s.base_increase_pct -
+                      ROUND(((eis.avg_teacher_salary - eis_prev.avg_teacher_salary)
+                             / eis_prev.avg_teacher_salary) * 100, 2)
+                    ) > 2
+               THEN true
+               ELSE false
+             END AS eis_flag
       FROM settlements s
       JOIN districts d ON d.id = s.district_id
       LEFT JOIN LATERAL (
@@ -244,8 +273,16 @@ router.get("/dashboard/districts/:id/settlements", canAccessDistrict, async (req
         AND fte.school_year = s.from_year
       LEFT JOIN tss_annual tss
         ON tss.state_district_id = d.state_district_id
-        AND tss.school_year = s.from_year
-        AND tss.state = 'IL'
+        AND tss.school_year = s.from_year AND tss.state = 'IL'
+      LEFT JOIN il_eis_district eis
+        ON eis.state_district_id = d.state_district_id
+        AND eis.school_year = s.from_year
+      LEFT JOIN il_eis_district eis_prev
+        ON eis_prev.state_district_id = d.state_district_id
+        AND eis_prev.school_year =
+          (CAST(LEFT(s.from_year, 4) AS INT) - 1)::TEXT
+          || '-' ||
+          RIGHT(CAST(LEFT(s.from_year, 4) AS INT)::TEXT, 2)
       WHERE s.district_id = ${districtId}
       ORDER BY s.from_year DESC
     `);
