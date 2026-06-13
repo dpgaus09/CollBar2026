@@ -5,6 +5,7 @@ import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import type { Profile as GoogleProfile } from "passport-google-oauth20";
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
+import { logger } from "../lib/logger";
 
 // ============================================================================
 // Session type augmentation
@@ -261,10 +262,10 @@ router.get("/auth/replit/callback", async (req: Request, res: Response) => {
     const adminReplitId = process.env.ADMIN_REPLIT_ID;
 
     if (!adminReplitId) {
-      // ADMIN_REPLIT_ID not yet configured — log the ID so the admin can set it
-      console.warn(
-        `ADMIN_REPLIT_ID is not set. ` +
-          `Replit user attempted admin login with sub="${replitId}". ` +
+      // ADMIN_REPLIT_ID not yet configured — log the sub so the operator can set it
+      logger.warn(
+        { replitSub: replitId },
+        `ADMIN_REPLIT_ID secret is not set. ` +
           `Set ADMIN_REPLIT_ID=${replitId} in Replit Secrets to grant admin access.`,
       );
       res.redirect("/admin?error=admin_not_configured");
