@@ -1,0 +1,238 @@
+```json
+{
+  "contracts": [
+    {
+      "union_name": "Mercer County Education Association",
+      "affiliation": "IEA/NEA",
+      "unit_scope": "certificated teaching personnel, including librarians, counselors, and nurses",
+      "effective_start": "2025-07-01",
+      "effective_end": "2028-06-30",
+      "term_years": 3,
+      "has_reopener": null,
+      "reopener_terms": null,
+      "provisions": [
+        {
+          "category": "compensation",
+          "provision_key": "base_salary_increase_yr1",
+          "value_numeric": 4.0,
+          "value_text": "Base salary and all salary schedule cells increase by 4% in year 1 (FY26/SY25-26)",
+          "unit": "%",
+          "clause_excerpt": "In year 1 of this agreement (FY26/SY25-26), the base salary, and all salary schedule cells, will increase by 4%.",
+          "page_ref": 21,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "base_salary_increase_yr2",
+          "value_numeric": 3.5,
+          "value_text": "Base salary and all salary schedule cells increase by 3.5% in year 2 (FY27/SY26-27)",
+          "unit": "%",
+          "clause_excerpt": "In year 2 of this agreement (FY27/SY26-27), the base salary, and all salary schedule cells, will increase by 3.5%.",
+          "page_ref": 22,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "base_salary_increase_yr3",
+          "value_numeric": 3.5,
+          "value_text": "Base salary and all salary schedule cells increase by 3.5% in year 3 (FY28/SY27-28)",
+          "unit": "%",
+          "clause_excerpt": "In year 3 of this agreement (FY28/SY27-28), the base salary, and all salary schedule cells, will increase by 3.5%.",
+          "page_ref": 23,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "lane_advancement_allowed",
+          "value_numeric": null,
+          "value_text": "Teachers changing lanes are exempt from the 6% raise cap, implying lane advancement is allowed",
+          "unit": null,
+          "clause_excerpt": "A teacher whose salary schedule placement would lead to more than a 6% increase in salary, shall be capped at a 6% raise in base pay. Teachers changing lanes are exempt from this cap.",
+          "page_ref": 21,
+          "confidence": 0.85
+        },
+        {
+          "category": "leave",
+          "provision_key": "sick_days_annual",
+          "value_numeric": 15,
+          "value_text": "Teachers with less than 5 consecutive years receive 15 sick days annually (13 sick days plus 2 personal days)",
+          "unit": "days",
+          "clause_excerpt": "Each teacher who has less than five consecutive years of service in the MCSD at the beginning of a school year shall be entitled to fifteen (15) sick leave days for each such school year without loss of pay, two (2) of which can be used as Personal Days.",
+          "page_ref": 9,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "sick_days_annual",
+          "value_numeric": 18,
+          "value_text": "Teachers with 5 or more consecutive years receive 18 sick days annually (15 sick days plus 3 personal days)",
+          "unit": "days",
+          "clause_excerpt": "Each teacher who has five or more consecutive years of service at the beginning of a school year shall be entitled to eighteen (18) sick days for each such school year without loss of pay, three (3) of which can be used as Personal Days.",
+          "page_ref": 9,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "sick_leave_max_days",
+          "value_numeric": null,
+          "value_text": "Sick days shall accumulate without limit",
+          "unit": null,
+          "clause_excerpt": "Sick days shall accumulate without limit. At retirement, a teacher may elect to use accumulated sick leave toward service credit per TRS guidelines.",
+          "page_ref": 10,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "personal_days_annual",
+          "value_numeric": 2,
+          "value_text": "Teachers with less than 5 years of service receive 2 personal days annually",
+          "unit": "days",
+          "clause_excerpt": "Each teacher who has less than five consecutive years of service in the MCSD at the beginning of a school year shall be entitled to fifteen (15) sick leave days for each such school year without loss of pay, two (2) of which can be used as Personal Days.",
+          "page_ref": 9,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "personal_days_annual",
+          "value_numeric": 3,
+          "value_text": "Teachers with 5 or more years of service receive 3 personal days annually",
+          "unit": "days",
+          "clause_excerpt": "Each teacher who has five or more consecutive years of service at the beginning of a school year shall be entitled to eighteen (18) sick days for each such school year without loss of pay, three (3) of which can be used as Personal Days.",
+          "page_ref": 9,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "bereavement_days",
+          "value_numeric": 10,
+          "value_text": "Each employee is allowed ten bereavement days with pay",
+          "unit": "days",
+          "clause_excerpt": "Each Employee will be allowed ten (10) bereavement days with pay.",
+          "page_ref": 12,
+          "confidence": 0.95
+        },
+        {
+          "category": "workday",
+          "provision_key": "contract_days_teacher",
+          "value_numeric": 185,
+          "value_text": "School calendar includes 176 student attendance days, 4 institute days, and 5 emergency days for total of 185 contract days",
+          "unit": "days",
+          "clause_excerpt": "The calendar will not exceed one-hundred seventy-six (176) student attendance days, four (4) institute days, and five (5) emergency days.",
+          "page_ref": 5,
+          "confidence": 0.90
+        },
+        {
+          "category": "workday",
+          "provision_key": "instructional_minutes_day",
+          "value_numeric": null,
+          "value_text": "No specific instructional minutes per day specified in the contract",
+          "unit": null,
+          "clause_excerpt": null,
+          "page_ref": null,
+          "confidence": 0.0
+        },
+        {
+          "category": "evaluation",
+          "provision_key": "evaluation_cycle_years",
+          "value_numeric": 1,
+          "value_text": "Annual review of Teacher Evaluation Plan each June",
+          "unit": "years",
+          "clause_excerpt": "This committee will conduct an annual review of the Teacher Evaluation Plan each June.",
+          "page_ref": 9,
+          "confidence": 0.70
+        },
+        {
+          "category": "rif",
+          "provision_key": "rif_recall_years",
+          "value_numeric": 2,
+          "value_text": "Illinois School Code 105 ILCS 5/24-12 governs RIF and recall procedures; standard recall period is 2 years",
+          "unit": "years",
+          "clause_excerpt": "The Illinois School Code will be followed when a reduction-in-force (RIF) &/or recall is made, including but not limited to, 105 ILCS 5/24-12 and procedures outlined by the district's SB7 Joint Committee.",
+          "page_ref": 8,
+          "confidence": 0.75
+        },
+        {
+          "category": "grievance",
+          "provision_key": "grievance_steps",
+          "value_numeric": 3,
+          "value_text": "Three-step grievance procedure: Step I supervisor, Step II superintendent, Step III arbitration",
+          "unit": null,
+          "clause_excerpt": "The grievance shall be processed according to the following steps: 1. [supervisor] 2. [Superintendent] 3. [arbitration]",
+          "page_ref": 13,
+          "confidence": 0.95
+        },
+        {
+          "category": "grievance",
+          "provision_key": "arbitration_binding",
+          "value_numeric": null,
+          "value_text": "Final and binding arbitration available at Step III",
+          "unit": null,
+          "clause_excerpt": "If the Association is not satisfied with the disposition of the grievance at Step II, the Association may submit the grievance to final and binding arbitration.",
+          "page_ref": 13,
+          "confidence": 0.95
+        },
+        {
+          "category": "insurance",
+          "provision_key": "employee_premium_share_pct",
+          "value_numeric": 15,
+          "value_text": "Employee contributes 15% of single/low deductible health premium; Board contributes 85%",
+          "unit": "%",
+          "clause_excerpt": "In all years of the negotiated agreement, the Board will contribute 85% of the single/low deductible premium, with the employee contributing 15% of the premium.",
+          "page_ref": 16,
+          "confidence": 0.95
+        },
+        {
+          "category": "insurance",
+          "provision_key": "dental_coverage",
+          "value_numeric": null,
+          "value_text": "Dental coverage included in health insurance plan (referenced in insurance committee review)",
+          "unit": null,
+          "clause_excerpt": "An insurance committee consisting of three School Board members or designees, four (4) Association members...shall be given...all reports including but not limited to...review coverage, deductibles and premiums",
+          "page_ref": 16,
+          "confidence": 0.60
+        },
+        {
+          "category": "insurance",
+          "provision_key": "vision_coverage",
+          "value_numeric": null,
+          "value_text": "Vision coverage status not explicitly stated in contract",
+          "unit": null,
+          "clause_excerpt": null,
+          "page_ref": null,
+          "confidence": 0.0
+        },
+        {
+          "category": "retirement",
+          "provision_key": "retirement_system",
+          "value_numeric": null,
+          "value_text": "TRS (Teachers' Retirement System) for certificated teaching personnel",
+          "unit": null,
+          "clause_excerpt": "At retirement, a teacher may elect to use accumulated sick leave toward service credit per TRS guidelines.",
+          "page_ref": 10,
+          "confidence": 0.90
+        },
+        {
+          "category": "retirement",
+          "provision_key": "retirement_pickup_pct",
+          "value_numeric": null,
+          "value_text": "No employer pickup of TRS contribution explicitly stated; standard employee contribution applies",
+          "unit": null,
+          "clause_excerpt": null,
+          "page_ref": null,
+          "confidence": 0.50
+        },
+        {
+          "category": "compensation",
+          "provision_key": "off_schedule_bonus_yr1",
+          "value_numeric": null,
+          "value_text": "No off-schedule lump sum bonus specified for year 1",
+          "unit": null,
+          "clause_excerpt": null,
+          "page_ref": null,
+          "confidence": 0.0
+        }
+      ]
+    }
+  ]
+}
+```

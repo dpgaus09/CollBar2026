@@ -2,12 +2,19 @@
 """
 Nightly incremental scraper — Phase 5 cron job.
 
-Step 1 (OH): Fetches the SERB CBA catalog and:
+# ============================================================
+# OHIO DISABLED — product pivot to Illinois-only (2026-06-13)
+# Steps 1 (SERB catalog fetch / new-doc detection) and
+# Step 2 (OH extraction) are commented out below.
+# To re-enable Ohio: search for "# OHIO DISABLED" and uncomment.
+# ============================================================
+
+Step 1 (OH — DISABLED): Fetches the SERB CBA catalog and:
   1. Detects NEW documents (URL not in source_documents) → 'new_doc' alert
   2. Detects CHANGED documents (URL known but file hash changed) → 'changed_doc' alert
      Uses HTTP HEAD to check Last-Modified before doing a full download.
 
-Step 2 (OH): Runs LLM extraction on any unprocessed OH CBA PDFs (gated on count).
+Step 2 (OH — DISABLED): Runs LLM extraction on any unprocessed OH CBA PDFs (gated on count).
 
 Step 3 (IL): Runs LLM extraction on any unprocessed IL CBA PDFs (gated on count).
 
@@ -346,126 +353,130 @@ def main():
     log.info("=== CollBar nightly incremental scraper ===")
     log.info("Mode: %s", "DRY RUN" if args.dry_run else "LIVE")
 
-    session = requests.Session()
+    # ── OHIO DISABLED ──────────────────────────────────────────────────────
+    # The SERB catalog fetch, new-doc detection (Phase A), changed-doc
+    # detection (Phase B), and OH LLM extraction (Phase C) are all disabled.
+    # The product has pivoted to Illinois-only. To re-enable Ohio, uncomment
+    # the block below (search for "# OHIO DISABLED RE-ENABLE START").
+    # ──────────────────────────────────────────────────────────────────────
+    log.info("Ohio pipelines DISABLED — skipping SERB catalog fetch, Phase A, B, and C.")
 
-    log.info("Fetching SERB CBA catalog (fresh, bypassing cache)…")
-    try:
-        r = session.get(
-            CBA_CATALOG_URL,
-            headers=common.HEADERS,
-            timeout=90,
-            allow_redirects=True,
-        )
-        if r.status_code != 200:
-            log.error("Failed to fetch catalog: HTTP %s", r.status_code)
-            sys.exit(1)
-        time.sleep(common.POLITE_DELAY)
-    except Exception as e:
-        log.error("Request error fetching catalog: %s", e)
-        sys.exit(1)
-
-    records = parse_cba_records(r.text)
-    log.info("Found %d school-sector CBA records in catalog", len(records))
-
-    if not records:
-        log.warning("No records parsed — check ROW_RE pattern or SERB page structure")
-        sys.exit(0)
-
-    conn = common.get_db_conn()
-    known_docs = get_known_docs(conn)
-    known_urls = set(known_docs.keys())
-    log.info("Found %d known CBA URLs in database", len(known_urls))
-
-    dist_index = common.build_district_index(conn)
-
-    # ── Phase A: new documents ─────────────────────────────────────────────
-    new_docs = [rec for rec in records if rec["url"] not in known_urls]
-    log.info("New documents detected: %d", len(new_docs))
-
+    # Variables kept so the summary printout below compiles unchanged.
+    records = []
+    known_urls: set = set()
+    new_docs: list = []
     new_inserted = 0
     new_skipped_dupes = 0
-
-    if new_docs and not args.dry_run:
-        cur = conn.cursor()
-        for doc in new_docs:
-            employer = doc.get("employer", "")
-            district_id = None
-            if employer:
-                district_id, status, _ = common.match_employer(employer, dist_index)
-                if status != "auto":
-                    district_id = None
-
-            eff_start = doc.get("effective_start", "")
-            eff_end = doc.get("effective_end", "")
-            union = doc.get("union", "")
-            doc_name = (
-                f"{employer or 'Unknown'} — {union}"
-                f" ({eff_start}–{eff_end})"
-            ).strip(" —")
-
-            # Fetch the PDF and compute its hash so the URL is recorded in
-            # source_documents. This prevents re-alerting on future runs once
-            # a pending alert is acknowledged (URL would otherwise remain absent).
-            log.info("Fetching new doc for hash: %s", doc["url"])
-            file_hash = fetch_file_hash(session, doc["url"])
-            time.sleep(common.POLITE_DELAY)
-
-            if file_hash is not None:
-                cur.execute(
-                    """
-                    INSERT INTO source_documents
-                        (district_id, doc_type, source_url, file_hash, retrieved_at)
-                    VALUES (%s, 'cba_pdf', %s, %s, NOW())
-                    ON CONFLICT (source_url, file_hash) DO NOTHING
-                    """,
-                    (district_id, doc["url"], file_hash),
-                )
-                # Only alert once source_documents row is committed. If the alert
-                # is later acknowledged, the URL stays in source_documents so
-                # subsequent cron runs will not re-alert.
-                ok = insert_alert(cur, district_id, doc_name, doc["url"], "new_doc")
-                if ok:
-                    new_inserted += 1
-                    log.info("new_doc alert inserted: %s", doc_name)
-                else:
-                    new_skipped_dupes += 1
-            else:
-                log.warning(
-                    "Could not fetch %s — source_documents row and alert skipped",
-                    doc["url"],
-                )
-
-        conn.commit()
-        cur.close()
-        log.info("Inserted %d new alerts (%d skipped — already pending)",
-                 new_inserted, new_skipped_dupes)
-
-    elif new_docs and args.dry_run:
-        log.info("[DRY RUN] Would insert up to %d new_doc alerts:", len(new_docs))
-        for doc in new_docs[:10]:
-            log.info("  - %s: %s", doc.get("employer", "?"), doc["url"])
-        if len(new_docs) > 10:
-            log.info("  … and %d more", len(new_docs) - 10)
-        new_inserted = len(new_docs)
-
-    # ── Phase B: changed documents ─────────────────────────────────────────
-    changed_alerts = check_changed_docs(
-        session, conn, records, known_docs, dist_index, dry_run=args.dry_run
-    )
-
-    # ── Phase C: OH extraction ─────────────────────────────────────────────
-    oh_unprocessed = count_unprocessed_docs(conn, "OH")
-    log.info("Unprocessed OH CBA docs: %d", oh_unprocessed)
+    changed_alerts = 0
+    oh_unprocessed = 0
     oh_result = None
-    if oh_unprocessed > 0:
-        log.info(
-            "Running OH extraction (up to %d docs)…", args.max_docs_per_state
-        )
-        oh_result = run_extraction_for_state(
-            "OH", args.max_docs_per_state, args.dry_run
-        )
-    else:
-        log.info("No unprocessed OH CBA docs — skipping OH extraction.")
+
+    conn = common.get_db_conn()
+
+    # # OHIO DISABLED RE-ENABLE START — uncomment everything below up to
+    # # "OHIO DISABLED RE-ENABLE END" to restore Ohio pipelines.
+    #
+    # session = requests.Session()
+    #
+    # log.info("Fetching SERB CBA catalog (fresh, bypassing cache)…")
+    # try:
+    #     r = session.get(
+    #         CBA_CATALOG_URL,
+    #         headers=common.HEADERS,
+    #         timeout=90,
+    #         allow_redirects=True,
+    #     )
+    #     if r.status_code != 200:
+    #         log.error("Failed to fetch catalog: HTTP %s", r.status_code)
+    #         sys.exit(1)
+    #     time.sleep(common.POLITE_DELAY)
+    # except Exception as e:
+    #     log.error("Request error fetching catalog: %s", e)
+    #     sys.exit(1)
+    #
+    # records = parse_cba_records(r.text)
+    # log.info("Found %d school-sector CBA records in catalog", len(records))
+    #
+    # if not records:
+    #     log.warning("No records parsed — check ROW_RE pattern or SERB page structure")
+    #     sys.exit(0)
+    #
+    # known_docs = get_known_docs(conn)
+    # known_urls = set(known_docs.keys())
+    # log.info("Found %d known CBA URLs in database", len(known_urls))
+    #
+    # dist_index = common.build_district_index(conn)
+    #
+    # # ── Phase A: new documents ─────────────────────────────────────────
+    # new_docs = [rec for rec in records if rec["url"] not in known_urls]
+    # log.info("New documents detected: %d", len(new_docs))
+    #
+    # if new_docs and not args.dry_run:
+    #     cur = conn.cursor()
+    #     for doc in new_docs:
+    #         employer = doc.get("employer", "")
+    #         district_id = None
+    #         if employer:
+    #             district_id, status, _ = common.match_employer(employer, dist_index)
+    #             if status != "auto":
+    #                 district_id = None
+    #         eff_start = doc.get("effective_start", "")
+    #         eff_end = doc.get("effective_end", "")
+    #         union = doc.get("union", "")
+    #         doc_name = (
+    #             f"{employer or 'Unknown'} — {union}"
+    #             f" ({eff_start}–{eff_end})"
+    #         ).strip(" —")
+    #         log.info("Fetching new doc for hash: %s", doc["url"])
+    #         file_hash = fetch_file_hash(session, doc["url"])
+    #         time.sleep(common.POLITE_DELAY)
+    #         if file_hash is not None:
+    #             cur.execute(
+    #                 """
+    #                 INSERT INTO source_documents
+    #                     (district_id, doc_type, source_url, file_hash, retrieved_at)
+    #                 VALUES (%s, 'cba_pdf', %s, %s, NOW())
+    #                 ON CONFLICT (source_url, file_hash) DO NOTHING
+    #                 """,
+    #                 (district_id, doc["url"], file_hash),
+    #             )
+    #             ok = insert_alert(cur, district_id, doc_name, doc["url"], "new_doc")
+    #             if ok:
+    #                 new_inserted += 1
+    #                 log.info("new_doc alert inserted: %s", doc_name)
+    #             else:
+    #                 new_skipped_dupes += 1
+    #         else:
+    #             log.warning(
+    #                 "Could not fetch %s — source_documents row and alert skipped",
+    #                 doc["url"],
+    #             )
+    #     conn.commit()
+    #     cur.close()
+    #     log.info("Inserted %d new alerts (%d skipped — already pending)",
+    #              new_inserted, new_skipped_dupes)
+    # elif new_docs and args.dry_run:
+    #     log.info("[DRY RUN] Would insert up to %d new_doc alerts:", len(new_docs))
+    #     for doc in new_docs[:10]:
+    #         log.info("  - %s: %s", doc.get("employer", "?"), doc["url"])
+    #     if len(new_docs) > 10:
+    #         log.info("  … and %d more", len(new_docs) - 10)
+    #     new_inserted = len(new_docs)
+    #
+    # # ── Phase B: changed documents ─────────────────────────────────────
+    # changed_alerts = check_changed_docs(
+    #     session, conn, records, known_docs, dist_index, dry_run=args.dry_run
+    # )
+    #
+    # # ── Phase C: OH extraction ─────────────────────────────────────────
+    # oh_unprocessed = count_unprocessed_docs(conn, "OH")
+    # log.info("Unprocessed OH CBA docs: %d", oh_unprocessed)
+    # if oh_unprocessed > 0:
+    #     log.info("Running OH extraction (up to %d docs)…", args.max_docs_per_state)
+    #     oh_result = run_extraction_for_state("OH", args.max_docs_per_state, args.dry_run)
+    # else:
+    #     log.info("No unprocessed OH CBA docs — skipping OH extraction.")
+    # # OHIO DISABLED RE-ENABLE END
 
     # ── Phase D: IL extraction ─────────────────────────────────────────────
     il_unprocessed = count_unprocessed_docs(conn, "IL")

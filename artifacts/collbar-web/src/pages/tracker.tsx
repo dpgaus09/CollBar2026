@@ -45,7 +45,7 @@ function fmtTerm(v: string | null | undefined) {
 }
 
 export default function TrackerPage() {
-  const [activeState, setActiveState] = useState<"IL" | "OH">("IL");
+  const activeState = "IL" as const;
   const { data, isLoading } = useQuery<TrackerStats>({
     queryKey: ["/api/public/tracker-stats", activeState],
     queryFn: () =>
@@ -58,7 +58,7 @@ export default function TrackerPage() {
       <header className="border-b border-slate-800 px-6 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <span className="text-slate-100 font-bold text-sm tracking-tight">CollBar</span>
-          <span className="text-slate-600 text-xs">{activeState === "IL" ? "Illinois" : "Ohio"} K-12 Settlement Tracker</span>
+          <span className="text-slate-600 text-xs">Illinois K-12 Settlement Tracker</span>
         </div>
         <div className="flex items-center gap-4">
           <a href={`${import.meta.env.BASE_URL}signup`} className="text-xs text-blue-400 hover:text-blue-300">
@@ -72,20 +72,9 @@ export default function TrackerPage() {
 
       <main className="max-w-5xl mx-auto px-6 py-10 space-y-6">
         <div>
-          <div className="flex items-center gap-2 mb-3">
-            {(["IL", "OH"] as const).map((s) => (
-              <button
-                key={s}
-                onClick={() => setActiveState(s)}
-                className={`px-3 py-1 text-xs rounded font-semibold transition-colors ${activeState === s ? "bg-blue-700 text-white" : "bg-slate-800 text-slate-400 hover:text-slate-200"}`}
-              >
-                {s === "IL" ? "Illinois" : "Ohio"}
-              </button>
-            ))}
-          </div>
-          <h1 className="text-xl font-bold text-slate-100">{activeState === "IL" ? "Illinois" : "Ohio"} K-12 Settlement Tracker</h1>
+          <h1 className="text-xl font-bold text-slate-100">Illinois K-12 Settlement Tracker</h1>
           <p className="text-xs text-slate-500 mt-1">
-            Verified base-salary increase data from {activeState === "IL" ? "ISBE filings" : "SERB filings"} and public district contracts · Updated daily
+            Verified base-salary increase data from ISBE filings and public district contracts · Updated daily
           </p>
         </div>
 

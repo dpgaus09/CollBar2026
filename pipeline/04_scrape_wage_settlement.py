@@ -2,6 +2,12 @@
 """
 SERB Wage Settlement Report downloader.
 
+# ============================================================
+# OHIO DISABLED — this script is NOT called by any automated
+# pipeline. The product has pivoted to Illinois-only (2026-06-13).
+# Preserved for future reactivation. Do not run via cron.
+# ============================================================
+
 Tries multiple URL patterns for each year 2020–2025 and, when successful,
 parses the PDF summary tables into the benchmarks staging table using pdfplumber.
 

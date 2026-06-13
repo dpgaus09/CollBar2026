@@ -20,6 +20,10 @@ author = "agent"
 task = "workflow.run"
 args = "pipeline: IL CBA Crawl"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "pipeline: IL Extraction"
+
 [[workflows.workflow]]
 name = "pipeline: IL CBA Crawl"
 author = "agent"
@@ -30,6 +34,17 @@ args = "bash -c 'cd /home/runner/workspace/pipeline && python3 -u 11_crawl_il_cb
 
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow]]
+name = "pipeline: IL Extraction"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash -c 'cd /home/runner/workspace/pipeline && python3 -u 06_extract_contracts.py --state IL; echo \"[EXTRACTION DONE]\"; sleep infinity'"
 
 [agent]
 stack = "PNPM_WORKSPACE"

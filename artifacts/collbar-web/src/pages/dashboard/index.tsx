@@ -104,10 +104,11 @@ function AdminDistrictPicker({
   setSearch: (s: string) => void;
 }) {
   const [, setLocation] = useLocation();
-  const [stateFilter, setStateFilter] = useState<"" | "OH" | "IL">("");
+  const [stateFilter, setStateFilter] = useState<"" | "IL">("");
   const { data, isLoading, isError } = useDistricts();
 
   const filtered = (data?.districts ?? []).filter((d) => {
+    if (d.state !== "IL" && !stateFilter) return false;
     if (stateFilter && d.state !== stateFilter) return false;
     if (!search) return true;
     return (
@@ -126,7 +127,7 @@ function AdminDistrictPicker({
       </div>
 
       <div className="flex gap-1">
-        {(["", "OH", "IL"] as const).map((s) => (
+        {(["", "IL"] as const).map((s) => (
           <button
             key={s || "all"}
             onClick={() => setStateFilter(s)}

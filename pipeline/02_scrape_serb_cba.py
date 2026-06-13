@@ -2,6 +2,12 @@
 """
 SERB Collective Bargaining Agreement scraper.
 
+# ============================================================
+# OHIO DISABLED — this script is NOT called by any automated
+# pipeline. The product has pivoted to Illinois-only (2026-06-13).
+# Preserved for future reactivation. Do not run via cron.
+# ============================================================
+
 Fetches the SERB CBA catalog page (which embeds all document records as JSON),
 filters for school-sector (T/NT bargaining units), downloads PDFs,
 uploads to object storage, and fuzzy-matches employers to districts.

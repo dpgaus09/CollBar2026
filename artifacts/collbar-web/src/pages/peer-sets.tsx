@@ -59,7 +59,7 @@ function BuilderModal({
   onClose: () => void;
 }) {
   const [name, setName] = useState(initial?.name ?? "");
-  const [state, setState] = useState<"OH" | "IL">((initial?.filters_json?.state as "OH" | "IL") ?? "OH");
+  const [state, setState] = useState<"IL">((initial?.filters_json?.state as "IL") ?? "IL");
   const [county, setCounty] = useState(initial?.filters_json?.county ?? "");
   const [band, setBand] = useState(initial?.filters_json?.band ?? "");
   const [districtType, setDistrictType] = useState(
@@ -197,16 +197,12 @@ function BuilderModal({
           <div>
             <label className="block text-xs text-slate-400 mb-1.5 font-medium">State</label>
             <div className="flex gap-2">
-              {(["OH", "IL"] as const).map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => { setState(s); setCounty(""); setDistrictType(""); }}
-                  className={`px-4 py-1.5 text-xs rounded font-medium transition-colors ${state === s ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-400 hover:text-slate-200"}`}
-                >
-                  {s === "OH" ? "Ohio" : "Illinois"}
-                </button>
-              ))}
+              <button
+                type="button"
+                className="px-4 py-1.5 text-xs rounded font-medium bg-blue-600 text-white"
+              >
+                Illinois
+              </button>
             </div>
           </div>
 

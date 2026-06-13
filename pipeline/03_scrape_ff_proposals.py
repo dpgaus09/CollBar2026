@@ -2,6 +2,12 @@
 """
 SERB Fact-Finding Report scraper.
 
+# ============================================================
+# OHIO DISABLED — this script is NOT called by any automated
+# pipeline. The product has pivoted to Illinois-only (2026-06-13).
+# Preserved for future reactivation. Do not run via cron.
+# ============================================================
+
 Fetches the SERB FF Reports catalog page which embeds all document records as
 HTML-entity-encoded JSON in a hidden div (#js-placeholder-json-data), identical
 in structure to the CBA catalog page. Filters for school-sector BU codes (T, NT),
