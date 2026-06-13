@@ -49,3 +49,4 @@ Thumbs.db
 .local/
 pipeline/state/il_cba_crawl.json
 pipeline/state/failed_json/
+pipeline/state/failed_json/
