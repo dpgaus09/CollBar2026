@@ -1,0 +1,508 @@
+```json
+{
+  "contracts": [
+    {
+      "union_name": "Akron Association of Classified Personnel",
+      "affiliation": "OEA/NEA",
+      "unit_scope": "Office Support Personnel including Data Processing, Fiscal, Secretarial, and Duplicating and Publications positions",
+      "effective_start": "2022-07-01",
+      "effective_end": "2025-06-30",
+      "term_years": 3,
+      "has_reopener": null,
+      "reopener_terms": null,
+      "provisions": [
+        {
+          "category": "workday",
+          "provision_key": "standard_work_day_hours",
+          "value_numeric": 8,
+          "value_text": "Standard work day consists of eight (8) hours of actual working time, which includes relief time, but does not include lunch break",
+          "unit": "hours",
+          "clause_excerpt": "The standard work day consists of eight (8) hours of actual working time, which includes relief time, but does not include lunch break. The standard work week consists of forty (40) hours.",
+          "page_ref": 13,
+          "confidence": 0.95
+        },
+        {
+          "category": "workday",
+          "provision_key": "standard_work_week_hours",
+          "value_numeric": 40,
+          "value_text": "Standard work week consists of forty (40) hours",
+          "unit": "hours",
+          "clause_excerpt": "The standard work day consists of eight (8) hours of actual working time, which includes relief time, but does not include lunch break. The standard work week consists of forty (40) hours.",
+          "page_ref": 13,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "bereavement_days",
+          "value_numeric": null,
+          "value_text": "Bereavement leave available but specific number of days not specified in extracted text",
+          "unit": "days",
+          "clause_excerpt": null,
+          "page_ref": null,
+          "confidence": 0.0
+        },
+        {
+          "category": "leave",
+          "provision_key": "sick_leave_max_days",
+          "value_numeric": null,
+          "value_text": "Sick leave accumulation limit not specified in extracted text",
+          "unit": "days",
+          "clause_excerpt": null,
+          "page_ref": null,
+          "confidence": 0.0
+        },
+        {
+          "category": "insurance",
+          "provision_key": "dental_coverage",
+          "value_numeric": null,
+          "value_text": "Dental coverage referenced in Appendix A but specific details not in extracted text",
+          "unit": null,
+          "clause_excerpt": "Appendix A Summary of Insurance Specifications",
+          "page_ref": 84,
+          "confidence": 0.3
+        },
+        {
+          "category": "insurance",
+          "provision_key": "vision_coverage",
+          "value_numeric": null,
+          "value_text": "Vision coverage referenced in Appendix A but specific details not in extracted text",
+          "unit": null,
+          "clause_excerpt": "Appendix A Summary of Insurance Specifications",
+          "page_ref": 84,
+          "confidence": 0.3
+        },
+        {
+          "category": "grievance",
+          "provision_key": "grievance_steps",
+          "value_numeric": null,
+          "value_text": "Grievance procedure outlined in Article XII but specific number of steps not clearly enumerated in extracted text",
+          "unit": null,
+          "clause_excerpt": "ARTICLE XII Grievance Procedures",
+          "page_ref": 77,
+          "confidence": 0.4
+        },
+        {
+          "category": "grievance",
+          "provision_key": "arbitration_binding",
+          "value_numeric": null,
+          "value_text": "Arbitration procedure referenced in Article XII but binding status not clearly stated in extracted text",
+          "unit": null,
+          "clause_excerpt": "12.02 Arbitration Procedure",
+          "page_ref": 80,
+          "confidence": 0.4
+        },
+        {
+          "category": "other",
+          "provision_key": "relief_periods",
+          "value_numeric": 15,
+          "value_text": "Employees permitted to take relief periods not to exceed fifteen (15) minutes in the morning and fifteen (15) minutes in the afternoon",
+          "unit": "minutes",
+          "clause_excerpt": "Employees are permitted to take relief periods not to exceed fifteen (15) minutes in the morning and fifteen (15) minutes in the afternoon.",
+          "page_ref": 14,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "overtime_rate",
+          "value_numeric": 1.5,
+          "value_text": "Overtime paid at rate of time and one-half for all hours worked over eight (8) on any day, or over forty (40) in any week",
+          "unit": null,
+          "clause_excerpt": "The employer shall pay for authorized overtime at the rate of time and one-half for all hours worked over eight (8) on any day, or over forty (40) in any week.",
+          "page_ref": 19,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "overtime_compensatory_time_rate",
+          "value_numeric": 1.5,
+          "value_text": "Employee may elect compensatory time off at the rate of one and one-half hours off for each overtime hour worked",
+          "unit": null,
+          "clause_excerpt": "In lieu of receiving overtime compensation during that pay period, the employee may elect compensatory time off at the rate of one and one-half hours off for each overtime hour worked.",
+          "page_ref": 19,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "weekend_work_minimum_hours",
+          "value_numeric": 4,
+          "value_text": "Employees called in to work on non-scheduled work days guaranteed minimum of four (4) hours work",
+          "unit": "hours",
+          "clause_excerpt": "Employees not regularly scheduled to work on Saturday, Sunday, or any other non-scheduled work day who are called in to work shall be guaranteed a minimum of four (4) hours work",
+          "page_ref": 20,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "theft_vandalism_fund",
+          "value_numeric": 2000,
+          "value_text": "Board establishes Theft and Vandalism Fund in the amount of $2,000 maintained annually",
+          "unit": "$",
+          "clause_excerpt": "The Board agrees to establish a Theft and Vandalism Fund in the amount of $2,000. This fund shall be maintained annually at the beginning of each school year at the above-stated amount.",
+          "page_ref": 22,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "assault_leave_days",
+          "value_numeric": 5,
+          "value_text": "Employee granted up to five (5) paid days of absence due to disability resulting from assault",
+          "unit": "days",
+          "clause_excerpt": "An employee shall be granted up to five (5) paid days of absence due to a disability resulting from an assault by any person when performing his/her duties.",
+          "page_ref": 19,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "probationary_period",
+          "value_numeric": 90,
+          "value_text": "Probationary period of ninety (90) days to allow employer to determine fitness and adaptability of new employee",
+          "unit": "days",
+          "clause_excerpt": "There shall be a probationary period of ninety (90) days to allow the employer to determine the fitness and adaptability of any new employee to do the work required.",
+          "page_ref": 32,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "substitute_max_days_per_year",
+          "value_numeric": 90,
+          "value_text": "Classified secretarial substitutes may work in an assignment for a maximum of ninety (90) working days per year",
+          "unit": "days",
+          "clause_excerpt": "Classified secretarial substitutes may work in an assignment for a maximum of ninety (90) working days per year beginning with the date of assignment.",
+          "page_ref": 32,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "vacation_entitlement_less_than_one_year",
+          "value_numeric": 10,
+          "value_text": "New hire appointed prior to June 30 authorized ten days vacation entitlement during calendar year of appointment",
+          "unit": "days",
+          "clause_excerpt": "A new hire and an employee moving from short to long schedule appointed to an office support personnel position, Time Schedule 522, prior to June 30 and who was not on Time Schedule 522 prior to the appointment, shall be authorized ten days of vacation entitlement",
+          "page_ref": 23,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "vacation_entitlement_one_to_five_years",
+          "value_numeric": 10,
+          "value_text": "Employee with one to less than five years of service entitled to ten days vacation",
+          "unit": "days",
+          "clause_excerpt": "Upon completion of one year - 10 days but less than five years",
+          "page_ref": 27,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "vacation_entitlement_five_to_fourteen_years",
+          "value_numeric": 15,
+          "value_text": "Employee with five to less than fourteen years of service entitled to fifteen days vacation",
+          "unit": "days",
+          "clause_excerpt": "Upon completion of five years - 15 days but less than fourteen years",
+          "page_ref": 27,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "vacation_entitlement_fourteen_to_fifteen_years",
+          "value_numeric": 20,
+          "value_text": "Employee with fourteen years of service entitled to twenty days vacation",
+          "unit": "days",
+          "clause_excerpt": "Upon completion of fourteen years - 20 days",
+          "page_ref": 27,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "vacation_entitlement_fifteen_to_sixteen_years",
+          "value_numeric": 21,
+          "value_text": "Employee with fifteen years of service entitled to twenty-one days vacation",
+          "unit": "days",
+          "clause_excerpt": "Upon completion of fifteen years - 21 days",
+          "page_ref": 27,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "vacation_entitlement_sixteen_to_seventeen_years",
+          "value_numeric": 22,
+          "value_text": "Employee with sixteen years of service entitled to twenty-two days vacation",
+          "unit": "days",
+          "clause_excerpt": "Upon completion of sixteen years - 22 days",
+          "page_ref": 27,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "vacation_entitlement_seventeen_to_eighteen_years",
+          "value_numeric": 23,
+          "value_text": "Employee with seventeen years of service entitled to twenty-three days vacation",
+          "unit": "days",
+          "clause_excerpt": "Upon completion of seventeen years - 23 days",
+          "page_ref": 27,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "vacation_entitlement_eighteen_to_nineteen_years",
+          "value_numeric": 24,
+          "value_text": "Employee with eighteen years of service entitled to twenty-four days vacation",
+          "unit": "days",
+          "clause_excerpt": "Upon completion of eighteen years - 24 days",
+          "page_ref": 27,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "vacation_entitlement_nineteen_plus_years",
+          "value_numeric": 25,
+          "value_text": "Employee with nineteen years or more of service entitled to twenty-five days vacation",
+          "unit": "days",
+          "clause_excerpt": "Upon completion of nineteen years and over - 25 days",
+          "page_ref": 27,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "paid_holidays_short_schedule",
+          "value_numeric": 9,
+          "value_text": "Employees working short schedule receive pay for nine (9) holidays",
+          "unit": null,
+          "clause_excerpt": "Employees working a short schedule will receive pay for nine (9) or (10) holidays as specified below holidays and employees on a 522 schedule will receive pay for thirteen (13) holidays",
+          "page_ref": 29,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "paid_holidays_long_schedule_522",
+          "value_numeric": 13,
+          "value_text": "Employees on 522 week schedule receive pay for thirteen (13) holidays",
+          "unit": null,
+          "clause_excerpt": "Employees working a short schedule will receive pay for nine (9) or (10) holidays as specified below holidays and employees on a 522 schedule will receive pay for thirteen (13) holidays",
+          "page_ref": 29,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "job_posting_duration_school_year",
+          "value_numeric": 7,
+          "value_text": "Job postings made for seven (7) work days during school year",
+          "unit": "days",
+          "clause_excerpt": "During the school year, job postings shall be made for seven (7) work days. During the summer vacation period, job postings shall be made for ten (10) work days.",
+          "page_ref": 33,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "job_posting_duration_summer",
+          "value_numeric": 10,
+          "value_text": "Job postings made for ten (10) work days during summer vacation period (June 15 to August 15)",
+          "unit": "days",
+          "clause_excerpt": "During the summer vacation period, job postings shall be made for ten (10) work days. Summer shall be defined as June 15 to August 15.",
+          "page_ref": 33,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "transfers_allowed_per_year",
+          "value_numeric": 2,
+          "value_text": "Employee may make two (2) transfers within one (1) year of any job change",
+          "unit": null,
+          "clause_excerpt": "An employee may make two (2) transfers within one (1) year of any job change.",
+          "page_ref": 34,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "senior_applicants_lateral_move",
+          "value_numeric": 5,
+          "value_text": "When vacancy filled by lateral move, one of the five (5) most senior applicants shall be awarded the position",
+          "unit": null,
+          "clause_excerpt": "When a vacancy is to be filled by a lateral move, one of the five (5) most senior applicants shall be awarded the position.",
+          "page_ref": 33,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "annual_evaluation_period",
+          "value_numeric": null,
+          "value_text": "Annual evaluation completed in May covering evaluation period May 1 through April 30",
+          "unit": null,
+          "clause_excerpt": "There shall be an annual evaluation completed in May on each employee's work performance. The period of evaluation shall be May 1 through April 30.",
+          "page_ref": 9,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "probationary_evaluations",
+          "value_numeric": 2,
+          "value_text": "Probationary employees evaluated two (2) times during probationary period",
+          "unit": null,
+          "clause_excerpt": "Probationary employees shall be evaluated two (2) times during the probationary period.",
+          "page_ref": 9,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "evaluation_completion_timeline",
+          "value_numeric": 30,
+          "value_text": "Evaluation process must be completed, conference held, and copy provided to employee within thirty (30) days",
+          "unit": "days",
+          "clause_excerpt": "The evaluation process must be completed, a conference held with the employee to discuss the rating and a copy of the evaluation form provided to the employee within thirty (30) days.",
+          "page_ref": 9,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "personnel_file_review_timeline",
+          "value_numeric": 1,
+          "value_text": "Employee able to review personnel file as soon as feasible but no longer than one (1) work day",
+          "unit": "days",
+          "clause_excerpt": "The employee shall be able to review his/her file as soon as feasible but no longer than one (1) work day.",
+          "page_ref": 10,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "derogatory_material_review_period",
+          "value_numeric": 3,
+          "value_text": "Need to maintain disciplinary and derogatory material in personnel file can be reviewed after three (3) years",
+          "unit": "years",
+          "clause_excerpt": "Upon request, the need to maintain disciplinary and/or derogatory material in the employee's personnel file can be reviewed after three (3) years.",
+          "page_ref": 10,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "secretary_iii_high_school_minimum",
+          "value_numeric": 3,
+          "value_text": "Minimum of 3 Secretary III positions (2 at 522 schedule and 1 at 422 schedule) at any high school",
+          "unit": null,
+          "clause_excerpt": "3 Secretary III's (2 @ 522 and 1 @ 422) at any high school",
+          "page_ref": 14,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "secretary_iii_middle_school_minimum",
+          "value_numeric": 2,
+          "value_text": "Minimum of 2 Secretary III positions at 440 schedule at any middle school",
+          "unit": null,
+          "clause_excerpt": "2 Secretary III's @ 440 at any middle school",
+          "page_ref": 14,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "secretary_iii_elementary_school_minimum",
+          "value_numeric": 1,
+          "value_text": "Minimum of 1 Secretary III at 431 schedule at any elementary school",
+          "unit": null,
+          "clause_excerpt": "1 Secretary III @ 431 at any elementary school",
+          "page_ref": 14,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "grade_level_salary_adjustment_timing",
+          "value_numeric": null,
+          "value_text": "Salary adjustments made effective first full pay period in November based on EMIS October head count",
+          "unit": null,
+          "clause_excerpt": "Any salary adjustments shall be effective at the beginning of the first full pay period in November.",
+          "page_ref": 15,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "overtime_school_secretaries_annual",
+          "value_numeric": 40,
+          "value_text": "Overtime pay offered annually to secretaries working in school offices in amount of forty (40) hours per secretary",
+          "unit": "hours",
+          "clause_excerpt": "Overtime pay or compensatory time will be offered annually to secretaries working in school offices in the amount of forty (40) hours per secretary.",
+          "page_ref": 20,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "overtime_substitute_threshold",
+          "value_numeric": 3,
+          "value_text": "If substitute not provided for absence more than three (3) days, remaining employees offered overtime",
+          "unit": "days",
+          "clause_excerpt": "If the Human Resources Department is unable to provide a substitute (not an Educational Assistant) for any employee who is absent for more than three (3) days",
+          "page_ref": 20,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "vacation_carryover_new_hire_before_august31",
+          "value_numeric": 3,
+          "value_text": "Newly-hired employee appointed before August 31 who completed probationary period may carry over up to three (3) vacation days into first full calendar year",
+          "unit": "days",
+          "clause_excerpt": "A newly-hired employee appointed before August 31 who completed his/her probationary period and is not separated from employment, may carry over up to three (3) vacation days into the first full calendar year of employment.",
+          "page_ref": 24,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "vacation_carryover_new_hire_after_august31",
+          "value_numeric": 5,
+          "value_text": "Newly-hired employee appointed after August 31 may carry over up to five (5) vacation days into first full calendar year",
+          "unit": "days",
+          "clause_excerpt": "To prevent a hardship to an employee and disruption to District operations, an employee newly-hired or appointed from a short schedule to a long schedule after August 31, may carry over up to five (5) vacation days into the first full calendar year of employment.",
+          "page_ref": 25,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "consecutive_vacation_days_max",
+          "value_numeric": 10,
+          "value_text": "Employees entitled to three or more weeks of vacation may take no more than ten (10) consecutive vacation days at one time, unless more authorized",
+          "unit": "days",
+          "clause_excerpt": "Employees entitled to three or more weeks of vacation may take no more than ten (10) consecutive vacation days at one time, unless more days are authorized in advance by the immediate supervisor.",
+          "page_ref": 27,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "vacation_schedule_submission_deadline",
+          "value_numeric": null,
+          "value_text": "Employee must submit tentative vacation schedule request no later than March 1 of each year",
+          "unit": null,
+          "clause_excerpt": "No later than March 1, of each year, the employee entitled to a vacation must submit a tentative vacation schedule request to the immediate supervisor for approval.",
+          "page_ref": 28,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "schedule_change_long_term_threshold",
+          "value_numeric": 10,
+          "value_text": "Schedule changes of ten (10) work days or less implemented by supervisor without Executive Director written approval",
+          "unit": "days",
+          "clause_excerpt": "The supervisor may implement short-term schedule changes of ten (10) work days or less without written approval of the Executive Director, Human Resources.",
+          "page_ref": 14,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "schedule_change_maximum_variance",
+          "value_numeric": 30,
+          "value_text": "Daily work schedule may not be changed by more than 30 minutes without express consent of employee",
+          "unit": "minutes",
+          "clause_excerpt": "The daily work schedule may not be changed by more than 30 minutes without the express consent of the employee.",
+          "page_ref": 14,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "overfill_underfill_bumping_days",
+          "value_numeric": 90,
+          "value_text": "Employee displaced by bumping assigned as floater for maximum of ninety (90) days before potential layoff",
+          "unit": "days",
+          "clause_excerpt": "If no vacancies exist, the member will be assigned as a floater for a maximum of ninety (90) days.",
+          "page_ref": 13,
+          "confidence": 0.95
+        }
+      ]
+    }
+  ]
+}
+```

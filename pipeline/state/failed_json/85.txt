@@ -1,0 +1,7 @@
+```json
+{
+  "contracts": []
+}
+```
+
+The provided text is a school board policy manual for Belleville THSD 201, not a collective bargaining agreement (CBA). It contains board governance policies, general personnel policies, and administrative procedures but does not include negotiated labor agreement terms such as salary schedules, health insurance provisions, retirement contributions, leave accrual rates, or other compensation and benefits items that would appear in a CBA with a union or employee association. Therefore, no contract data can be extracted according to the schema requirements.

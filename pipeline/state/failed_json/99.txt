@@ -1,0 +1,7 @@
+```json
+{
+  "contracts": []
+}
+```
+
+The provided text is not a collective bargaining agreement. It is an educational presentation or training material about Adverse Childhood Experiences (ACEs) and their impact on elementary school students, including classroom behavior, health outcomes, and trauma-informed teaching strategies. It contains no contractual language, no salary schedules, no union names, no benefits provisions, no grievance procedures, or any other elements of a CBA. Therefore, no contract data can be extracted.

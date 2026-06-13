@@ -1,0 +1,408 @@
+```json
+{
+  "contracts": [
+    {
+      "union_name": "Darien Education Association",
+      "affiliation": "IEA/NEA",
+      "unit_scope": "certificated teaching staff",
+      "effective_start": "2023-06-20",
+      "effective_end": "2027-06-30",
+      "term_years": 4,
+      "has_reopener": null,
+      "reopener_terms": null,
+      "provisions": [
+        {
+          "category": "compensation",
+          "provision_key": "ba_min_salary",
+          "value_numeric": 47838,
+          "value_text": "BA Lane, Step 1, 2023-2024 school year",
+          "unit": "$",
+          "clause_excerpt": "Lane BA BA+15 MA MA+15 MA+30 Step 1 $47,838 $48,819 $52,622 $53,858 $55,124",
+          "page_ref": 41,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "base_salary_increase_yr1",
+          "value_numeric": 4,
+          "value_text": "4% increase on Year 1 BA salary (base)",
+          "unit": "%",
+          "clause_excerpt": "Step 4%increaseontheYear1BAsalary(base)",
+          "page_ref": 41,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "base_salary_increase_yr2",
+          "value_numeric": 4,
+          "value_text": "4% increase from 2023-2024 base to 2024-2025",
+          "unit": "%",
+          "clause_excerpt": "Comparing BA Step 1: $47,838 (2023-24) to $49,751 (2024-25) = 4% increase",
+          "page_ref": 41,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "base_salary_increase_yr3",
+          "value_numeric": 4,
+          "value_text": "4% increase from 2024-2025 base to 2025-2026",
+          "unit": "%",
+          "clause_excerpt": "Comparing BA Step 1: $49,751 (2024-25) to $51,741 (2025-26) = 4% increase",
+          "page_ref": 42,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "salary_steps_count",
+          "value_numeric": 31,
+          "value_text": "Salary schedule contains 31 steps",
+          "unit": null,
+          "clause_excerpt": "Step 31 $109,155 (2023-24), $113,521 (2024-25), $118,062 (2025-26), $122,785 (2026-27)",
+          "page_ref": 41,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "salary_lanes_count",
+          "value_numeric": 5,
+          "value_text": "Five education lanes: BA, BA+15, MA, MA+15, MA+30",
+          "unit": null,
+          "clause_excerpt": "Lane BA BA+15 MA MA+15 MA+30",
+          "page_ref": 41,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "step_increase",
+          "value_numeric": null,
+          "value_text": "Teachers move one step vertically per year; frozen teachers remain at frozen step until lane change",
+          "unit": null,
+          "clause_excerpt": "Teachersemployedfulltimepriortothestartofthiscontractshallautomaticallymoveonestepverticallyonthenew2023-2024salaryschedulewiththeeceptionofteacherswhoarefrozenatthelaststepoftheirlane.Teacherswillbeallowedonlyoneverticalmoveperyearofthiscontract.",
+          "page_ref": 31,
+          "confidence": 0.90
+        },
+        {
+          "category": "compensation",
+          "provision_key": "lane_advancement_allowed",
+          "value_numeric": null,
+          "value_text": "true",
+          "unit": null,
+          "clause_excerpt": "TeachersshallmovehorizontallyonthesalaryscheduleuponpresentationofofficialtranscriptsforcourseworktotheSuperintendent. Courseworkisearnedsubsequenttothehighestdegreeearned,withagradeofBorbetter.",
+          "page_ref": 32,
+          "confidence": 0.90
+        },
+        {
+          "category": "compensation",
+          "provision_key": "master_teacher_certification_incentive",
+          "value_numeric": 1000,
+          "value_text": "Master Teacher Certification Incentive of $1000 annually",
+          "unit": "$",
+          "clause_excerpt": "IfamemberofthebargainingunitattainsthecertificationofMasterTeacherasoutlinedintheIllinoisSchoolCode,theDistrictwillcompensatetheindividualmemberofthebargainingunitinthea mountof$1000annuallyfortheperiodoftimethattheindividualholdsthecertification.",
+          "page_ref": 33,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "doctorate_incentive",
+          "value_numeric": 1000,
+          "value_text": "Doctorate Incentive of $1000 annually",
+          "unit": "$",
+          "clause_excerpt": "Ifamemberofthebargainingunitearnsadoctoratededegree,thedistrictwillcompensatetheindividualmemberofthebargainingunitinthea mountof$1000annuallyinadditiontotheirsalaryonthesalaryschedule.",
+          "page_ref": 33,
+          "confidence": 0.95
+        },
+        {
+          "category": "insurance",
+          "provision_key": "health_single_premium",
+          "value_numeric": null,
+          "value_text": "Board pays 90% of single coverage premium; specific premium amount not stated in contract",
+          "unit": null,
+          "clause_excerpt": "TheBoardwillpay90%ofthesinglehealthpremiumcoverageforeachemployeewhoelectssinglecoverage.",
+          "page_ref": 14,
+          "confidence": 0.70
+        },
+        {
+          "category": "insurance",
+          "provision_key": "health_family_premium",
+          "value_numeric": null,
+          "value_text": "Board pays 70% of family coverage premium; specific premium amount not stated in contract",
+          "unit": null,
+          "clause_excerpt": "TheBoardwillcontribute70%percentofthefamilyhealthpremiumcosttowrardthecostforfamilycoverageforeachemployeewhoelectsfamilycoverage.",
+          "page_ref": 14,
+          "confidence": 0.70
+        },
+        {
+          "category": "insurance",
+          "provision_key": "employee_premium_share_pct",
+          "value_numeric": null,
+          "value_text": "Employee pays 10% for single coverage, 30% for family coverage (inverse of Board contribution)",
+          "unit": "%",
+          "clause_excerpt": "TheBoardwillpay90%ofthesinglehealthpremiumcoverage...TheBoardwillcontribute70%percentofthefamilyhealthpremiumcost",
+          "page_ref": 14,
+          "confidence": 0.85
+        },
+        {
+          "category": "insurance",
+          "provision_key": "dental_coverage",
+          "value_numeric": null,
+          "value_text": "true",
+          "unit": null,
+          "clause_excerpt": "TheBoardwillpay50%ofthesingledentalinsurancepremiumforthoseemployeesthatchoosetodentalcoverage.",
+          "page_ref": 15,
+          "confidence": 0.95
+        },
+        {
+          "category": "insurance",
+          "provision_key": "vision_coverage",
+          "value_numeric": null,
+          "value_text": "Not explicitly stated in contract",
+          "unit": null,
+          "clause_excerpt": null,
+          "page_ref": null,
+          "confidence": 0.30
+        },
+        {
+          "category": "insurance",
+          "provision_key": "hsa_employer_contribution",
+          "value_numeric": 3500,
+          "value_text": "Board contributes $3500 per contract year to TSA/annuity for employees declining medical insurance",
+          "unit": "$",
+          "clause_excerpt": "AnemployeechoosingnottoparticipateinthemedicalinsuranceprogrammayhaveanamountappliedeachcontractyeartoaTaxShelteredAnnuity.Theamounttobecont ributedbytheBoard toanannuityis$3500forthedurationofthecontract.",
+          "page_ref": 14,
+          "confidence": 0.95
+        },
+        {
+          "category": "retirement",
+          "provision_key": "retirement_system",
+          "value_numeric": null,
+          "value_text": "TRS",
+          "unit": null,
+          "clause_excerpt": "Thetermofthisagreement...IllinoisEducationAssociation...Teachers'RetirementSystemreferences",
+          "page_ref": null,
+          "confidence": 0.85
+        },
+        {
+          "category": "retirement",
+          "provision_key": "retirement_pickup_pct",
+          "value_numeric": null,
+          "value_text": "Not stated in contract; no explicit employer TRS pickup mentioned",
+          "unit": "%",
+          "clause_excerpt": null,
+          "page_ref": null,
+          "confidence": 0.20
+        },
+        {
+          "category": "leave",
+          "provision_key": "sick_days_annual",
+          "value_numeric": null,
+          "value_text": "Tiered by years of service: 0-4 years = 15 days; 5-8 years = 16 days; 9-12 years = 18 days; 13+ years = 20 days",
+          "unit": "days",
+          "clause_excerpt": "YearsofserviceinthedistrictCertifiedStaff(Teachers) Years0-415days 5-816days 9-1218days 13andabove20days",
+          "page_ref": 16,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "personal_days_annual",
+          "value_numeric": 3,
+          "value_text": "Three personal days per year",
+          "unit": "days",
+          "clause_excerpt": "Personaldaysaredefinedashalforfulldays.Personaldaysareavailabletofulltimeemployeesforatotalofnotmorethanthree(3)daysperye ar",
+          "page_ref": 17,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "bereavement_days",
+          "value_numeric": 10,
+          "value_text": "Maximum 10 unpaid work days for bereavement per state law; employees may use sick or personal days instead",
+          "unit": "days",
+          "clause_excerpt": "Statelawallowsamaximumof10unpaidworkdaysforeligibleemployeesforbereavement.However,anemployeeofDarienDistrict61mayusesickorpersonaldaysforbereavementinlieuofunpaiddays.",
+          "page_ref": 22,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "sick_leave_max_days",
+          "value_numeric": null,
+          "value_text": "Unlimited accumulation; if unused sick days not used in annual allotment, they accumulate without limit",
+          "unit": "days",
+          "clause_excerpt": "Ifanyemployeedoesnotusethefullamountoannualsickdaysallowed,theunusedamountshallbeallowedtoaccumulateassickdayswithoutlimit.",
+          "page_ref": 16,
+          "confidence": 0.95
+        },
+        {
+          "category": "workday",
+          "provision_key": "contract_days_teacher",
+          "value_numeric": 176,
+          "value_text": "176 student attendance days minimum; total calendar of 185 days including 4 in-service/workshop days and 5 emergency days",
+          "unit": "days",
+          "clause_excerpt": "Thecalendaruponwhichthesalaryscheduleisbasedshallconsistof185days,whichshallincludenolessthan176studentattendancedays,4in-service/workshopdaysand5emergencydays.",
+          "page_ref": 8,
+          "confidence": 0.95
+        },
+        {
+          "category": "workday",
+          "provision_key": "instructional_minutes_day",
+          "value_numeric": null,
+          "value_text": "Not specified in contract",
+          "unit": "minutes",
+          "clause_excerpt": null,
+          "page_ref": null,
+          "confidence": 0.10
+        },
+        {
+          "category": "workday",
+          "provision_key": "workday_hours",
+          "value_numeric": 7.5,
+          "value_text": "Workday shall be no more than seven and one-half (7.5) hours per day",
+          "unit": "hours",
+          "clause_excerpt": "TheworkdayforemployeescoveredbythisAgreementshallbenomorethansevenandone-half(7½)hoursperday.",
+          "page_ref": 8,
+          "confidence": 0.95
+        },
+        {
+          "category": "workday",
+          "provision_key": "preparation_time_daily",
+          "value_numeric": 40,
+          "value_text": "Elementary teachers: minimum 40 consecutive minutes of personal preparation time daily",
+          "unit": "minutes",
+          "clause_excerpt": "Teacherswillhaveatleastforty(40)consecutiveminutesofpersonalpreparationtimeeachdayattheelementarylevel.",
+          "page_ref": 8,
+          "confidence": 0.95
+        },
+        {
+          "category": "workday",
+          "provision_key": "preparation_time_weekly",
+          "value_numeric": 225,
+          "value_text": "All teachers shall have no less than 225 minutes of personal preparation time per week",
+          "unit": "minutes",
+          "clause_excerpt": "Onatypicalschoolweek,allteachersshallhavenolessthantwohundredtwenty-five(225)minutesofpersonalpreparationtimeeachweek.",
+          "page_ref": 8,
+          "confidence": 0.95
+        },
+        {
+          "category": "workday",
+          "provision_key": "collaborative_planning_time_2023_2024",
+          "value_numeric": 90,
+          "value_text": "2023-2024: 90 continuous minutes of collaborative plan time during SIP days",
+          "unit": "minutes",
+          "clause_excerpt": "Duringthe2023-2024schoolyear,teachersshallbeprovidedninety(90)continuousminutesofcollaborativeplantimeduringSchoolImprovementDays(SIP)",
+          "page_ref": 8,
+          "confidence": 0.95
+        },
+        {
+          "category": "workday",
+          "provision_key": "collaborative_planning_time_2024_onward",
+          "value_numeric": 60,
+          "value_text": "2024-2025 onward: at least 60 minutes per week during contracted hours, at least 40 minutes continuous",
+          "unit": "minutes",
+          "clause_excerpt": "Beginningwiththe2024-2025schoolyear,teachersshallbeprovided withatleastsixty(60)minutesofcollaborativeplantimeperweekduringcontractedhours,atleastforty(40)minutesofwhichwillbecontinuous",
+          "page_ref": 8,
+          "confidence": 0.95
+        },
+        {
+          "category": "evaluation",
+          "provision_key": "evaluation_cycle_years",
+          "value_numeric": 3,
+          "value_text": "Tenured teachers are evaluated on a 3-year cycle",
+          "unit": "years",
+          "clause_excerpt": "Tenuredteachersshallbeformally observedonceduring their three(3)yearcycleaslongasaproficientevaluationismaintained.",
+          "page_ref": 11,
+          "confidence": 0.90
+        },
+        {
+          "category": "evaluation",
+          "provision_key": "non_tenured_observations",
+          "value_numeric": null,
+          "value_text": "Non-tenured teachers years 1-2: 3 formal observations per year; years 3-4: 2 formal observations per year (or 3 if requested)",
+          "unit": null,
+          "clause_excerpt": "Non-Tenuredteachersinyears1and2shallbeformally observedatleast three(3)timeeachschoolyear.Non-Tenuredteachersinyears3and4shallbeformally observedatleast two(2)timeseachschoolyearunlessathird formalobservationisrequestedbythe teacher.",
+          "page_ref": 11,
+          "confidence": 0.95
+        },
+        {
+          "category": "rif",
+          "provision_key": "rif_recall_years",
+          "value_numeric": 2,
+          "value_text": "Honorable dismissal recall rights implied through RIF procedures; tenure and seniority protections implied but explicit 2-year recall period not stated",
+          "unit": "years",
+          "clause_excerpt": "IntheeventthattheBoarddeterminesitnecessarytoreducethenumberofcertificatedemployeesintheschoolsystem...thesequenceofdismissalshallbeasprovidedbelow.",
+          "page_ref": 25,
+          "confidence": 0.50
+        },
+        {
+          "category": "rif",
+          "provision_key": "rif_notice_days",
+          "value_numeric": 45,
+          "value_text": "Board must provide written notice at least 45 days before end of school term",
+          "unit": "days",
+          "clause_excerpt": "writtennoticeistobemailedtotheteacherandalsogivenintoththeteachereitherbycertifiedmail,returnreceiptrequested,orpersonaldeliverywithreceiptatleast45daysbeforetheendoftheschoolterm",
+          "page_ref": 25,
+          "confidence": 0.95
+        },
+        {
+          "category": "grievance",
+          "provision_key": "grievance_steps",
+          "value_numeric": 4,
+          "value_text": "Four-step grievance procedure: Step I (supervisor), Step II (Superintendent), Step III (Board), Step IV (arbitration)",
+          "unit": null,
+          "clause_excerpt": "Step I...Step II...Step III...Step IV: arbitration through AAA or FMCS",
+          "page_ref": 5,
+          "confidence": 0.95
+        },
+        {
+          "category": "grievance",
+          "provision_key": "arbitration_binding",
+          "value_numeric": null,
+          "value_text": "true",
+          "unit": null,
+          "clause_excerpt": "Thearbitrator'sdecisionshallbebindinguponbothpartiesbutthearbitratorshallhavenopower torendera decisionthat addsto,subtractsfrom,ormodifiesthisAgreement.",
+          "page_ref": 6,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "years_of_service_retirement_incentive",
+          "value_numeric": null,
+          "value_text": "Post-retirement stipend based on years of service: 15-20 years = $400/year; 21-26 years = $500/year; 27-31 years = $600/year; capped at $18,600 (31 years × $600)",
+          "unit": "$",
+          "clause_excerpt": "YearsofSchoolDistrict61ServiceStipendPerYearsofService 15-20$400 21-26$500 27-31$600 *Capat31years:32+yearstheincentivemaxesat$18,600($600x31)",
+          "page_ref": 35,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "tuition_reimbursement_rate",
+          "value_numeric": 50,
+          "value_text": "50% reimbursement for graduate coursework up to 15 semester hours per 12-month period",
+          "unit": "%",
+          "clause_excerpt": "TheBoardwillreimbursethetuitioncostsforgraduatestudyuptofifteen(15)semesterhourspertwelve(12)monthperiodatarateoffifty percent(50%).",
+          "page_ref": 32,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "tuition_reimbursement_max_ba",
+          "value_numeric": 1500,
+          "value_text": "Maximum $1,500 per employee per 12-month period for BA and BA+15 lanes",
+          "unit": "$",
+          "clause_excerpt": "Thetotalamountofmoneyreimbursedmaynotexceed$1,500.00peremployeeduringatwelvemonthperiodforBachelorandBachelor15lanes.",
+          "page_ref": 32,
+          "confidence": 0.95
+        },
+        {
+          "category": "other",
+          "provision_key": "tuition_reimbursement_max_ma",
+          "value_numeric": 900,
+          "value_text": "Maximum $900 per employee per 12-month period for MA, MA+15, and MA+30 lanes",
+          "unit": "$",
+          "clause_excerpt": "Thetotalamountofmoneyreimbursedmaynotexceed$900.00peremployeeduringatwelvemonthperiodforMasters,Masters15,andMasters30.",
+          "page_ref": 32,
+          "confidence": 0.95
+        }
+      ]
+    }
+  ]
+}
+```

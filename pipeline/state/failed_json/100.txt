@@ -1,0 +1,278 @@
+```json
+{
+  "contracts": [
+    {
+      "union_name": "Dongola Education Association",
+      "affiliation": "IEA/NEA",
+      "unit_scope": "certificated teaching staff and full and part-time non-certified employees",
+      "effective_start": "2024-08-15",
+      "effective_end": "2028-08-14",
+      "term_years": 4,
+      "has_reopener": true,
+      "reopener_terms": "During the life of the current agreement, if either party chooses to enter into midterm or impact bargaining due to a change in the status of the high school via referendum, both parties shall meet to negotiate issue(s) related to the change. Negotiations shall proceed for ninety (90) days or until there is mutual agreement on the issues.",
+      "provisions": [
+        {
+          "category": "compensation",
+          "provision_key": "base_salary_increase_yr1",
+          "value_numeric": 3.5,
+          "value_text": "3.5% plus annual step increase",
+          "unit": "%",
+          "clause_excerpt": "2024-2025 3.5% + Step",
+          "page_ref": 25,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "base_salary_increase_yr2",
+          "value_numeric": 3.5,
+          "value_text": "3.5% plus annual step increase",
+          "unit": "%",
+          "clause_excerpt": "2025-2026 3.5% + Step",
+          "page_ref": 25,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "base_salary_increase_yr3",
+          "value_numeric": 3.5,
+          "value_text": "3.5% plus annual step increase",
+          "unit": "%",
+          "clause_excerpt": "2026-2027 3.5% + Step",
+          "page_ref": 25,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "ba_min_salary",
+          "value_numeric": 38242.22,
+          "value_text": "BA Step 1 base salary for 2024-2025",
+          "unit": "$",
+          "clause_excerpt": "Step 1 $ 38,242.22 2024-2025 Certified Staff Salary Schedule",
+          "page_ref": 30,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "ma_min_salary",
+          "value_numeric": 40427.10,
+          "value_text": "MA Step 1 base salary for 2024-2025",
+          "unit": "$",
+          "clause_excerpt": "Step 1 $ 40,427.10 MS MS+TRS 2024-2025 Certified Staff",
+          "page_ref": 30,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "salary_steps_count",
+          "value_numeric": 25,
+          "value_text": "25 steps on salary schedule",
+          "unit": null,
+          "clause_excerpt": "Salary Schedule rows 1 through 25 listed in Appendix A",
+          "page_ref": 30,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "salary_lanes_count",
+          "value_numeric": 8,
+          "value_text": "8 lanes: BS, BS+TRS, BS15, BS15+TRS, MS, MS+TRS, MS30, MS30+TRS",
+          "unit": null,
+          "clause_excerpt": "Step BS BS+TRS BS15 BS15+TRS MS MS+TRS MS30 MS30+TRS columns",
+          "page_ref": 30,
+          "confidence": 0.95
+        },
+        {
+          "category": "retirement",
+          "provision_key": "retirement_pickup_pct",
+          "value_numeric": 9.0,
+          "value_text": "District picks up up to 9.0% of TRS contribution for teachers",
+          "unit": "%",
+          "clause_excerpt": "The Board agrees to pick up and pay the following contributions to the downstate Teacher Retirement System (TRS) on behalf of each teacher: up to a maximum of 9.0%.",
+          "page_ref": 25,
+          "confidence": 0.95
+        },
+        {
+          "category": "retirement",
+          "provision_key": "retirement_system",
+          "value_numeric": null,
+          "value_text": "TRS for certified staff; IMRF for non-certified/educational support professionals",
+          "unit": null,
+          "clause_excerpt": "The Board of Education will pay 100% of the retirement to the Illinois Municipal Retirement Fund (IMRF) for those employees covered by IMRF.",
+          "page_ref": 25,
+          "confidence": 0.95
+        },
+        {
+          "category": "insurance",
+          "provision_key": "employee_premium_share_pct",
+          "value_numeric": 35,
+          "value_text": "Employee pays 35% of health insurance premium; employer pays 65%",
+          "unit": "%",
+          "clause_excerpt": "The employer shall pay sixty-five (65%) percent of the monthly premium of the individual health insurance plan regardless of whether the member participates in the individual or family health insurance plan.",
+          "page_ref": 27,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "sick_days_annual",
+          "value_numeric": 15,
+          "value_text": "15 sick days for years 1-10; 16 days for years 11-20; 17 days for years 21-30; 18 days for years 31+",
+          "unit": "days",
+          "clause_excerpt": "Years 1 through 10 15 days. Years 11 through 20 16 days. Years 21 through 30 17 days. Years 31 and beyond 18 days.",
+          "page_ref": 12,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "personal_days_annual",
+          "value_numeric": 3,
+          "value_text": "3 personal days per school year",
+          "unit": "days",
+          "clause_excerpt": "Upon request to the Superintendent or principal employees shall be allowed three (3) personal days per school year",
+          "page_ref": 13,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "bereavement_days",
+          "value_numeric": 3,
+          "value_text": "Up to 3 days off for bereavement",
+          "unit": "days",
+          "clause_excerpt": "All employees shall be entitled to up to three (3) days off for bereavement.",
+          "page_ref": 16,
+          "confidence": 0.95
+        },
+        {
+          "category": "workday",
+          "provision_key": "contract_days_teacher",
+          "value_numeric": 180,
+          "value_text": "180 teacher responsibility days per school year",
+          "unit": "days",
+          "clause_excerpt": "The employer shall establish a school calendar of one hundred eighty (180) teacher responsibility days and seven (7) emergency days beginning 2020-2021 school year.",
+          "page_ref": 18,
+          "confidence": 0.95
+        },
+        {
+          "category": "evaluation",
+          "provision_key": "evaluation_cycle_years",
+          "value_numeric": 3,
+          "value_text": "3-year evaluation cycle for tenured teachers with proficient or excellent ratings; annual for others",
+          "unit": "years",
+          "clause_excerpt": "Full time tenured teachers who received a proficient or excellent on their most recent rating shall be formally evaluated at least once in the course of every three school years",
+          "page_ref": 23,
+          "confidence": 0.95
+        },
+        {
+          "category": "grievance",
+          "provision_key": "grievance_steps",
+          "value_numeric": 4,
+          "value_text": "4-step grievance procedure: Step A (supervisor), Step B (superintendent), Step C (board), Step D (arbitration)",
+          "unit": null,
+          "clause_excerpt": "Step A through Step D grievance procedure outlined, with final binding arbitration at Step D under American Arbitration Association",
+          "page_ref": 10,
+          "confidence": 0.95
+        },
+        {
+          "category": "grievance",
+          "provision_key": "arbitration_binding",
+          "value_numeric": null,
+          "value_text": "true",
+          "unit": null,
+          "clause_excerpt": "the Association and the grievant may submit the grievance to final and binding arbitration under the Voluntary Labor Arbitration Rules of the American Arbitration Association",
+          "page_ref": 10,
+          "confidence": 0.95
+        },
+        {
+          "category": "compensation",
+          "provision_key": "off_schedule_bonus_yr1",
+          "value_numeric": 250,
+          "value_text": "Unused sick day bonus of $250 for full-time employees with no sick days used during school year",
+          "unit": "$",
+          "clause_excerpt": "A bonus of $250 will be given to all full time employees for not claiming any sick days during the school year. This will be added to the last check of the school year.",
+          "page_ref": 22,
+          "confidence": 0.85
+        },
+        {
+          "category": "compensation",
+          "provision_key": "step_increase",
+          "value_numeric": null,
+          "value_text": "Annual step movement provided; step increments vary by position and year",
+          "unit": null,
+          "clause_excerpt": "2024-2025 3.5% + Step; 2025-2026 3.5% + Step; 2026-2027 3.5% + Step; 2027-2028 3.5% + Step",
+          "page_ref": 25,
+          "confidence": 0.80
+        },
+        {
+          "category": "compensation",
+          "provision_key": "lane_advancement_allowed",
+          "value_numeric": null,
+          "value_text": "true",
+          "unit": null,
+          "clause_excerpt": "Salary Schedule columns include BS, BS+TRS, BS15, BS15+TRS, MS, MS+TRS, MS30, MS30+TRS indicating horizontal advancement based on education credentials",
+          "page_ref": 30,
+          "confidence": 0.75
+        },
+        {
+          "category": "other",
+          "provision_key": "longevity_bonus",
+          "value_numeric": 500,
+          "value_text": "$500 longevity bonus for employees with 16+ years of service",
+          "unit": "$",
+          "clause_excerpt": "A $500 longevity bonus will be awarded to all full-time staff who have completed 16 years of service within the district. This will be paid in the last check of the school year.",
+          "page_ref": 28,
+          "confidence": 0.95
+        },
+        {
+          "category": "leave",
+          "provision_key": "sick_leave_max_days",
+          "value_numeric": null,
+          "value_text": "Unused sick leave shall accumulate without stated maximum",
+          "unit": "days",
+          "clause_excerpt": "All employees shall be entitled to the following allotment sick leave days per year. Unused sick leave shall accumulate.",
+          "page_ref": 12,
+          "confidence": 0.70
+        },
+        {
+          "category": "workday",
+          "provision_key": "instructional_minutes_day",
+          "value_numeric": null,
+          "value_text": "Not specified in contract",
+          "unit": null,
+          "clause_excerpt": null,
+          "page_ref": null,
+          "confidence": 0.0
+        },
+        {
+          "category": "insurance",
+          "provision_key": "dental_coverage",
+          "value_numeric": null,
+          "value_text": "Not specified in contract",
+          "unit": null,
+          "clause_excerpt": null,
+          "page_ref": null,
+          "confidence": 0.0
+        },
+        {
+          "category": "insurance",
+          "provision_key": "vision_coverage",
+          "value_numeric": null,
+          "value_text": "Not specified in contract",
+          "unit": null,
+          "clause_excerpt": null,
+          "page_ref": null,
+          "confidence": 0.0
+        },
+        {
+          "category": "rif",
+          "provision_key": "rif_recall_years",
+          "value_numeric": 2,
+          "value_text": "Illinois School Code Article 24 governs RIF; standard recall period is 2 years",
+          "unit": "years",
+          "clause_excerpt": "Nothing in this Article shall limit the RIF process as outlined by the Illinois School Code.",
+          "page_ref": 29,
+          "confidence": 0.65
+        }
+      ]
+    }
+  ]
+}
+```

@@ -257,7 +257,7 @@ def check_changed_docs(session, conn, records: list, known_docs: dict,
     return changed_alerts
 
 
-DEFAULT_MAX_DOCS_PER_STATE = 20
+DEFAULT_MAX_DOCS_PER_STATE = 200
 EXTRACT_SCRIPT = Path(__file__).parent / "06_extract_contracts.py"
 
 
