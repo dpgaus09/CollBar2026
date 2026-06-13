@@ -208,12 +208,29 @@ router.get("/dashboard/districts/:id/settlements", canAccessDistrict, async (req
   try {
     // Settlements have no direct source_doc link; derive provenance from the
     // most recent contract whose period overlaps the settlement's to_year.
+    // For IL districts, also compute estimated annual cost impact:
+    //   base_increase_pct/100 * teacher_fte * avg(ba_begin, highest_scheduled_salary)
     const rows = await db.execute(sql`
       SELECT s.id, s.from_year, s.to_year, s.base_increase_pct, s.year2_pct, s.year3_pct,
              s.off_schedule_payment, s.insurance_changed, s.term_years,
              s.method, s.confidence, s.human_verified, s.page_ref, s.notes,
-             sd.source_url, sd.retrieved_at
+             sd.source_url, sd.retrieved_at,
+             CASE
+               WHEN d.state = 'IL'
+                    AND s.base_increase_pct IS NOT NULL
+                    AND fte.teacher_fte IS NOT NULL
+                    AND tss.ba_begin IS NOT NULL
+                    AND tss.highest_scheduled_salary IS NOT NULL
+               THEN ROUND(
+                 (s.base_increase_pct / 100.0) *
+                 fte.teacher_fte *
+                 ((tss.ba_begin + tss.highest_scheduled_salary) / 2.0),
+                 0
+               )
+               ELSE NULL
+             END AS est_annual_cost_impact
       FROM settlements s
+      JOIN districts d ON d.id = s.district_id
       LEFT JOIN LATERAL (
         SELECT c2.source_doc_id
         FROM contracts c2
@@ -222,6 +239,13 @@ router.get("/dashboard/districts/:id/settlements", canAccessDistrict, async (req
         LIMIT 1
       ) lc ON true
       LEFT JOIN source_documents sd ON lc.source_doc_id = sd.id
+      LEFT JOIN il_district_fte fte
+        ON fte.state_district_id = d.state_district_id
+        AND fte.school_year = s.from_year
+      LEFT JOIN tss_annual tss
+        ON tss.state_district_id = d.state_district_id
+        AND tss.school_year = s.from_year
+        AND tss.state = 'IL'
       WHERE s.district_id = ${districtId}
       ORDER BY s.from_year DESC
     `);

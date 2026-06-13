@@ -1,1 +1,2 @@
-- [Phase 9B state scoping](phase9b-state-scoping.md) — IL/OH must never mix in comparables, peer-sets, medians, PDF, or public pages.
+- [ISBE Class Size Report loading](il-classsize-loader.md) — pandas MultiIndex header needs "Unnamed:" token filtering when flattening District Data sheet
+- [IL cost-impact estimate](il-cost-impact.md) — formula, joins, and NULL-safety rules for est_annual_cost_impact on IL settlements

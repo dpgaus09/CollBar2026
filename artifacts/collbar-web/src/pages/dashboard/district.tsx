@@ -63,6 +63,7 @@ interface Settlement {
   page_ref: number | null;
   source_url: string | null;
   retrieved_at: string | null;
+  est_annual_cost_impact: string | null;
 }
 
 interface MedianResult {
@@ -401,6 +402,8 @@ function SettlementTable({ settlements }: { settlements: Settlement[] }) {
     );
   }
 
+  const hasAnyImpact = settlements.some((s) => s.est_annual_cost_impact != null);
+
   return (
     <div className="space-y-0">
       <div className="grid grid-cols-5 text-xs text-slate-500 pb-2 border-b border-slate-800">
@@ -410,57 +413,68 @@ function SettlementTable({ settlements }: { settlements: Settlement[] }) {
         <span>Yr 3</span>
       </div>
       {settlements.map((s) => (
-        <div
-          key={s.id}
-          className="grid grid-cols-5 text-xs py-2 border-b border-slate-800/60 last:border-0 items-center"
-        >
-          <div className="col-span-2 space-y-0.5">
-            <div className="text-slate-300">
-              {s.from_year} → {s.to_year}
+        <div key={s.id} className="border-b border-slate-800/60 last:border-0">
+          <div className="grid grid-cols-5 text-xs py-2 items-center">
+            <div className="col-span-2 space-y-0.5">
+              <div className="text-slate-300">
+                {s.from_year} → {s.to_year}
+              </div>
+              {s.method && (
+                <div className="text-slate-600 capitalize text-[10px]">{s.method}</div>
+              )}
+              {s.source_url && (
+                <a
+                  href={s.source_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[10px] text-blue-600 hover:text-blue-400"
+                >
+                  Source PDF →
+                </a>
+              )}
             </div>
-            {s.method && (
-              <div className="text-slate-600 capitalize text-[10px]">{s.method}</div>
-            )}
-            {s.source_url && (
-              <a
-                href={s.source_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-[10px] text-blue-600 hover:text-blue-400"
-              >
-                Source PDF →
-              </a>
-            )}
+            <ProvenanceValue
+              value={s.base_increase_pct ? parseFloat(s.base_increase_pct) : null}
+              unit="%"
+              humanVerified={s.human_verified}
+              confidence={s.confidence}
+              pageRef={s.page_ref}
+              sourceUrl={s.source_url}
+              retrievedAt={s.retrieved_at}
+            />
+            <ProvenanceValue
+              value={s.year2_pct ? parseFloat(s.year2_pct) : null}
+              unit="%"
+              humanVerified={s.human_verified}
+              confidence={s.confidence}
+              pageRef={s.page_ref}
+              sourceUrl={s.source_url}
+              retrievedAt={s.retrieved_at}
+            />
+            <ProvenanceValue
+              value={s.year3_pct ? parseFloat(s.year3_pct) : null}
+              unit="%"
+              humanVerified={s.human_verified}
+              confidence={s.confidence}
+              pageRef={s.page_ref}
+              sourceUrl={s.source_url}
+              retrievedAt={s.retrieved_at}
+            />
           </div>
-          <ProvenanceValue
-            value={s.base_increase_pct ? parseFloat(s.base_increase_pct) : null}
-            unit="%"
-            humanVerified={s.human_verified}
-            confidence={s.confidence}
-            pageRef={s.page_ref}
-            sourceUrl={s.source_url}
-            retrievedAt={s.retrieved_at}
-          />
-          <ProvenanceValue
-            value={s.year2_pct ? parseFloat(s.year2_pct) : null}
-            unit="%"
-            humanVerified={s.human_verified}
-            confidence={s.confidence}
-            pageRef={s.page_ref}
-            sourceUrl={s.source_url}
-            retrievedAt={s.retrieved_at}
-          />
-          <ProvenanceValue
-            value={s.year3_pct ? parseFloat(s.year3_pct) : null}
-            unit="%"
-            humanVerified={s.human_verified}
-            confidence={s.confidence}
-            pageRef={s.page_ref}
-            sourceUrl={s.source_url}
-            retrievedAt={s.retrieved_at}
-          />
+          {s.est_annual_cost_impact != null ? (
+            <div className="text-[10px] text-amber-400/80 pb-2 -mt-1">
+              <span className="font-medium">Est. annual cost impact:</span>{" "}
+              ${Number(s.est_annual_cost_impact).toLocaleString()}
+              <span className="text-slate-600 ml-1">*</span>
+            </div>
+          ) : null}
         </div>
       ))}
+      {hasAnyImpact && (
+        <p className="text-[10px] text-slate-600 italic pt-3">
+          * Modeled from ISBE Class Size Report FTE and ISBE TSS salary data. Shown as an estimate only.
+        </p>
+      )}
     </div>
   );
 }

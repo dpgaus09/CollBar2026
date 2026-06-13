@@ -1,0 +1,45 @@
+Add an Illinois teacher FTE layer from the ISBE Class Size Report files. I am
+not a programmer — build it end to end and report results. Do NOT ask me to
+run shell commands.
+
+The Class Size Report .xlsx files are uploaded in pipeline/data/il_classsize/
+(one file per school year, e.g. 2024-Class-Size-Report.xlsx). These files give
+the per-district teacher headcount that our TSS data lacks. File structure
+(verified — handle exactly this, it differs between the two sheets):
+
+- Sheet "School Data": clean single-row header. Columns include School Year,
+  RCDTS, School Name, District Name, "Total Teacher FTE". One row per school.
+- Sheet "District Data": header spans TWO rows (rows 4 and 5, zero-indexed
+  3 and 4) — read with header=[3,4] and flatten. Contains RCDT, District Name,
+  "Pupil Teacher Ratio Elementary (PK-8)", "Pupil Teacher Ratio High School
+  (9-12)".
+
+Build:
+1. A new table il_district_fte (state_district_id TEXT, school_year VARCHAR(7),
+   teacher_fte NUMERIC, ptr_elementary NUMERIC, ptr_highschool NUMERIC,
+   loaded_at), UNIQUE (state_district_id, school_year) so re-runs upsert.
+2. pipeline/load_il_classsize.py that, for every file in the folder:
+   - derives school_year from the data (the "School Year" column), not the
+     filename;
+   - from "School Data": normalize RCDTS (strip non-digits, zero-pad to 15,
+     take first 11) and SUM "Total Teacher FTE" per district;
+   - from "District Data": normalize RCDT the same way, take the two pupil-
+     teacher ratios per district;
+   - upsert one il_district_fte row per district per year.
+   Range-sanitize: teacher_fte 0-20000, ratios 0-100; out-of-range -> NULL.
+   Skip rows whose RCDT isn't 9-11 digits.
+3. Run it on all uploaded files and print rows loaded per school year plus
+   statewide total teacher FTE per year (2024 should be ~131,840 across
+   ~875 districts — use this as a correctness check).
+4. Add a derived "estimated annual cost impact" to each IL settlement:
+   settlement base_increase_pct × (teacher_fte for that district/year ×
+   the district's average salary, approximated as the midpoint of ba_begin
+   and highest_scheduled_salary from tss_annual for the same year). Join on
+   state_district_id + school_year. Where FTE or salary is missing, show
+   "Not available" — never 0 or a guess.
+5. On the district dashboard and the settlement detail, display this as
+   "Est. annual cost impact: $X" with a footnote "Modeled from ISBE Class
+   Size Report FTE and ISBE TSS salary data." Mark it clearly as an estimate.
+
+Report: rows loaded per year, the statewide FTE check, and how many IL
+settlements now carry a cost-impact estimate.
