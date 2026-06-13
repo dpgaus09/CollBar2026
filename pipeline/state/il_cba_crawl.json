@@ -4,7 +4,7 @@
   "il_failed": 4,
   "il_skipped": 0,
   "il_no_url": 194,
-  "last_updated": "2026-06-13T19:44:42Z",
+  "last_updated": "2026-06-13T19:47:21Z",
   "per_district": {
     "07016806060": {
       "status": "no_url",
@@ -947,6 +947,102 @@
     "51084005026": {
       "status": "failed",
       "timestamp": "2026-06-13T19:44:42Z"
+    },
+    "34049220026": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:45:03Z"
+    },
+    "13014057002": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:45:11Z"
+    },
+    "31045101022": {
+      "status": "found",
+      "url": "https://www.bps101.net/wp-content/uploads/2023/07/FY2024-27-BEA-Negotiated-Agreement.pdf",
+      "found_via": "direct_crawl",
+      "storage_key": "local:/home/runner/workspace/pipeline/data/il_cba/0a4da50a17884122b9941a2f973d5f6bcec9846967dda3fa7340e44a07a0b36e.pdf",
+      "file_hash": "0a4da50a17884122b9941a2f973d5f6bcec9846967dda3fa7340e44a07a0b36e",
+      "doc_id": "84",
+      "timestamp": "2026-06-13T19:45:31Z"
+    },
+    "01009015026": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:45:37Z"
+    },
+    "03025020026": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:45:37Z"
+    },
+    "50082119002": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:45:39Z"
+    },
+    "50082118002": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:45:39Z"
+    },
+    "50082201017": {
+      "status": "found",
+      "url": "https://bths201.org/wp-content/uploads/2026/06/Board-Policy-Manual-June-2026.pdf",
+      "found_via": "direct_crawl",
+      "storage_key": "local:/home/runner/workspace/pipeline/data/il_cba/58ce516b103bdb2fee5bd954ef26aa7b6c16b8eeee62d5096abc5a0f1419de49.pdf",
+      "file_hash": "58ce516b103bdb2fee5bd954ef26aa7b6c16b8eeee62d5096abc5a0f1419de49",
+      "doc_id": "85",
+      "timestamp": "2026-06-13T19:45:50Z"
+    },
+    "04004100026": {
+      "status": "found",
+      "url": "https://www.district100.com/fs/resource-manager/view/3bcba7cc-6831-41e4-ae37-d4770f56aec4",
+      "found_via": "direct_crawl",
+      "storage_key": "local:/home/runner/workspace/pipeline/data/il_cba/f90361463603472e1840400c7f1206379e3aadef74fc247c7a5a4f3e13558aa7.pdf",
+      "file_hash": "f90361463603472e1840400c7f1206379e3aadef74fc247c7a5a4f3e13558aa7",
+      "doc_id": "86",
+      "timestamp": "2026-06-13T19:46:12Z"
+    },
+    "39074005026": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:46:20Z"
+    },
+    "19022025002": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:46:24Z"
+    },
+    "21028047004": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:46:34Z"
+    },
+    "21028103013": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:46:35Z"
+    },
+    "06016098002": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:46:43Z"
+    },
+    "06016100002": {
+      "status": "found",
+      "url": "https://www.bsd100.org/fs/resource-manager/view/dbfd58ee-7272-4ee0-9bbe-15d122e9d568",
+      "found_via": "direct_crawl",
+      "storage_key": "local:/home/runner/workspace/pipeline/data/il_cba/0438c70807a80232fe3bcff278f8d74c45edc1f8fed2ba4edd518bdd584eaf5a.pdf",
+      "file_hash": "0438c70807a80232fe3bcff278f8d74c45edc1f8fed2ba4edd518bdd584eaf5a",
+      "doc_id": "87",
+      "timestamp": "2026-06-13T19:47:05Z"
+    },
+    "41057008026": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:47:06Z"
+    },
+    "13041082002": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:47:10Z"
+    },
+    "34049038002": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:47:20Z"
+    },
+    "54092001026": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:47:21Z"
     }
   },
   "il_found_via_search": 0,
