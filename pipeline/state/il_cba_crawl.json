@@ -4,7 +4,7 @@
   "il_failed": 4,
   "il_skipped": 0,
   "il_no_url": 194,
-  "last_updated": "2026-06-13T19:39:54Z",
+  "last_updated": "2026-06-13T19:39:59Z",
   "per_district": {
     "07016806060": {
       "status": "no_url",
@@ -814,6 +814,14 @@
     "44063019024": {
       "status": "failed",
       "timestamp": "2026-06-13T19:39:54Z"
+    },
+    "35050065004": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:39:59Z"
+    },
+    "20093017024": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:39:59Z"
     }
   },
   "il_found_via_search": 0,
