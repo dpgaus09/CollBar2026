@@ -1,2 +1,6 @@
 - [ISBE Class Size Report loading](il-classsize-loader.md) — pandas MultiIndex header needs "Unnamed:" token filtering when flattening District Data sheet
 - [IL cost-impact estimate](il-cost-impact.md) — formula, joins, and NULL-safety rules for est_annual_cost_impact on IL settlements
+- [IL crawl workflow](il-crawl-workflow.md) — crawl runs as "pipeline: IL CBA Crawl" managed workflow; restart it to run again or add --search-fallback.
+- [Replit background processes](replit-bg-processes.md) — Replit kills detached/nohup/fork child processes between tool calls; only managed workflows survive long-running tasks.
+- [ISBE directory XLS format](isbe-directory-format.md) — sheet "1 Public Dist & Sch"; RCDTS = 9-digit RCD col + 2-digit Type col = 11 digits; filter RecType=='Dist' AND School=='0000'.
+- [IL CBA search fallback](il-cba-search-fallback.md) — Serper (primary) → Google CSE → DuckDuckGo; SERPER_API_KEY now set; run --search-fallback after direct crawl finishes.

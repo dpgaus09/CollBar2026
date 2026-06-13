@@ -4,7 +4,7 @@
   "il_failed": 4,
   "il_skipped": 0,
   "il_no_url": 194,
-  "last_updated": "2026-06-13T19:35:21Z",
+  "last_updated": "2026-06-13T19:39:54Z",
   "per_district": {
     "07016806060": {
       "status": "no_url",
@@ -784,19 +784,19 @@
     },
     "01009262026": {
       "status": "failed",
-      "timestamp": "2026-06-13T19:35:14Z"
+      "timestamp": "2026-06-13T19:38:52Z"
     },
     "19022004002": {
       "status": "failed",
-      "timestamp": "2026-06-13T19:35:17Z"
+      "timestamp": "2026-06-13T19:38:54Z"
     },
     "21028091004": {
       "status": "failed",
-      "timestamp": "2026-06-13T19:35:21Z"
+      "timestamp": "2026-06-13T19:38:58Z"
     },
     "28037225026": {
       "status": "failed",
-      "timestamp": "2026-06-13T19:35:21Z"
+      "timestamp": "2026-06-13T19:38:59Z"
     },
     "34049125013": {
       "status": "found",
@@ -806,6 +806,14 @@
       "file_hash": "dd250ad97bc4aa00f409aef70834614e2145819f7655012b0f3d3677dd677b94",
       "doc_id": "78",
       "timestamp": "2026-06-13T19:31:03Z"
+    },
+    "13014063002": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:39:50Z"
+    },
+    "44063019024": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:39:54Z"
     }
   },
   "il_found_via_search": 0,

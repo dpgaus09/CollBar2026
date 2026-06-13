@@ -119,24 +119,56 @@ PDF_KEYWORDS = CBA_KEYWORDS + [
 ]
 
 # Search-engine fallback settings
+SEARCH_MAX_RESULTS  = 10    # max results to inspect per engine
 SEARCH_API_DELAY    = 1.0   # seconds between Google CSE calls
-SEARCH_DDG_DELAY    = 3.0   # seconds between DuckDuckGo calls (be polite)
-SEARCH_MAX_RESULTS  = 10    # max results to inspect from search API
-# How many retries when DDG returns a captcha / empty page
+SEARCH_DDG_DELAY    = 3.0   # seconds between DuckDuckGo calls
 DDG_MAX_RETRIES     = 2
 
-# Module-level timestamps for per-engine rate limiting
+# Module-level rate-limit timestamps
 _google_cse_last_call: float = 0.0
 _ddg_last_call: float = 0.0
 
-# Set to True once Google CSE returns a quota/auth error so we stop
-# burning API calls for the rest of the run while still using DDG.
+# Set to True once Google CSE returns a quota/auth error
 _google_cse_quota_exhausted: bool = False
 
 
 # ---------------------------------------------------------------------------
 # Search-engine helpers
 # ---------------------------------------------------------------------------
+
+def _serper_search(query: str, session: requests.Session) -> list[str]:
+    """
+    Search via Serper.dev (Google Search JSON API).
+    Returns a list of result URLs (all types — not just PDF).
+    Set SERPER_API_KEY env var to enable.
+    """
+    api_key = os.environ.get("SERPER_API_KEY", "").strip()
+    if not api_key:
+        return []
+    try:
+        r = session.post(
+            "https://google.serper.dev/search",
+            json={"q": query, "num": SEARCH_MAX_RESULTS},
+            headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+            timeout=REQUEST_TIMEOUT,
+        )
+    except Exception as e:
+        log.warning("Serper request error: %s", e)
+        return []
+
+    if not r.ok:
+        log.warning("Serper API HTTP %s for query %r: %s", r.status_code, query, r.text[:120])
+        return []
+
+    try:
+        data = r.json()
+    except Exception:
+        return []
+
+    urls = [item["link"] for item in data.get("organic", []) if item.get("link")]
+    log.info("  Serper: %d result(s) for %r", len(urls), query)
+    return urls
+
 
 def _google_cse_search(
     query: str, session: requests.Session, api_key: str, cx: str
@@ -267,15 +299,17 @@ def _ddg_search(query: str, session: requests.Session) -> list[str]:
 
 def _search_fallback(district: dict, session: requests.Session) -> Optional[dict]:
     """
-    Issue a search-engine query to find a CBA PDF for a district whose
+    Issue search-engine queries to find a CBA PDF for a district whose
     direct crawl failed.
 
-    Strategy:
-      1. If GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX env vars are set, try
-         ``site:<domain> "collective bargaining" filetype:pdf`` via Google CSE.
-      2. Otherwise (or if Google CSE returns nothing), try DuckDuckGo HTML
-         search with a site-scoped query, then a broader name-based query.
-      3. Score each candidate URL; return the best match or None.
+    Priority order:
+      1. Serper.dev (SERPER_API_KEY) — reliable Google results JSON API
+      2. Google CSE (GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX)
+      3. DuckDuckGo HTML scraping (no key required, fragile fallback)
+
+    Serper and Google CSE return all organic results (not just .pdf).  We
+    score every candidate URL+title against CBA keywords and give a +5 bonus
+    to same-domain results and a +3 bonus when the URL ends in .pdf.
 
     Returns dict {url, score, found_via} or None.
     """
@@ -283,56 +317,74 @@ def _search_fallback(district: dict, session: requests.Session) -> Optional[dict
     homepage = district["website_url"]
     domain   = urlparse(homepage).netloc.lstrip("www.")
 
-    api_key = os.environ.get("GOOGLE_CSE_API_KEY", "").strip()
-    cx      = os.environ.get("GOOGLE_CSE_CX", "").strip()
-
     candidate_urls: list[str] = []
+    engine_used    = "none"
 
-    # --- Google CSE (preferred when configured) ---
-    if api_key and cx:
-        google_query = (
-            f'site:{domain} "collective bargaining" filetype:pdf'
-        )
-        log.info("  Search fallback [Google CSE]: %s", google_query)
-        result = _google_cse_search(google_query, session, api_key, cx)
-        if result is None:
-            # Quota/auth error — Google CSE is disabled for the rest of this
-            # run (tracked inside _google_cse_search via module-level flag),
-            # but DuckDuckGo is still available and should be tried below.
-            log.warning("  Google CSE quota exhausted — will still try DuckDuckGo")
-        else:
-            candidate_urls.extend(result)
+    serper_key = os.environ.get("SERPER_API_KEY", "").strip()
 
-    # --- DuckDuckGo (free fallback) ---
-    # Always run when there are no candidates yet, regardless of whether
-    # Google CSE hit a quota error — DDG is independent and should not be
-    # suppressed by a Google-specific failure.
-    if not candidate_urls:
-        # First: site-scoped query (often effective for indexed district sites)
-        site_query = (
-            f'site:{domain} "collective bargaining" filetype:pdf'
-        )
-        log.info("  Search fallback [DuckDuckGo, site-scoped]: %s", site_query)
-        candidate_urls.extend(_ddg_search(site_query, session))
+    # --- 1. Serper (primary — uses Google's index, reliable JSON API) ---
+    if serper_key and not candidate_urls:
+        # Site-scoped with filetype hint
+        q1 = f'site:{domain} "collective bargaining" filetype:pdf'
+        log.info("  Search fallback [Serper, site+pdf]: %s", q1)
+        candidate_urls.extend(_serper_search(q1, session))
 
-        # Second pass: broader name + district query (catches hosted copies)
+        # Broader site-scoped (catches non-.pdf doc-management links)
         if not candidate_urls:
-            broad_query = (
-                f'"{name}" "collective bargaining agreement" filetype:pdf'
-            )
-            log.info("  Search fallback [DuckDuckGo, broad]: %s", broad_query)
-            candidate_urls.extend(_ddg_search(broad_query, session))
+            q2 = f'site:{domain} "collective bargaining" OR "negotiated agreement"'
+            log.info("  Search fallback [Serper, site-broad]: %s", q2)
+            candidate_urls.extend(_serper_search(q2, session))
+
+        # Off-site: district name + state (hosted on union/state sites)
+        if not candidate_urls:
+            q3 = f'"{name}" Illinois "collective bargaining agreement" filetype:pdf'
+            log.info("  Search fallback [Serper, name-pdf]: %s", q3)
+            candidate_urls.extend(_serper_search(q3, session))
+
+        if candidate_urls:
+            engine_used = "serper"
+
+    # --- 2. Google CSE ---
+    if not candidate_urls:
+        api_key = os.environ.get("GOOGLE_CSE_API_KEY", "").strip()
+        cx      = os.environ.get("GOOGLE_CSE_CX", "").strip()
+        if api_key and cx:
+            q = f'site:{domain} "collective bargaining" filetype:pdf'
+            log.info("  Search fallback [Google CSE]: %s", q)
+            result = _google_cse_search(q, session, api_key, cx)
+            if result is None:
+                log.warning("  Google CSE quota exhausted")
+            else:
+                candidate_urls.extend(result)
+            if candidate_urls:
+                engine_used = "google_cse"
+
+    # --- 3. DuckDuckGo HTML scraping ---
+    if not candidate_urls:
+        q_site = f'site:{domain} "collective bargaining" filetype:pdf'
+        log.info("  Search fallback [DDG, site-scoped]: %s", q_site)
+        candidate_urls.extend(_ddg_search(q_site, session))
+
+        if not candidate_urls:
+            q_broad = f'"{name}" "collective bargaining agreement" filetype:pdf'
+            log.info("  Search fallback [DDG, broad]: %s", q_broad)
+            candidate_urls.extend(_ddg_search(q_broad, session))
+
+        if candidate_urls:
+            engine_used = "duckduckgo"
 
     if not candidate_urls:
-        log.info("  Search fallback found no PDF candidates")
+        log.info("  Search fallback found no candidates")
         return None
 
-    # Score candidates; prefer same-domain, then highest keyword score
+    # Score: keyword match + same-domain bonus + .pdf bonus
     scored = []
     for url in candidate_urls:
-        score = _score_pdf_text(url)
+        kw_score  = _score_pdf_text(url)
         on_domain = _same_domain(homepage, url)
-        scored.append((score + (5 if on_domain else 0), url, on_domain))
+        pdf_bonus = 3 if ".pdf" in url.lower().split("?")[0] else 0
+        total     = kw_score + (5 if on_domain else 0) + pdf_bonus
+        scored.append((total, url, on_domain))
 
     scored.sort(key=lambda t: t[0], reverse=True)
     best_score, best_url, on_domain = scored[0]
@@ -342,10 +394,10 @@ def _search_fallback(district: dict, session: requests.Session) -> Optional[dict
         return None
 
     log.info(
-        "  Search fallback best: score=%d  on_domain=%s  %s",
-        best_score, on_domain, best_url,
+        "  Search fallback [%s] best: score=%d  on_domain=%s  %s",
+        engine_used, best_score, on_domain, best_url,
     )
-    return {"url": best_url, "score": best_score, "found_via": "search_fallback"}
+    return {"url": best_url, "score": best_score, "found_via": f"search_fallback:{engine_used}"}
 
 
 # ---------------------------------------------------------------------------
