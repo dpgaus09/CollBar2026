@@ -4,7 +4,7 @@
   "il_failed": 4,
   "il_skipped": 0,
   "il_no_url": 194,
-  "last_updated": "2026-06-13T19:41:14Z",
+  "last_updated": "2026-06-13T19:41:45Z",
   "per_district": {
     "07016806060": {
       "status": "no_url",
@@ -869,6 +869,18 @@
       "file_hash": "1f5a9bba87b082e061a3f6b5cfd2e100b818f58d1be21030e260ce262b7f4e1a",
       "doc_id": "81",
       "timestamp": "2026-06-13T19:41:14Z"
+    },
+    "34049102004": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:41:34Z"
+    },
+    "07016145002": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:41:44Z"
+    },
+    "11021306026": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:41:45Z"
     }
   },
   "il_found_via_search": 0,
