@@ -35,7 +35,7 @@ function Home() {
           <div className="w-2 h-2 rounded-full bg-blue-500" />
         </div>
         <p className="text-slate-400 text-sm font-mono">
-          Ohio K-12 Collective Bargaining Database
+          Collective Bargaining Database
         </p>
         <p className="text-slate-500 text-xs mt-6">Phase 4 — District Dashboard</p>
         <div className="mt-4 flex items-center justify-center gap-3">

@@ -32,7 +32,7 @@ function TopBar() {
     <header className="border-b border-slate-800 px-6 py-3 flex items-center justify-between bg-slate-950">
       <div className="flex items-center gap-3">
         <span className="text-slate-100 font-bold text-sm tracking-tight">CollBar</span>
-        <span className="text-slate-600 text-xs">Ohio K-12 CBA Database</span>
+        <span className="text-slate-600 text-xs">Collective Bargaining Database</span>
       </div>
       <div className="flex items-center gap-4">
         <a

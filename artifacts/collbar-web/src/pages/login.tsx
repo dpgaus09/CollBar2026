@@ -47,7 +47,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm space-y-6">
         <div className="text-center space-y-2">
           <h1 className="text-2xl font-bold text-slate-100 tracking-tight">CollBar</h1>
-          <p className="text-slate-400 text-sm">Ohio K-12 Collective Bargaining Database</p>
+          <p className="text-slate-400 text-sm">Collective Bargaining Database</p>
         </div>
 
         {!result ? (
