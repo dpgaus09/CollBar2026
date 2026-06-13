@@ -33,7 +33,7 @@ CBA_PDF_DIR = common.DATA_DIR / "cba"
 PROMPT_VERSION = "v1"
 MODEL = "claude-haiku-4-5"
 MAX_TEXT_CHARS = 80_000  # truncate context sent to LLM
-MAX_TOKENS = 8192
+MAX_TOKENS = 16000
 
 # Anthropic claude-3-5-haiku pricing (USD per 1M tokens) — update if rates change.
 COST_PER_1M_INPUT_TOKENS: float = 0.80
@@ -41,6 +41,9 @@ COST_PER_1M_OUTPUT_TOKENS: float = 4.00
 
 # Fraction of high-confidence provisions flagged per extraction run for human auditing.
 AUDIT_SAMPLE_RATE: float = 0.05
+
+# Directory for saving raw LLM responses that failed JSON validation
+FAILED_JSON_DIR = Path(__file__).parent / "state" / "failed_json"
 
 
 # ---------------------------------------------------------------------------
@@ -217,16 +220,24 @@ def load_prompt() -> str:
     return PROMPT_FILE.read_text(encoding="utf-8")
 
 
-def call_anthropic(system_prompt: str, text: str) -> tuple[Optional[str], int, int]:
+def call_anthropic(
+    system_prompt: str,
+    text: str,
+    *,
+    short_form: bool = False,
+) -> tuple[Optional[str], int, int, Optional[str]]:
     """
-    Call Anthropic Claude and return (response_text, input_tokens, output_tokens).
-    Returns (None, 0, 0) on failure.
+    Call Anthropic Claude and return (response_text, input_tokens, output_tokens, stop_reason).
+    Returns (None, 0, 0, None) on failure.
+
+    short_form=True sends a reduced prompt asking for only the 30 highest-confidence
+    provisions — used when a prior call was cut off at max_tokens.
     """
     try:
         import anthropic as _anthropic
     except ImportError:
         log.error("anthropic SDK not installed — pip install anthropic")
-        return None, 0, 0
+        return None, 0, 0, None
 
     base_url = os.environ.get("AI_INTEGRATIONS_ANTHROPIC_BASE_URL", "")
     api_key = os.environ.get("AI_INTEGRATIONS_ANTHROPIC_API_KEY", "dummy")
@@ -237,29 +248,34 @@ def call_anthropic(system_prompt: str, text: str) -> tuple[Optional[str], int, i
 
     client = _anthropic.Anthropic(**client_kwargs)
 
+    if short_form:
+        user_content = (
+            "The previous response was truncated. "
+            "Re-extract contract data from the CBA text below, but return ONLY the "
+            "30 highest-confidence provisions. Output only valid JSON.\n\n"
+            f"<cba_text>\n{text}\n</cba_text>"
+        )
+    else:
+        user_content = (
+            "Extract all contract data from the following CBA text. "
+            "Output only valid JSON.\n\n"
+            f"<cba_text>\n{text}\n</cba_text>"
+        )
+
     try:
         response = client.messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
             system=system_prompt,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        "Extract all contract data from the following CBA text. "
-                        "Output only valid JSON.\n\n"
-                        f"<cba_text>\n{text}\n</cba_text>"
-                    ),
-                }
-            ],
+            messages=[{"role": "user", "content": user_content}],
         )
         block = response.content[0]
         text_out = block.text if block.type == "text" else None
         usage = response.usage
-        return text_out, usage.input_tokens, usage.output_tokens
+        return text_out, usage.input_tokens, usage.output_tokens, response.stop_reason
     except Exception as e:
         log.warning("Anthropic API error: %s", e)
-        return None, 0, 0
+        return None, 0, 0, None
 
 
 def extract_json_from_response(raw: str) -> str:
@@ -278,6 +294,33 @@ def extract_json_from_response(raw: str) -> str:
 # ---------------------------------------------------------------------------
 # DB operations
 # ---------------------------------------------------------------------------
+
+def get_failed_docs(conn):
+    """
+    Return source_document rows whose most recent extraction run has status='failed'
+    and that have no successful run.  Used by --retry-failed.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT sd.id, sd.source_url, sd.storage_key, sd.district_id, sd.school_year
+        FROM source_documents sd
+        WHERE sd.doc_type = 'cba_pdf'
+          AND sd.id NOT IN (
+              SELECT er.source_doc_id FROM extraction_runs er
+              WHERE er.status = 'success' AND er.source_doc_id IS NOT NULL
+          )
+          AND sd.id IN (
+              SELECT er.source_doc_id FROM extraction_runs er
+              WHERE er.status = 'failed' AND er.source_doc_id IS NOT NULL
+          )
+        ORDER BY sd.id
+        """
+    )
+    rows = cur.fetchall()
+    cur.close()
+    return rows
+
 
 def get_unprocessed_docs(conn, doc_id: Optional[int] = None, priority: bool = False):
     """
@@ -946,6 +989,8 @@ def main():
                         help="Process contracts expiring 2026-2027 first (school_year >= 2023-24)")
     parser.add_argument("--derive-only", action="store_true",
                         help="Skip PDF extraction and LLM — re-run settlement derivation only")
+    parser.add_argument("--retry-failed", action="store_true",
+                        help="Requeue docs whose latest extraction run failed (no success run exists)")
     args = parser.parse_args()
 
     conn = common.get_db_conn()
@@ -968,9 +1013,13 @@ def main():
 
     system_prompt = load_prompt()
 
-    docs = get_unprocessed_docs(conn, args.doc_id, priority=args.priority)
-    log.info("Unprocessed cba_pdf docs: %d%s", len(docs),
-             " (priority order: 2026-2027 expiries first)" if args.priority else "")
+    if args.retry_failed:
+        docs = get_failed_docs(conn)
+        log.info("--retry-failed: %d docs with no success run and at least one failed run", len(docs))
+    else:
+        docs = get_unprocessed_docs(conn, args.doc_id, priority=args.priority)
+        log.info("Unprocessed cba_pdf docs: %d%s", len(docs),
+                 " (priority order: 2026-2027 expiries first)" if args.priority else "")
 
     max_docs = args.batch or args.max_docs
     if max_docs:
@@ -1047,16 +1096,35 @@ def main():
         # --- Step 3: LLM call (with one retry) ---
         result = None
         last_error = None
+        last_raw: Optional[str] = None
         doc_input_tokens = 0
         doc_output_tokens = 0
         for attempt in range(2):
-            raw, in_tok, out_tok = call_anthropic(system_prompt, chunked_text)
+            raw, in_tok, out_tok, stop_reason = call_anthropic(system_prompt, chunked_text)
             doc_input_tokens += in_tok
             doc_output_tokens += out_tok
             if raw is None:
                 last_error = "Anthropic API returned no response"
                 time.sleep(2 ** attempt)
                 continue
+            last_raw = raw
+
+            # On the first attempt, if the model ran out of tokens, retry with a
+            # short-form prompt asking for only the 30 highest-confidence provisions.
+            if stop_reason == "max_tokens" and attempt == 0:
+                log.warning(
+                    "Doc %d hit max_tokens on attempt 1 — retrying with short-form prompt",
+                    source_doc_id,
+                )
+                raw2, in_tok2, out_tok2, _ = call_anthropic(
+                    system_prompt, chunked_text, short_form=True
+                )
+                doc_input_tokens += in_tok2
+                doc_output_tokens += out_tok2
+                if raw2:
+                    last_raw = raw2
+                    raw = raw2
+
             cleaned = extract_json_from_response(raw)
             result = validate_extraction(cleaned)
             if result is not None:
@@ -1080,6 +1148,15 @@ def main():
 
         if result is None:
             log.warning("Extraction failed for doc %d: %s", source_doc_id, last_error)
+            # Persist the raw LLM output so it can be inspected offline
+            if last_raw is not None:
+                try:
+                    FAILED_JSON_DIR.mkdir(parents=True, exist_ok=True)
+                    out_path = FAILED_JSON_DIR / f"{source_doc_id}.txt"
+                    out_path.write_text(last_raw, encoding="utf-8")
+                    log.info("Raw LLM response saved to %s", out_path)
+                except OSError as e:
+                    log.warning("Could not write failed JSON log: %s", e)
             update_extraction_run(cur, run_id, "failed", last_error)
             conn.commit()
             cur.close()
