@@ -1038,7 +1038,12 @@ const IL_CRAWL_LOG = join(PIPELINE_DIR, "logs", "il_cba_crawl.log");
 const EXTRACTION_CRON_LOG = join(PIPELINE_DIR, "logs", "extraction_cron.log");
 
 let _crawlPid: number | null = null;
+let _crawlLastRunAt: Date | null = null;
+let _crawlLastStatus: "running" | "success" | "error" | null = null;
+
 let _extractionCronPid: number | null = null;
+let _extractionCronLastRunAt: Date | null = null;
+let _extractionCronLastStatus: "running" | "success" | "error" | null = null;
 
 export function spawnIlCrawl(extraArgs: string[] = []): { status: string; pid: number | null } {
   if (_crawlPid !== null) {
@@ -1063,6 +1068,12 @@ export function spawnIlCrawl(extraArgs: string[] = []): { status: string; pid: n
       env: { ...process.env, PYTHONPATH: PIPELINE_DIR },
     },
   );
+  _crawlLastRunAt = new Date();
+  _crawlLastStatus = "running";
+  child.on("exit", (code) => {
+    _crawlLastStatus = code === 0 ? "success" : "error";
+    _crawlPid = null;
+  });
   child.unref();
   _crawlPid = child.pid ?? null;
   return { status: "started", pid: _crawlPid };
@@ -1086,12 +1097,19 @@ router.get("/admin/il-crawl-status", requireAdminToken, (_req, res) => {
   if (_crawlPid !== null) {
     try { process.kill(_crawlPid, 0); running = true; } catch { _crawlPid = null; }
   }
+  if (!running && _crawlLastStatus === "running") _crawlLastStatus = null;
   let tailLines: string[] = [];
   try {
     const content = readFileSync(IL_CRAWL_LOG, "utf8");
     tailLines = content.split("\n").filter(Boolean).slice(-30);
   } catch { /* log may not exist yet */ }
-  res.json({ running, pid: _crawlPid, tail: tailLines });
+  res.json({
+    running,
+    pid: _crawlPid,
+    tail: tailLines,
+    lastRunAt: _crawlLastRunAt?.toISOString() ?? null,
+    lastStatus: running ? "running" : (_crawlLastStatus ?? null),
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1121,6 +1139,12 @@ export function spawnExtractionCron(): { status: string; pid: number | null } {
       env: { ...process.env, PYTHONPATH: PIPELINE_DIR },
     },
   );
+  _extractionCronLastRunAt = new Date();
+  _extractionCronLastStatus = "running";
+  child.on("exit", (code) => {
+    _extractionCronLastStatus = code === 0 ? "success" : "error";
+    _extractionCronPid = null;
+  });
   child.unref();
   _extractionCronPid = child.pid ?? null;
   return { status: "started", pid: _extractionCronPid };
@@ -1140,12 +1164,19 @@ router.get("/admin/extraction-cron-status", requireAdminToken, (_req, res) => {
   if (_extractionCronPid !== null) {
     try { process.kill(_extractionCronPid, 0); running = true; } catch { _extractionCronPid = null; }
   }
+  if (!running && _extractionCronLastStatus === "running") _extractionCronLastStatus = null;
   let tailLines: string[] = [];
   try {
     const content = readFileSync(EXTRACTION_CRON_LOG, "utf8");
     tailLines = content.split("\n").filter(Boolean).slice(-30);
   } catch { /* log may not exist yet */ }
-  res.json({ running, pid: _extractionCronPid, tail: tailLines });
+  res.json({
+    running,
+    pid: _extractionCronPid,
+    tail: tailLines,
+    lastRunAt: _extractionCronLastRunAt?.toISOString() ?? null,
+    lastStatus: running ? "running" : (_extractionCronLastStatus ?? null),
+  });
 });
 
 // ---------------------------------------------------------------------------

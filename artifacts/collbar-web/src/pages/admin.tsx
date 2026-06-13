@@ -61,6 +61,8 @@ interface CronJobStatus {
   running: boolean;
   pid: number | null;
   tail: string[];
+  lastRunAt: string | null;
+  lastStatus: "running" | "success" | "error" | null;
 }
 
 interface IlCbaCoverage {
@@ -982,16 +984,20 @@ function ScheduledAutomationsCard() {
   const jobs = [
     {
       label: "IL CBA Crawl",
-      schedule: "2 AM on 1st & 15th",
+      schedule: "2 AM · 1st & 15th of month",
       running: crawlData?.running ?? false,
+      lastRunAt: crawlData?.lastRunAt ?? null,
+      lastStatus: crawlData?.lastStatus ?? null,
       tail: crawlData?.tail ?? [],
       mutate: () => runCrawl.mutate(),
       isPending: runCrawl.isPending,
     },
     {
       label: "Extraction Cron",
-      schedule: "3 AM daily",
+      schedule: "3 AM · nightly",
       running: cronData?.running ?? false,
+      lastRunAt: cronData?.lastRunAt ?? null,
+      lastStatus: cronData?.lastStatus ?? null,
       tail: cronData?.tail ?? [],
       mutate: () => runCron.mutate(),
       isPending: runCron.isPending,
@@ -999,34 +1005,55 @@ function ScheduledAutomationsCard() {
   ];
 
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-950 p-5 space-y-5">
-      {jobs.map((job) => (
-        <div key={job.label} className="space-y-2">
-          <div className="flex items-center justify-between gap-4">
-            <div className="space-y-0.5">
-              <div className="flex items-center gap-2">
-                {job.running && (
-                  <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+    <div className="rounded-lg border border-slate-800 bg-slate-950 p-5 divide-y divide-slate-800">
+      {jobs.map((job) => {
+        const statusColor =
+          job.running               ? "text-amber-400"
+          : job.lastStatus === "success" ? "text-emerald-400"
+          : job.lastStatus === "error"   ? "text-red-400"
+          : "text-slate-500";
+        const statusLabel =
+          job.running               ? "running…"
+          : job.lastStatus === "success" ? "success"
+          : job.lastStatus === "error"   ? "error"
+          : "never run";
+
+        return (
+          <div key={job.label} className="py-4 first:pt-0 last:pb-0 space-y-2">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  {job.running && (
+                    <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                  )}
+                  <span className="text-sm font-mono font-medium text-slate-200">{job.label}</span>
+                  <span className="text-xs text-slate-600">{job.schedule}</span>
+                </div>
+                <div className="flex items-center gap-3 text-xs">
+                  <span className={statusColor}>{statusLabel}</span>
+                  {job.lastRunAt && (
+                    <span className="text-slate-500">
+                      Last run: {new Date(job.lastRunAt).toLocaleString()}
+                    </span>
+                  )}
+                </div>
+                {!job.running && job.tail.length > 0 && (
+                  <div className="text-xs text-slate-600 font-mono truncate max-w-md" title={job.tail[job.tail.length - 1]}>
+                    {job.tail[job.tail.length - 1]?.slice(0, 120)}
+                  </div>
                 )}
-                <span className={`text-sm font-mono font-medium ${job.running ? "text-amber-400" : "text-slate-300"}`}>
-                  {job.label}
-                </span>
-                <span className="text-xs text-slate-600">{job.schedule}</span>
               </div>
-              <div className="text-xs text-slate-500">
-                {job.running ? "Running…" : job.tail.length > 0 ? job.tail[job.tail.length - 1]?.slice(0, 120) : "No runs yet"}
-              </div>
+              <button
+                onClick={job.mutate}
+                disabled={job.running || job.isPending}
+                className="shrink-0 text-xs px-3 py-1.5 rounded border border-slate-700 hover:border-sky-600 text-slate-400 hover:text-sky-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {job.running ? "Running…" : job.isPending ? "Starting…" : "Run now"}
+              </button>
             </div>
-            <button
-              onClick={job.mutate}
-              disabled={job.running || job.isPending}
-              className="shrink-0 text-xs px-3 py-1.5 rounded border border-slate-700 hover:border-sky-600 text-slate-400 hover:text-sky-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {job.running ? "Running…" : job.isPending ? "Starting…" : "Run now"}
-            </button>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
