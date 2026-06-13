@@ -4,7 +4,7 @@
   "il_failed": 4,
   "il_skipped": 0,
   "il_no_url": 194,
-  "last_updated": "2026-06-13T19:39:59Z",
+  "last_updated": "2026-06-13T19:41:14Z",
   "per_district": {
     "07016806060": {
       "status": "no_url",
@@ -822,6 +822,53 @@
     "20093017024": {
       "status": "failed",
       "timestamp": "2026-06-13T19:39:59Z"
+    },
+    "07016126002": {
+      "status": "found",
+      "url": "https://www.dist126.org/employee-resources/files/documents/Tuition%20Reimbursement%20Form%20-%20Teachers.pdf",
+      "found_via": "direct_crawl",
+      "storage_key": "local:/home/runner/workspace/pipeline/data/il_cba/fade5def071fb5e044fbb9926bd96e194f8942024679bd8ba60bbed9614a59e4.pdf",
+      "file_hash": "fade5def071fb5e044fbb9926bd96e194f8942024679bd8ba60bbed9614a59e4",
+      "doc_id": "79",
+      "timestamp": "2026-06-13T19:40:16Z"
+    },
+    "03025010026": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:40:16Z"
+    },
+    "41057011026": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:40:25Z"
+    },
+    "47052272026": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:40:39Z"
+    },
+    "30091037004": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:40:41Z"
+    },
+    "30091081016": {
+      "status": "found",
+      "url": "https://aj81.net/wp-content/uploads/2025/08/AJCHSEA-Contract-2025-2028-1.pdf",
+      "found_via": "direct_crawl",
+      "storage_key": "local:/home/runner/workspace/pipeline/data/il_cba/d9b77021de6bd897c354120aca0335cab16ae71de97affcd6fd1af84c19d1e3f.pdf",
+      "file_hash": "d9b77021de6bd897c354120aca0335cab16ae71de97affcd6fd1af84c19d1e3f",
+      "doc_id": "80",
+      "timestamp": "2026-06-13T19:41:01Z"
+    },
+    "28037226026": {
+      "status": "failed",
+      "timestamp": "2026-06-13T19:41:02Z"
+    },
+    "34049034004": {
+      "status": "found",
+      "url": "https://www.antioch34.com/fs/resource-manager/view/c844693b-288f-4d09-ae25-aedec8cf3e56",
+      "found_via": "direct_crawl",
+      "storage_key": "local:/home/runner/workspace/pipeline/data/il_cba/1f5a9bba87b082e061a3f6b5cfd2e100b818f58d1be21030e260ce262b7f4e1a.pdf",
+      "file_hash": "1f5a9bba87b082e061a3f6b5cfd2e100b818f58d1be21030e260ce262b7f4e1a",
+      "doc_id": "81",
+      "timestamp": "2026-06-13T19:41:14Z"
     }
   },
   "il_found_via_search": 0,
