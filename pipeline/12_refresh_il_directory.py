@@ -278,28 +278,35 @@ def run(dry_run: bool = False) -> dict:
     """
     Main refresh logic. Returns a result dict.
     Raises on unrecoverable errors.
+
+    dry_run=True: download + parse + count only. Zero DB writes (no table
+    creation, no log inserts, no district updates).
     """
     conn = common.get_db_conn()
-    _ensure_log_table(conn)
+
+    # Ensure the log table exists and read the previous hash only in live mode.
+    # dry_run must never write to DB — skip both the CREATE TABLE and the
+    # prev-hash SELECT (which can't run anyway if the table might not exist).
+    prev_hash: str | None = None
+    if not dry_run:
+        _ensure_log_table(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT file_hash FROM directory_refresh_log
+                   WHERE status IN ('success', 'no_change')
+                   ORDER BY run_at DESC LIMIT 1"""
+            )
+            prev = cur.fetchone()
+        prev_hash = prev[0] if prev else None
 
     log.info("Downloading ISBE directory …")
     data = _download_xls()
     file_hash = hashlib.sha256(data).hexdigest()
     log.info("Downloaded %d bytes, SHA-256: %s", len(data), file_hash[:16] + "…")
 
-    with conn.cursor() as cur:
-        cur.execute(
-            """SELECT file_hash FROM directory_refresh_log
-               WHERE status IN ('success', 'no_change')
-               ORDER BY run_at DESC LIMIT 1"""
-        )
-        prev = cur.fetchone()
-    prev_hash = prev[0] if prev else None
-
     if prev_hash and prev_hash == file_hash:
         log.info("File unchanged (SHA-256 match) — skipping reprocessing")
-        if not dry_run:
-            _log_run(conn, file_hash=file_hash, changed=False, status="no_change")
+        _log_run(conn, file_hash=file_hash, changed=False, status="no_change")
         conn.close()
         return {"changed": False, "status": "no_change"}
 
@@ -381,13 +388,15 @@ def main():
             )
     except Exception as exc:
         log.exception("Directory refresh failed: %s", exc)
-        try:
-            conn = common.get_db_conn()
-            _ensure_log_table(conn)
-            _log_run(conn, changed=False, status="error", error=str(exc))
-            conn.close()
-        except Exception:
-            pass
+        # Never write to DB in dry-run mode, not even error rows.
+        if not dry_run:
+            try:
+                conn = common.get_db_conn()
+                _ensure_log_table(conn)
+                _log_run(conn, changed=False, status="error", error=str(exc))
+                conn.close()
+            except Exception:
+                pass
         sys.exit(1)
 
 
