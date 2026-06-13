@@ -28,9 +28,12 @@ import common
 common.setup_logging()
 log = logging.getLogger(__name__)
 
-PROMPT_FILE = Path(__file__).parent / "prompts" / "v1.txt"
+PROMPT_FILE    = Path(__file__).parent / "prompts" / "v1.txt"
+IL_PROMPT_FILE = Path(__file__).parent / "prompts" / "v1_il.txt"
 CBA_PDF_DIR = common.DATA_DIR / "cba"
-PROMPT_VERSION = "v1"
+IL_CBA_PDF_DIR = common.DATA_DIR / "il_cba"
+PROMPT_VERSION    = "v1"
+IL_PROMPT_VERSION = "v1_il"
 MODEL = "claude-haiku-4-5"
 MAX_TEXT_CHARS = 80_000  # truncate context sent to LLM
 MAX_TOKENS = 16000
@@ -198,9 +201,10 @@ def resolve_pdf_path(source_url: str, storage_key: str) -> Optional[Path]:
     # Reconstruct from source_url
     fname = source_url.split("/")[-1] if source_url else None
     if fname:
-        candidate = CBA_PDF_DIR / fname
-        if candidate.exists():
-            return candidate
+        for cba_dir in (CBA_PDF_DIR, IL_CBA_PDF_DIR):
+            candidate = cba_dir / fname
+            if candidate.exists():
+                return candidate
 
     # Try object storage key as a local relative path
     if storage_key and not storage_key.startswith("local:"):
@@ -299,12 +303,16 @@ def get_failed_docs(conn):
     """
     Return source_document rows whose most recent extraction run has status='failed'
     and that have no successful run.  Used by --retry-failed.
+
+    Returns tuples: (id, source_url, storage_key, district_id, school_year, district_state)
     """
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT sd.id, sd.source_url, sd.storage_key, sd.district_id, sd.school_year
+        SELECT sd.id, sd.source_url, sd.storage_key, sd.district_id, sd.school_year,
+               COALESCE(d.state, 'OH') AS district_state
         FROM source_documents sd
+        LEFT JOIN districts d ON d.id = sd.district_id
         WHERE sd.doc_type = 'cba_pdf'
           AND sd.id NOT IN (
               SELECT er.source_doc_id FROM extraction_runs er
@@ -322,19 +330,28 @@ def get_failed_docs(conn):
     return rows
 
 
-def get_unprocessed_docs(conn, doc_id: Optional[int] = None, priority: bool = False):
+def get_unprocessed_docs(conn, doc_id: Optional[int] = None, priority: bool = False,
+                         state: Optional[str] = None):
     """
     Return source_document rows for cba_pdf docs with no successful extraction_run.
     If doc_id is given, return only that row.
     When priority=True, contracts with school_year >= '2023-24' (likely expiring
     2026-2027) are processed first.
+    When state is given (e.g. 'IL'), only return docs for districts in that state.
+
+    Returns tuples: (id, source_url, storage_key, district_id, school_year, district_state)
     """
     cur = conn.cursor()
+    state_filter = "AND d.state = %s" if state else ""
+    state_params: tuple = (state,) if state else ()
+
     if doc_id:
         cur.execute(
             """
-            SELECT sd.id, sd.source_url, sd.storage_key, sd.district_id, sd.school_year
+            SELECT sd.id, sd.source_url, sd.storage_key, sd.district_id, sd.school_year,
+                   COALESCE(d.state, 'OH') AS district_state
             FROM source_documents sd
+            LEFT JOIN districts d ON d.id = sd.district_id
             WHERE sd.id = %s AND sd.doc_type = 'cba_pdf'
             """,
             (doc_id,),
@@ -348,8 +365,10 @@ def get_unprocessed_docs(conn, doc_id: Optional[int] = None, priority: bool = Fa
         )
         cur.execute(
             f"""
-            SELECT sd.id, sd.source_url, sd.storage_key, sd.district_id, sd.school_year
+            SELECT sd.id, sd.source_url, sd.storage_key, sd.district_id, sd.school_year,
+                   COALESCE(d.state, 'OH') AS district_state
             FROM source_documents sd
+            LEFT JOIN districts d ON d.id = sd.district_id
             WHERE sd.doc_type = 'cba_pdf'
               AND sd.id NOT IN (
                   SELECT er.source_doc_id
@@ -357,22 +376,25 @@ def get_unprocessed_docs(conn, doc_id: Optional[int] = None, priority: bool = Fa
                   WHERE er.status = 'success'
                     AND er.source_doc_id IS NOT NULL
               )
+              {state_filter}
             {order_clause}
-            """
+            """,
+            state_params,
         )
     rows = cur.fetchall()
     cur.close()
     return rows
 
 
-def insert_extraction_run(cur, source_doc_id: int, status: str, error: Optional[str] = None) -> int:
+def insert_extraction_run(cur, source_doc_id: int, status: str, error: Optional[str] = None,
+                          prompt_version: str = PROMPT_VERSION) -> int:
     cur.execute(
         """
         INSERT INTO extraction_runs (source_doc_id, model, prompt_version, status, error)
         VALUES (%s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (source_doc_id, MODEL, PROMPT_VERSION, status, error),
+        (source_doc_id, MODEL, prompt_version, status, error),
     )
     row = cur.fetchone()
     return row[0] if row else -1
@@ -991,6 +1013,9 @@ def main():
                         help="Skip PDF extraction and LLM — re-run settlement derivation only")
     parser.add_argument("--retry-failed", action="store_true",
                         help="Requeue docs whose latest extraction run failed (no success run exists)")
+    parser.add_argument("--state", type=str, default=None, metavar="STATE",
+                        help="Restrict to districts in this state, e.g. IL or OH. "
+                             "IL districts automatically use the IL-specific prompt (v1_il.txt).")
     args = parser.parse_args()
 
     conn = common.get_db_conn()
@@ -1011,14 +1036,23 @@ def main():
         log.error("Prompt file not found: %s", PROMPT_FILE)
         sys.exit(1)
 
-    system_prompt = load_prompt()
+    # Load both OH and IL prompts so each doc can use the right one.
+    oh_prompt = load_prompt()
+    il_prompt: Optional[str] = None
+    if IL_PROMPT_FILE.exists():
+        il_prompt = IL_PROMPT_FILE.read_text(encoding="utf-8")
+        log.info("IL prompt loaded from %s", IL_PROMPT_FILE)
+    else:
+        log.warning("IL prompt file not found (%s) — IL docs will fall back to OH prompt", IL_PROMPT_FILE)
 
     if args.retry_failed:
         docs = get_failed_docs(conn)
         log.info("--retry-failed: %d docs with no success run and at least one failed run", len(docs))
     else:
-        docs = get_unprocessed_docs(conn, args.doc_id, priority=args.priority)
-        log.info("Unprocessed cba_pdf docs: %d%s", len(docs),
+        docs = get_unprocessed_docs(conn, args.doc_id, priority=args.priority,
+                                     state=args.state.upper() if args.state else None)
+        state_label = f" (state={args.state.upper()})" if args.state else ""
+        log.info("Unprocessed cba_pdf docs: %d%s%s", len(docs), state_label,
                  " (priority order: 2026-2027 expiries first)" if args.priority else "")
 
     max_docs = args.batch or args.max_docs
@@ -1040,7 +1074,16 @@ def main():
     total_cost_usd = 0.0
     cost_cap_hit = False
 
-    for source_doc_id, source_url, storage_key, district_id, school_year in docs:
+    for row in docs:
+        # Rows now carry a 6th column: district_state.  Tolerate old 5-col rows.
+        source_doc_id, source_url, storage_key, district_id, school_year = row[:5]
+        district_state: str = row[5] if len(row) > 5 else "OH"
+
+        # Pick the state-appropriate system prompt.
+        is_il = district_state == "IL"
+        system_prompt = (il_prompt if is_il and il_prompt else oh_prompt)
+        prompt_ver    = (IL_PROMPT_VERSION if is_il and il_prompt else PROMPT_VERSION)
+
         # --- Cost cap check (before LLM call) ---
         if args.cost_cap and total_cost_usd >= args.cost_cap:
             log.warning(
@@ -1052,8 +1095,9 @@ def main():
 
         attempts += 1
         log.info(
-            "[%d/%d] Processing doc %d: %s",
-            attempts, len(docs), source_doc_id, source_url or storage_key or "?"
+            "[%d/%d] Processing doc %d (%s): %s",
+            attempts, len(docs), source_doc_id, district_state,
+            source_url or storage_key or "?"
         )
 
         # --- Step 1: Resolve PDF ---
@@ -1090,7 +1134,7 @@ def main():
             continue
 
         cur = conn.cursor()
-        run_id = insert_extraction_run(cur, source_doc_id, "pending")
+        run_id = insert_extraction_run(cur, source_doc_id, "pending", prompt_version=prompt_ver)
         conn.commit()
 
         # --- Step 3: LLM call (with one retry) ---

@@ -310,12 +310,14 @@ def _search_fallback(district: dict, session: requests.Session) -> Optional[dict
     Serper and Google CSE return all organic results (not just .pdf).  We
     score every candidate URL+title against CBA keywords and give a +5 bonus
     to same-domain results and a +3 bonus when the URL ends in .pdf.
+    When homepage is None, site-scoped queries are skipped.
 
     Returns dict {url, score, found_via} or None.
     """
     name     = district["name"]
-    homepage = district["website_url"]
-    domain   = urlparse(homepage).netloc.lstrip("www.")
+    homepage = district.get("website_url") or None
+    # Derive domain only when we have a real homepage URL.
+    domain   = urlparse(homepage).netloc.lstrip("www.") if homepage else None
 
     candidate_urls: list[str] = []
     engine_used    = "none"
@@ -324,16 +326,17 @@ def _search_fallback(district: dict, session: requests.Session) -> Optional[dict
 
     # --- 1. Serper (primary — uses Google's index, reliable JSON API) ---
     if serper_key and not candidate_urls:
-        # Site-scoped with filetype hint
-        q1 = f'site:{domain} "collective bargaining" filetype:pdf'
-        log.info("  Search fallback [Serper, site+pdf]: %s", q1)
-        candidate_urls.extend(_serper_search(q1, session))
+        if domain:
+            # Site-scoped with filetype hint
+            q1 = f'site:{domain} "collective bargaining" filetype:pdf'
+            log.info("  Search fallback [Serper, site+pdf]: %s", q1)
+            candidate_urls.extend(_serper_search(q1, session))
 
-        # Broader site-scoped (catches non-.pdf doc-management links)
-        if not candidate_urls:
-            q2 = f'site:{domain} "collective bargaining" OR "negotiated agreement"'
-            log.info("  Search fallback [Serper, site-broad]: %s", q2)
-            candidate_urls.extend(_serper_search(q2, session))
+            # Broader site-scoped (catches non-.pdf doc-management links)
+            if not candidate_urls:
+                q2 = f'site:{domain} "collective bargaining" OR "negotiated agreement"'
+                log.info("  Search fallback [Serper, site-broad]: %s", q2)
+                candidate_urls.extend(_serper_search(q2, session))
 
         # Off-site: district name + state (hosted on union/state sites)
         if not candidate_urls:
@@ -348,12 +351,12 @@ def _search_fallback(district: dict, session: requests.Session) -> Optional[dict
     if not candidate_urls:
         api_key = os.environ.get("GOOGLE_CSE_API_KEY", "").strip()
         cx      = os.environ.get("GOOGLE_CSE_CX", "").strip()
-        if api_key and cx:
+        if api_key and cx and domain:
             q = f'site:{domain} "collective bargaining" filetype:pdf'
             log.info("  Search fallback [Google CSE]: %s", q)
             result = _google_cse_search(q, session, api_key, cx)
             if result is None:
-                log.warning("  Google CSE quota exhausted")
+                log.warning("  Google CSE quota exhausted — will still try DuckDuckGo")
             else:
                 candidate_urls.extend(result)
             if candidate_urls:
@@ -361,9 +364,10 @@ def _search_fallback(district: dict, session: requests.Session) -> Optional[dict
 
     # --- 3. DuckDuckGo HTML scraping ---
     if not candidate_urls:
-        q_site = f'site:{domain} "collective bargaining" filetype:pdf'
-        log.info("  Search fallback [DDG, site-scoped]: %s", q_site)
-        candidate_urls.extend(_ddg_search(q_site, session))
+        if domain:
+            q_site = f'site:{domain} "collective bargaining" filetype:pdf'
+            log.info("  Search fallback [DDG, site-scoped]: %s", q_site)
+            candidate_urls.extend(_ddg_search(q_site, session))
 
         if not candidate_urls:
             q_broad = f'"{name}" "collective bargaining agreement" filetype:pdf'
@@ -381,7 +385,7 @@ def _search_fallback(district: dict, session: requests.Session) -> Optional[dict
     scored = []
     for url in candidate_urls:
         kw_score  = _score_pdf_text(url)
-        on_domain = _same_domain(homepage, url)
+        on_domain = _same_domain(homepage, url) if homepage else False
         pdf_bonus = 3 if ".pdf" in url.lower().split("?")[0] else 0
         total     = kw_score + (5 if on_domain else 0) + pdf_bonus
         scored.append((total, url, on_domain))
@@ -872,14 +876,37 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
     districts = _load_districts(conn)
     no_url_count = _count_il_no_url(conn)
 
+    # When search-fallback is enabled AND no districts have website URLs yet,
+    # fall back to processing all IL districts using search-engine discovery.
+    # This allows the crawler to run even before the ISBE directory is loaded.
+    if search_fallback and not districts:
+        log.info(
+            "No IL districts have website URLs — using search-engine fallback for all %d districts",
+            no_url_count,
+        )
+        all_no_url = _load_il_no_url_districts(conn)
+        # Synthesise minimal district dicts (no website_url) compatible with the crawl loop
+        districts = [
+            {
+                "id":                d["id"],
+                "name":              d["name"],
+                "state_district_id": d["state_district_id"],
+                "website_url":       None,
+                "county":            None,
+                "enrollment":        None,
+                "latest_to_year":    None,
+            }
+            for d in all_no_url
+        ]
+
     if target_rcdts:
         districts = [d for d in districts if d["state_district_id"] == target_rcdts]
         if not districts:
-            log.error("District with RCDTS %s not found or has no website URL", target_rcdts)
+            log.error("District with RCDTS %s not found (or has no website URL without --search-fallback)", target_rcdts)
             sys.exit(1)
 
     log.info(
-        "IL CBA crawler starting: %d districts with URL "
+        "IL CBA crawler starting: %d districts "
         "(dry_run=%s, limit=%s, search_fallback=%s)",
         len(districts), dry_run, limit, search_fallback,
     )
@@ -929,30 +956,33 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
             log.info("Limit of %d reached — stopping", limit)
             break
 
-        log.info("[ATTEMPT] %s (%s) → %s", name, rcdts, homepage)
+        log.info("[ATTEMPT] %s (%s) → %s", name, rcdts, homepage or "(no URL — search-fallback only)")
         attempted += 1
 
-        # Per-district watchdog: SIGALRM fires if a district hangs > DISTRICT_TIMEOUT secs.
-        signal.signal(signal.SIGALRM, _district_timeout_handler)
-        signal.alarm(DISTRICT_TIMEOUT)
-        try:
-            best_pdf = _crawl_district(session, homepage, dry_run)
-        except TimeoutError:
-            signal.alarm(0)
-            log.warning("  [TIMEOUT] %s exceeded %ds — skipping", name, DISTRICT_TIMEOUT)
-            failed += 1
-            state["per_district"][rcdts] = {
-                "status":    "failed",
-                "reason":    "timeout",
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            }
-            _save_crawl_state(state)
-            continue
-        finally:
-            signal.alarm(0)
+        best_pdf = None
+        if homepage:
+            # Per-district watchdog: SIGALRM fires if a district hangs > DISTRICT_TIMEOUT secs.
+            signal.signal(signal.SIGALRM, _district_timeout_handler)
+            signal.alarm(DISTRICT_TIMEOUT)
+            try:
+                best_pdf = _crawl_district(session, homepage, dry_run)
+            except TimeoutError:
+                signal.alarm(0)
+                log.warning("  [TIMEOUT] %s exceeded %ds — skipping", name, DISTRICT_TIMEOUT)
+                failed += 1
+                state["per_district"][rcdts] = {
+                    "status":    "failed",
+                    "reason":    "timeout",
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+                _save_crawl_state(state)
+                continue
+            finally:
+                signal.alarm(0)
 
         if best_pdf is None and search_fallback:
-            log.info("  Direct crawl failed — trying search-engine fallback")
+            log.info("  %s — trying search-engine fallback",
+                     "Direct crawl failed" if homepage else "No website URL")
             best_pdf = _search_fallback(dist, session)
 
         if best_pdf is None:
