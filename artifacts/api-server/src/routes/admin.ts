@@ -1146,19 +1146,28 @@ router.get("/admin/directory-refresh-status", requireAdminToken, async (_req, re
   }
 
   try {
-    const [latestRows, countRows] = await Promise.all([
-      db.execute(sql.raw(`
+    const countRows = await db.execute(sql.raw(
+      `SELECT COUNT(*)::int AS n FROM districts WHERE state = 'IL' AND website_url IS NOT NULL`,
+    ));
+    const ilWithUrl = (countRows.rows[0] as { n: number }).n;
+
+    // directory_refresh_log is created by the Python script on first run.
+    // Return latest: null gracefully if the table doesn't exist yet.
+    let latest: Record<string, unknown> | null = null;
+    try {
+      const latestRows = await db.execute(sql.raw(`
         SELECT id, run_at, file_hash, row_count, new_districts, updated_districts,
                with_website, changed, status, error
         FROM directory_refresh_log
         ORDER BY run_at DESC LIMIT 1
-      `)),
-      db.execute(sql.raw(
-        `SELECT COUNT(*)::int AS n FROM districts WHERE state = 'IL' AND website_url IS NOT NULL`,
-      )),
-    ]);
-    const latest = (latestRows.rows[0] as Record<string, unknown>) ?? null;
-    const ilWithUrl = (countRows.rows[0] as { n: number }).n;
+      `));
+      latest = (latestRows.rows[0] as Record<string, unknown>) ?? null;
+    } catch (tableErr) {
+      const msg = String(tableErr);
+      if (!msg.includes("does not exist") && !msg.includes("relation")) throw tableErr;
+      // table not yet created — silently return null
+    }
+
     res.json({ running, pid: _refreshPid, latest, il_with_url: ilWithUrl });
   } catch (err) {
     res.status(500).json({ error: String(err) });
