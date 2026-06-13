@@ -478,8 +478,63 @@ def _b(obj, key: str) -> Optional[bool]:
 
 
 # ---------------------------------------------------------------------------
-# Settlement derivation
+# Settlement derivation — helpers
 # ---------------------------------------------------------------------------
+
+# Canonical unit-scope groups used to normalize raw LLM strings before
+# consecutive-contract pairing in the ba_min_delta path.
+_SCOPE_TEACHERS = frozenset({
+    "teacher", "teachers", "teaching", "teaching staff",
+    "certificated", "certificated staff", "certificated employees",
+    "certificated teaching staff", "certificated teaching",
+    "certified", "certified staff", "certified teaching staff",
+    "instructional", "instructional staff", "instructional employees",
+    "professional staff", "professional employees",
+    "certificated",
+})
+_SCOPE_CLASSIFIED = frozenset({
+    "classified", "classified staff", "classified employees",
+    "support", "support staff", "support employees",
+    "paraprofessional", "paraprofessionals", "para",
+    "custodial", "custodians", "custodian",
+    "secretary", "secretaries", "clerical", "maintenance",
+    "bus driver", "bus drivers", "food service",
+    "aide", "aides",
+})
+_SCOPE_ADMIN = frozenset({
+    "administrative", "administrators", "administrator",
+    "admin", "administration", "principals", "principal",
+    "supervisors", "supervisor", "director", "directors",
+    "management",
+})
+
+
+def _canonical_scope(scope: Optional[str]) -> str:
+    """
+    Normalize a raw LLM-extracted unit_scope string to a canonical group
+    ('teachers', 'classified', 'administrators', or the lowercased raw value).
+    Used for consecutive-contract pairing so that 'certificated teaching staff'
+    and 'certified staff' don't create separate non-pairable groups.
+    """
+    if not scope:
+        return "teachers"
+    s = scope.lower().strip()
+    if s in _SCOPE_TEACHERS:
+        return "teachers"
+    if s in _SCOPE_CLASSIFIED:
+        return "classified"
+    if s in _SCOPE_ADMIN:
+        return "administrators"
+    # Partial-match fallbacks
+    if any(k in s for k in ("teacher", "certificat", "certif", "instructional")):
+        return "teachers"
+    if any(k in s for k in ("classified", "support staff", "parapro", "custodial",
+                             "secretary", "aide", "clerical", "food service")):
+        return "classified"
+    if any(k in s for k in ("admin", "principal", "supervisor", "director")):
+        return "administrators"
+    return s  # unknown scope — keep as-is for grouping
+
 
 def _get_contract_provisions(cur, contract_id: int) -> dict:
     """Return compensation provisions for a contract keyed by provision_key."""
@@ -502,126 +557,306 @@ def _get_contract_provisions(cur, contract_id: int) -> dict:
     return {row[0]: {"val": row[1], "conf": row[2]} for row in cur.fetchall()}
 
 
-def _school_year(date_str: str, *, is_end: bool = False) -> Optional[str]:
-    """Convert a YYYY-MM-DD date string to 'YYYY-YY' school year format."""
+def _school_year(date_str, *, is_end: bool = False) -> Optional[str]:
+    """
+    Convert a date (YYYY-MM-DD string or datetime.date) to 'YYYY-YY' school year.
+    Ohio school year starts in July: Aug 2022 start → 2022-23; Jun 2025 end → 2024-25.
+    """
     if not date_str:
         return None
     try:
-        y = int(date_str[:4])
-        m = int(date_str[5:7]) if len(date_str) >= 7 else 7
-        # Ohio school year starts in July; a contract starting Aug 2022 → 2022-23
-        # A contract ending Jun 2025 belongs to 2024-25
+        import datetime as _dt
+        if isinstance(date_str, (_dt.date, _dt.datetime)):
+            y, m = date_str.year, date_str.month
+        else:
+            s = str(date_str)
+            y = int(s[:4])
+            m = int(s[5:7]) if len(s) >= 7 else 7
         if is_end and m <= 6:
             y -= 1
         return f"{y}-{str(y + 1)[2:]}"
-    except (ValueError, IndexError):
+    except (ValueError, IndexError, AttributeError):
         return None
 
 
 def derive_settlements(conn):
     """
-    For each (district_id, unit_scope) pair that has ≥ 2 consecutive contracts,
-    derive one settlements row per contract:
-      - method = 'cba_diff'     if stated % increases (base_salary_increase_yr1) exist
-      - method = 'ba_min_delta' if no stated %s but consecutive BA-min values allow
-                                 computing the implied increase
+    Derives settlements via two independent paths:
 
-    Only emits a settlement row when one of the above methods yields a valid value.
-    Requires district_id is not null and at least 2 contracts so the BA-min delta
-    path is possible.
+    1. 'stated'       — any contract with a base_salary_increase_yr1 provision
+                        emits a row directly.  No consecutive pair required.
+    2. 'ba_min_delta' — consecutive contract pairs (same district + normalized
+                        unit_scope, ≤ 730-day gap) where no stated % exists but
+                        BA-min values allow computing the implied increase.
+
+    For every contract evaluated, a skip reason is recorded when no settlement
+    is emitted.  A summary table is printed at the end.
     """
+    from collections import defaultdict
+    from datetime import date as _date
+
     cur = conn.cursor()
 
-    # Only process district+unit pairs with >= 2 contracts
+    # skip_reasons[reason] = count — accumulated across both passes
+    skip_reasons: dict[str, int] = {}
+    stated_emitted: set[int] = set()   # contract IDs that already produced a row
+    settlements_inserted = 0
+    contracts_evaluated = 0
+
+    def _skip(reason: str) -> None:
+        skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+
+    # -------------------------------------------------------------------------
+    # PASS 1 — 'stated' path
+    # Any contract with base_salary_increase_yr1 emits a settlement directly.
+    # Consecutive contracts are NOT required.
+    # -------------------------------------------------------------------------
     cur.execute(
         """
-        SELECT district_id, unit_scope
+        SELECT id, district_id, unit_scope, effective_start, effective_end, term_years
         FROM contracts
-        WHERE district_id IS NOT NULL
-        GROUP BY district_id, unit_scope
-        HAVING COUNT(*) >= 2
+        ORDER BY district_id NULLS LAST, effective_start NULLS LAST, id
         """
     )
-    district_units = cur.fetchall()
+    all_contracts = cur.fetchall()
+    contracts_evaluated = len(all_contracts)
 
-    settlements_inserted = 0
+    for contract_id, district_id, unit_scope, eff_start, eff_end, term_years in all_contracts:
+        if district_id is None:
+            log.debug("Contract %d skipped [stated]: no district_id", contract_id)
+            _skip("no_district_id")
+            continue
 
-    for district_id, unit_scope in district_units:
-        # Ordered list of contracts for this district+unit
+        prov = _get_contract_provisions(cur, contract_id)
+        yr1 = prov.get("base_salary_increase_yr1", {})
+
+        if not yr1:
+            log.debug(
+                "Contract %d (district=%d) skipped [stated]: no base_salary_increase_yr1",
+                contract_id, district_id,
+            )
+            _skip("stated:no_yr1_provision")
+            continue
+
+        if not eff_start:
+            log.debug(
+                "Contract %d (district=%d) skipped [stated]: missing effective_start",
+                contract_id, district_id,
+            )
+            _skip("stated:no_effective_start")
+            continue
+
+        from_year = _school_year(eff_start)
+        if not from_year:
+            log.debug(
+                "Contract %d (district=%d) skipped [stated]: cannot parse effective_start=%r",
+                contract_id, district_id, eff_start,
+            )
+            _skip("stated:unparseable_date")
+            continue
+
+        base_pct    = yr1["val"]
+        confidence  = yr1["conf"]
+        to_year     = _school_year(eff_end, is_end=True) if eff_end else None
+        yr2_val     = prov.get("base_salary_increase_yr2", {}).get("val")
+        yr3_val     = prov.get("base_salary_increase_yr3", {}).get("val")
+        off_sched   = prov.get("off_schedule_bonus_yr1", {}).get("val")
+
+        try:
+            cur.execute(
+                """
+                INSERT INTO settlements
+                    (district_id, from_year, to_year, base_increase_pct,
+                     year2_pct, year3_pct, off_schedule_payment,
+                     term_years, method, confidence)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (district_id, from_year, to_year) DO NOTHING
+                """,
+                (
+                    district_id,
+                    from_year,
+                    to_year or from_year,
+                    base_pct,
+                    yr2_val,
+                    yr3_val,
+                    off_sched,
+                    term_years,
+                    "stated",
+                    confidence,
+                ),
+            )
+            if cur.rowcount > 0:
+                settlements_inserted += 1
+                stated_emitted.add(contract_id)
+                log.info(
+                    "Settlement [stated] district=%d contract=%d %s→%s "
+                    "base=%.2f%% yr2=%s yr3=%s conf=%.2f",
+                    district_id, contract_id, from_year, to_year or from_year,
+                    base_pct,
+                    f"{yr2_val:.2f}%" if yr2_val is not None else "—",
+                    f"{yr3_val:.2f}%" if yr3_val is not None else "—",
+                    confidence,
+                )
+            else:
+                log.debug(
+                    "Contract %d (district=%d) [stated]: conflict — %s→%s already exists",
+                    contract_id, district_id, from_year, to_year or from_year,
+                )
+                stated_emitted.add(contract_id)  # still counts as handled
+                _skip("stated:conflict_already_exists")
+        except Exception as e:
+            log.warning("Settlement insert error for contract %d: %s", contract_id, e)
+            _skip("stated:insert_error")
+
+    conn.commit()
+
+    # -------------------------------------------------------------------------
+    # PASS 2 — 'ba_min_delta' path
+    # Consecutive pairs (same district + canonical unit_scope, ≤ 730-day gap)
+    # where no stated % exists but BA-min values are present.
+    # unit_scope is normalized via _canonical_scope() before grouping so that
+    # e.g. "certificated teaching staff" and "teachers" share a group.
+    # -------------------------------------------------------------------------
+
+    # Build (district_id, canonical_scope) → [raw unit_scopes]
+    canon_groups: dict[tuple, list] = defaultdict(list)
+    for _, district_id, unit_scope, *_ in all_contracts:
+        if district_id is None:
+            continue
+        canon = _canonical_scope(unit_scope)
+        raw_scopes = canon_groups[(district_id, canon)]
+        if unit_scope not in raw_scopes:
+            raw_scopes.append(unit_scope)
+
+    for (district_id, canon_scope), raw_scopes in canon_groups.items():
+        # Fetch all contracts across all raw unit_scopes that share this canonical scope
+        placeholders = ", ".join(["%s"] * len(raw_scopes))
         cur.execute(
-            """
-            SELECT id, effective_start, effective_end, term_years
+            f"""
+            SELECT id, effective_start, effective_end, term_years, unit_scope
             FROM contracts
-            WHERE district_id = %s AND unit_scope = %s
+            WHERE district_id = %s AND unit_scope IN ({placeholders})
             ORDER BY effective_start NULLS LAST, id
             """,
-            (district_id, unit_scope),
+            [district_id] + raw_scopes,
         )
-        contracts = cur.fetchall()  # [(id, eff_start, eff_end, term_years)]
+        group_contracts = cur.fetchall()
 
-        # State carried across consecutive contract iterations
         prev_ba_min: Optional[float] = None
         prev_ba_conf: float = 0.5
-        prev_eff_end: Optional[str] = None   # effective_end of the prior contract
+        prev_eff_end: Optional[str] = None
 
-        for i, (contract_id, eff_start, eff_end, term_years) in enumerate(contracts):
+        for i, (contract_id, eff_start, eff_end, term_years, unit_scope) in enumerate(group_contracts):
             prov = _get_contract_provisions(cur, contract_id)
+            ba_min   = prov.get("ba_min_salary", {}).get("val")
+            yr1      = prov.get("base_salary_increase_yr1", {})
 
-            ba_min = prov.get("ba_min_salary", {}).get("val")
-            yr1 = prov.get("base_salary_increase_yr1", {})
-            yr2_val = prov.get("base_salary_increase_yr2", {}).get("val")
-            yr3_val = prov.get("base_salary_increase_yr3", {}).get("val")
-            off_sched = prov.get("off_schedule_bonus_yr1", {}).get("val")
+            # Update running state (used by the NEXT iteration)
+            next_ba_min  = ba_min
+            next_ba_conf = prov.get("ba_min_salary", {}).get("conf", 0.6) if ba_min is not None else 0.5
+            next_eff_end = eff_end or eff_start
 
-            # Determine whether this contract is temporally adjacent to the prior one.
-            # Adjacent means the gap between prev_eff_end (or prev_eff_start) and this
-            # contract's eff_start is ≤ 2 years (730 days).  Non-adjacent pairs cannot
-            # use BA-min delta because the salary change may span an intervening contract.
-            is_adjacent = False
-            if i > 0 and eff_start and prev_eff_end:
-                try:
-                    from datetime import date as _date
-                    d_start = _date.fromisoformat(eff_start)
-                    d_prev_end = _date.fromisoformat(prev_eff_end)
-                    gap_days = (d_start - d_prev_end).days
-                    is_adjacent = abs(gap_days) <= 730  # within 2 years
-                except (ValueError, TypeError):
-                    is_adjacent = False
-
-            base_pct: Optional[float] = None
-            method: Optional[str] = None
-            confidence: float = 0.5
+            if contract_id in stated_emitted:
+                # Already handled by stated path — still update state for adjacency tracking
+                prev_ba_min, prev_ba_conf, prev_eff_end = next_ba_min, next_ba_conf, next_eff_end
+                continue
 
             if yr1:
-                # Stated percentage increases found in this contract → cba_diff
-                base_pct = yr1["val"]
-                method = "cba_diff"
-                confidence = yr1["conf"]
-            elif is_adjacent and prev_ba_min is not None and ba_min is not None and prev_ba_min > 0:
-                # No stated %s but contracts are adjacent → compute BA-min delta
-                base_pct = round((ba_min - prev_ba_min) / prev_ba_min * 100, 2)
-                method = "ba_min_delta"
-                confidence = round(
-                    (prov.get("ba_min_salary", {}).get("conf", 0.6) + prev_ba_conf) / 2, 2
+                # Has stated yr1 but wasn't emitted via stated (e.g. no district_id was
+                # later resolved) — skip; don't double-count.
+                prev_ba_min, prev_ba_conf, prev_eff_end = next_ba_min, next_ba_conf, next_eff_end
+                continue
+
+            # Need to be the second+ contract in an adjacent pair
+            if i == 0:
+                log.debug(
+                    "Contract %d (district=%d scope=%r) skipped [ba_min_delta]: first in group",
+                    contract_id, district_id, unit_scope,
                 )
+                _skip("ba_min_delta:first_in_group")
+                prev_ba_min, prev_ba_conf, prev_eff_end = next_ba_min, next_ba_conf, next_eff_end
+                continue
 
-            # Update state for the next iteration
-            if ba_min is not None:
-                prev_ba_min = ba_min
-                prev_ba_conf = prov.get("ba_min_salary", {}).get("conf", 0.6)
+            # Check adjacency (≤ 730-day gap between prev end and this start)
+            is_adjacent = False
+            if eff_start and prev_eff_end:
+                try:
+                    def _to_date(v):
+                        import datetime as _dt2
+                        if isinstance(v, (_dt2.date, _dt2.datetime)):
+                            return v if isinstance(v, _dt2.date) else v.date()
+                        return _date.fromisoformat(str(v))
+                    gap_days = (_to_date(eff_start) - _to_date(prev_eff_end)).days
+                    is_adjacent = abs(gap_days) <= 730
+                    if not is_adjacent:
+                        log.debug(
+                            "Contract %d (district=%d scope=%r) skipped [ba_min_delta]: "
+                            "gap %d days > 730",
+                            contract_id, district_id, unit_scope, gap_days,
+                        )
+                        _skip("ba_min_delta:gap_too_large")
+                except (ValueError, TypeError):
+                    _skip("ba_min_delta:date_parse_error")
             else:
-                # No BA-min for this contract — reset so next contract can't use stale value
-                prev_ba_min = None
-            prev_eff_end = eff_end or eff_start  # fall back to start if no end date
+                log.debug(
+                    "Contract %d (district=%d scope=%r) skipped [ba_min_delta]: "
+                    "missing date for adjacency check",
+                    contract_id, district_id, unit_scope,
+                )
+                _skip("ba_min_delta:missing_date")
 
-            # Skip if we couldn't determine a wage change
-            if method is None or base_pct is None:
+            if not is_adjacent:
+                prev_ba_min, prev_ba_conf, prev_eff_end = next_ba_min, next_ba_conf, next_eff_end
+                continue
+
+            if prev_ba_min is None:
+                log.debug(
+                    "Contract %d (district=%d scope=%r) skipped [ba_min_delta]: "
+                    "no ba_min on prior contract",
+                    contract_id, district_id, unit_scope,
+                )
+                _skip("ba_min_delta:no_prev_ba_min")
+                prev_ba_min, prev_ba_conf, prev_eff_end = next_ba_min, next_ba_conf, next_eff_end
+                continue
+
+            if ba_min is None:
+                log.debug(
+                    "Contract %d (district=%d scope=%r) skipped [ba_min_delta]: "
+                    "no ba_min on this contract",
+                    contract_id, district_id, unit_scope,
+                )
+                _skip("ba_min_delta:no_current_ba_min")
+                prev_ba_min = None  # reset chain — can't use stale value
+                prev_ba_conf, prev_eff_end = next_ba_conf, next_eff_end
+                continue
+
+            if prev_ba_min <= 0:
+                _skip("ba_min_delta:prev_ba_min_nonpositive")
+                prev_ba_min, prev_ba_conf, prev_eff_end = next_ba_min, next_ba_conf, next_eff_end
+                continue
+
+            if not eff_start:
+                log.debug(
+                    "Contract %d (district=%d scope=%r) skipped [ba_min_delta]: "
+                    "no effective_start",
+                    contract_id, district_id, unit_scope,
+                )
+                _skip("ba_min_delta:no_effective_start")
+                prev_ba_min, prev_ba_conf, prev_eff_end = next_ba_min, next_ba_conf, next_eff_end
                 continue
 
             from_year = _school_year(eff_start)
-            to_year = _school_year(eff_end, is_end=True)
             if not from_year:
+                _skip("ba_min_delta:unparseable_date")
+                prev_ba_min, prev_ba_conf, prev_eff_end = next_ba_min, next_ba_conf, next_eff_end
                 continue
+
+            base_pct   = round((ba_min - prev_ba_min) / prev_ba_min * 100, 2)
+            confidence = round((next_ba_conf + prev_ba_conf) / 2, 2)
+            to_year    = _school_year(eff_end, is_end=True) if eff_end else None
+            yr2_val    = prov.get("base_salary_increase_yr2", {}).get("val")
+            yr3_val    = prov.get("base_salary_increase_yr3", {}).get("val")
+            off_sched  = prov.get("off_schedule_bonus_yr1", {}).get("val")
 
             try:
                 cur.execute(
@@ -642,17 +877,52 @@ def derive_settlements(conn):
                         yr3_val,
                         off_sched,
                         term_years,
-                        method,
+                        "ba_min_delta",
                         confidence,
                     ),
                 )
-                settlements_inserted += 1
+                if cur.rowcount > 0:
+                    settlements_inserted += 1
+                    log.info(
+                        "Settlement [ba_min_delta] district=%d contract=%d %s→%s "
+                        "base=%.2f%% (ba_min %.0f→%.0f) conf=%.2f",
+                        district_id, contract_id, from_year, to_year or from_year,
+                        base_pct, prev_ba_min, ba_min, confidence,
+                    )
+                else:
+                    _skip("ba_min_delta:conflict_already_exists")
             except Exception as e:
-                log.debug("Settlement insert error for contract %d: %s", contract_id, e)
+                log.warning("Settlement insert error for contract %d: %s", contract_id, e)
+                _skip("ba_min_delta:insert_error")
+
+            prev_ba_min, prev_ba_conf, prev_eff_end = next_ba_min, next_ba_conf, next_eff_end
 
     conn.commit()
     cur.close()
-    log.info("Settlements derived: %d (from %d district+unit pairs)", settlements_inserted, len(district_units))
+
+    # -------------------------------------------------------------------------
+    # Skip-reason summary table
+    # -------------------------------------------------------------------------
+    total_skips = sum(skip_reasons.values())
+    print()
+    print("  Settlement derivation — skip-reason summary")
+    print(f"  {'Reason':<48} {'Count':>6}")
+    print(f"  {'-'*48} {'-'*6}")
+    if skip_reasons:
+        for reason, count in sorted(skip_reasons.items(), key=lambda x: -x[1]):
+            print(f"  {reason:<48} {count:>6,}")
+    else:
+        print("  (no skips)")
+    print(f"  {'-'*48} {'-'*6}")
+    print(f"  {'Contracts evaluated':<48} {contracts_evaluated:>6,}")
+    print(f"  {'Total skip events':<48} {total_skips:>6,}")
+    print(f"  {'Settlements inserted':<48} {settlements_inserted:>6,}")
+    print()
+
+    log.info(
+        "Settlements derived: %d (evaluated %d contracts, %d skip events)",
+        settlements_inserted, contracts_evaluated, total_skips,
+    )
     return settlements_inserted
 
 
@@ -674,14 +944,29 @@ def main():
                         help="Hard-stop when accumulated LLM cost exceeds USD (0 = no cap)")
     parser.add_argument("--priority", action="store_true",
                         help="Process contracts expiring 2026-2027 first (school_year >= 2023-24)")
+    parser.add_argument("--derive-only", action="store_true",
+                        help="Skip PDF extraction and LLM — re-run settlement derivation only")
     args = parser.parse_args()
+
+    conn = common.get_db_conn()
+
+    # --derive-only: skip PDF extraction and LLM, jump straight to derivation
+    if args.derive_only:
+        log.info("--derive-only: skipping extraction, re-running settlement derivation")
+        settlements_derived = derive_settlements(conn)
+        conn.close()
+        print("\n" + "=" * 60)
+        print("  Derive-only run")
+        print("=" * 60)
+        print(f"  Settlements derived     : {settlements_derived:>8,}")
+        print("=" * 60 + "\n")
+        return
 
     if not PROMPT_FILE.exists():
         log.error("Prompt file not found: %s", PROMPT_FILE)
         sys.exit(1)
 
     system_prompt = load_prompt()
-    conn = common.get_db_conn()
 
     docs = get_unprocessed_docs(conn, args.doc_id, priority=args.priority)
     log.info("Unprocessed cba_pdf docs: %d%s", len(docs),
