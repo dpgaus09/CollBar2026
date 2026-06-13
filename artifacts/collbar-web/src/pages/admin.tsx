@@ -57,6 +57,12 @@ interface ExtractionReport {
   stateRunMap: Record<string, Record<string, number>>;
 }
 
+interface CronJobStatus {
+  running: boolean;
+  pid: number | null;
+  tail: string[];
+}
+
 interface IlCbaCoverage {
   districtsWithUrl: number;
   attempted: number;
@@ -279,6 +285,32 @@ function useDirectoryRefreshStatus() {
           return r.json();
         },
       ),
+    refetchInterval: (query) => (query.state.data?.running ? 3_000 : 30_000),
+    retry: false,
+  });
+}
+
+function useIlCrawlStatus() {
+  return useQuery<CronJobStatus>({
+    queryKey: ["/api/admin/il-crawl-status"],
+    queryFn: () =>
+      fetch(apiUrl("/api/admin/il-crawl-status"), { credentials: "include" }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    refetchInterval: (query) => (query.state.data?.running ? 3_000 : 30_000),
+    retry: false,
+  });
+}
+
+function useExtractionCronStatus() {
+  return useQuery<CronJobStatus>({
+    queryKey: ["/api/admin/extraction-cron-status"],
+    queryFn: () =>
+      fetch(apiUrl("/api/admin/extraction-cron-status"), { credentials: "include" }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
     refetchInterval: (query) => (query.state.data?.running ? 3_000 : 30_000),
     retry: false,
   });

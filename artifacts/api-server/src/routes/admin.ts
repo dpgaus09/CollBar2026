@@ -1030,52 +1030,52 @@ router.get("/admin/il-eis-crosscheck", requireAdminToken, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /admin/start-il-crawl
-// Spawns the IL CBA crawler as a detached child process of the API server
-// (which is a persistent Replit workflow) so it survives tool-call boundaries.
+// IL CBA Crawler — exported spawn helper (used by cron in index.ts) + routes
 // ---------------------------------------------------------------------------
 
 const PIPELINE_DIR = join(process.cwd(), "..", "..", "pipeline");
 const IL_CRAWL_LOG = join(PIPELINE_DIR, "logs", "il_cba_crawl.log");
+const EXTRACTION_CRON_LOG = join(PIPELINE_DIR, "logs", "extraction_cron.log");
 
 let _crawlPid: number | null = null;
+let _extractionCronPid: number | null = null;
 
-router.post("/admin/start-il-crawl", requireAdminToken, (req, res) => {
+export function spawnIlCrawl(extraArgs: string[] = []): { status: string; pid: number | null } {
   if (_crawlPid !== null) {
-    // Check if still alive
     try {
       process.kill(_crawlPid, 0);
-      res.json({ status: "already_running", pid: _crawlPid });
-      return;
+      return { status: "already_running", pid: _crawlPid };
     } catch {
       _crawlPid = null;
     }
   }
 
-  try {
-    mkdirSync(join(PIPELINE_DIR, "logs"), { recursive: true });
-    // openSync gives a real fd that spawn can accept in the stdio array
-    const logFd = openSync(IL_CRAWL_LOG, "a");
+  mkdirSync(join(PIPELINE_DIR, "logs"), { recursive: true });
+  const logFd = openSync(IL_CRAWL_LOG, "a");
 
+  const child = spawn(
+    "python3",
+    ["-u", join(PIPELINE_DIR, "11_crawl_il_cbas.py"), ...extraArgs],
+    {
+      cwd: PIPELINE_DIR,
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: { ...process.env, PYTHONPATH: PIPELINE_DIR },
+    },
+  );
+  child.unref();
+  _crawlPid = child.pid ?? null;
+  return { status: "started", pid: _crawlPid };
+}
+
+router.post("/admin/start-il-crawl", requireAdminToken, (req, res) => {
+  try {
     const args = (req.body as Record<string, string | boolean>);
     const extraArgs: string[] = [];
     if (args?.search_fallback) extraArgs.push("--search-fallback");
     if (args?.limit) extraArgs.push("--limit", String(args.limit));
-
-    const child = spawn(
-      "python3",
-      ["-u", join(PIPELINE_DIR, "11_crawl_il_cbas.py"), ...extraArgs],
-      {
-        cwd: PIPELINE_DIR,
-        detached: true,
-        stdio: ["ignore", logFd, logFd],
-        env: { ...process.env, PYTHONPATH: PIPELINE_DIR },
-      },
-    );
-    child.unref();
-    _crawlPid = child.pid ?? null;
-
-    res.json({ status: "started", pid: _crawlPid, log: IL_CRAWL_LOG });
+    const result = spawnIlCrawl(extraArgs);
+    res.json({ ...result, log: IL_CRAWL_LOG });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -1092,6 +1092,60 @@ router.get("/admin/il-crawl-status", requireAdminToken, (_req, res) => {
     tailLines = content.split("\n").filter(Boolean).slice(-30);
   } catch { /* log may not exist yet */ }
   res.json({ running, pid: _crawlPid, tail: tailLines });
+});
+
+// ---------------------------------------------------------------------------
+// Extraction Cron — exported spawn helper (used by cron in index.ts) + routes
+// ---------------------------------------------------------------------------
+
+export function spawnExtractionCron(): { status: string; pid: number | null } {
+  if (_extractionCronPid !== null) {
+    try {
+      process.kill(_extractionCronPid, 0);
+      return { status: "already_running", pid: _extractionCronPid };
+    } catch {
+      _extractionCronPid = null;
+    }
+  }
+
+  mkdirSync(join(PIPELINE_DIR, "logs"), { recursive: true });
+  const logFd = openSync(EXTRACTION_CRON_LOG, "a");
+
+  const child = spawn(
+    "python3",
+    ["-u", join(PIPELINE_DIR, "08_cron_incremental.py")],
+    {
+      cwd: PIPELINE_DIR,
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: { ...process.env, PYTHONPATH: PIPELINE_DIR },
+    },
+  );
+  child.unref();
+  _extractionCronPid = child.pid ?? null;
+  return { status: "started", pid: _extractionCronPid };
+}
+
+router.post("/admin/run-extraction-cron", requireAdminToken, (_req, res) => {
+  try {
+    const result = spawnExtractionCron();
+    res.json({ ...result, log: EXTRACTION_CRON_LOG });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+router.get("/admin/extraction-cron-status", requireAdminToken, (_req, res) => {
+  let running = false;
+  if (_extractionCronPid !== null) {
+    try { process.kill(_extractionCronPid, 0); running = true; } catch { _extractionCronPid = null; }
+  }
+  let tailLines: string[] = [];
+  try {
+    const content = readFileSync(EXTRACTION_CRON_LOG, "utf8");
+    tailLines = content.split("\n").filter(Boolean).slice(-30);
+  } catch { /* log may not exist yet */ }
+  res.json({ running, pid: _extractionCronPid, tail: tailLines });
 });
 
 // ---------------------------------------------------------------------------

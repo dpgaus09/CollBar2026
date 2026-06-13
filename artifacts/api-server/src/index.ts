@@ -1,7 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { schedule } from "node-cron";
-import { spawnDirectoryRefresh } from "./routes/admin";
+import { spawnDirectoryRefresh, spawnExtractionCron, spawnIlCrawl } from "./routes/admin";
 
 const rawPort = process.env["PORT"];
 
@@ -36,3 +36,25 @@ schedule(
   { timezone: "America/Chicago" },
 );
 logger.info("Cron registered: ISBE directory refresh at 07:00 America/Chicago daily");
+
+// Nightly IL extraction cron — 3:00 AM America/Chicago
+schedule(
+  "0 3 * * *",
+  () => {
+    logger.info("Cron: starting nightly extraction cron");
+    spawnExtractionCron();
+  },
+  { timezone: "America/Chicago" },
+);
+logger.info("Cron registered: extraction cron at 03:00 America/Chicago daily");
+
+// Weekly IL CBA crawl — 2:00 AM every Sunday America/Chicago
+schedule(
+  "0 2 * * 0",
+  () => {
+    logger.info("Cron: starting weekly IL CBA crawl");
+    spawnIlCrawl();
+  },
+  { timezone: "America/Chicago" },
+);
+logger.info("Cron registered: IL CBA crawl at 02:00 America/Chicago every Sunday");
