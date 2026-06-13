@@ -76,27 +76,9 @@ async function getTableCounts(): Promise<Record<string, number>> {
 }
 
 // ---------------------------------------------------------------------------
-// In-memory rate limiter for /admin/login (max 5 attempts per 60 s per IP)
-// ---------------------------------------------------------------------------
-const _loginAttempts = new Map<string, { count: number; resetAt: number }>();
-const _LOGIN_RATE_MAX = 5;
-const _LOGIN_RATE_WINDOW_MS = 60_000;
-
-function loginRateLimited(ip: string): boolean {
-  const now = Date.now();
-  const entry = _loginAttempts.get(ip);
-  if (!entry || entry.resetAt < now) {
-    _loginAttempts.set(ip, { count: 1, resetAt: now + _LOGIN_RATE_WINDOW_MS });
-    return false;
-  }
-  entry.count += 1;
-  return entry.count > _LOGIN_RATE_MAX;
-}
-
-// ---------------------------------------------------------------------------
 // Admin session middleware
-// Checks that the request carries a valid admin session cookie (set via
-// POST /admin/login). No secrets are exposed to the client bundle.
+// Checks that the request carries a valid admin session (set via
+// GET /api/auth/replit/callback after Replit OIDC authentication).
 // ---------------------------------------------------------------------------
 function requireAdminToken(req: Request, res: Response, next: NextFunction): void {
   if (req.session.adminAuthenticated) {
@@ -105,35 +87,6 @@ function requireAdminToken(req: Request, res: Response, next: NextFunction): voi
   }
   res.status(401).json({ error: "Unauthorized: admin login required" });
 }
-
-// ---------------------------------------------------------------------------
-// POST /admin/login — exchange ADMIN_TOKEN for a session cookie
-// ---------------------------------------------------------------------------
-router.post("/admin/login", (req, res) => {
-  const ip = req.ip ?? req.socket?.remoteAddress ?? "unknown";
-  if (loginRateLimited(ip)) {
-    res.status(429).json({ error: "Too many login attempts — try again in a minute" });
-    return;
-  }
-
-  const { token } = req.body as { token?: string };
-  const adminToken = process.env.ADMIN_TOKEN;
-
-  if (!adminToken) {
-    res
-      .status(503)
-      .json({ error: "Admin auth not configured on server. Set the ADMIN_TOKEN environment variable." });
-    return;
-  }
-
-  if (!token || token !== adminToken) {
-    res.status(401).json({ error: "Invalid token" });
-    return;
-  }
-
-  req.session.adminAuthenticated = true;
-  res.json({ ok: true });
-});
 
 // ---------------------------------------------------------------------------
 // GET /admin/session — check if the current session is authenticated
@@ -1254,6 +1207,111 @@ router.get("/admin/directory-refresh-status", requireAdminToken, async (_req, re
     }
 
     res.json({ running, pid: _refreshPid, latest, il_with_url: ilWithUrl });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Customer management endpoints (approved_customers table)
+// ---------------------------------------------------------------------------
+
+// GET /admin/customers — list all customers
+router.get("/admin/customers", requireAdminToken, async (_req, res) => {
+  try {
+    const rows = await db.execute(
+      sql`SELECT id, name, email, active, district_id, created_at, last_sign_in_at
+          FROM approved_customers
+          ORDER BY created_at DESC`,
+    );
+    res.json({ customers: rows.rows });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /admin/customers — add a new approved customer
+router.post("/admin/customers", requireAdminToken, async (req, res) => {
+  const { name, email, district_id } = req.body as {
+    name?: string;
+    email?: string;
+    district_id?: number | null;
+  };
+  if (!name?.trim() || !email?.includes("@")) {
+    res.status(400).json({ error: "Name and valid email are required" });
+    return;
+  }
+  const normalEmail = email.toLowerCase().trim();
+  try {
+    const rows = await db.execute(
+      sql`INSERT INTO approved_customers (name, email, district_id)
+          VALUES (${name.trim()}, ${normalEmail}, ${district_id ?? null})
+          RETURNING id, name, email, active, district_id, created_at, last_sign_in_at`,
+    );
+    res.json({ customer: rows.rows[0] });
+  } catch (err) {
+    const msg = String(err);
+    if (msg.includes("unique") || msg.includes("duplicate")) {
+      res.status(409).json({ error: "This email is already registered" });
+    } else {
+      res.status(500).json({ error: msg });
+    }
+  }
+});
+
+// PATCH /admin/customers/:id — update name, district, or active status
+router.patch("/admin/customers/:id", requireAdminToken, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) {
+    res.status(400).json({ error: "Valid numeric id required" });
+    return;
+  }
+  const { active, name, district_id } = req.body as {
+    active?: boolean;
+    name?: string;
+    district_id?: number | null;
+  };
+
+  try {
+    if (active !== undefined) {
+      await db.execute(
+        sql`UPDATE approved_customers SET active = ${active} WHERE id = ${id}`,
+      );
+    }
+    if (name !== undefined) {
+      await db.execute(
+        sql`UPDATE approved_customers SET name = ${name.trim()} WHERE id = ${id}`,
+      );
+    }
+    if (district_id !== undefined) {
+      await db.execute(
+        sql`UPDATE approved_customers SET district_id = ${district_id ?? null} WHERE id = ${id}`,
+      );
+    }
+    const updated = await db.execute(
+      sql`SELECT id, name, email, active, district_id, created_at, last_sign_in_at
+          FROM approved_customers WHERE id = ${id}`,
+    );
+    if (updated.rows.length === 0) {
+      res.status(404).json({ error: "Customer not found" });
+      return;
+    }
+    res.json({ customer: updated.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// DELETE /admin/customers/:id — remove a customer
+router.delete("/admin/customers/:id", requireAdminToken, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) {
+    res.status(400).json({ error: "Valid numeric id required" });
+    return;
+  }
+  try {
+    await db.execute(sql`DELETE FROM approved_customers WHERE id = ${id}`);
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

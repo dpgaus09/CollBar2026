@@ -2,6 +2,7 @@ import express, { type Express } from "express";
 import cors from "cors";
 import session from "express-session";
 import pinoHttp from "pino-http";
+import passport from "passport";
 import router from "./routes";
 import publicHtmlRouter from "./routes/public-html";
 import { logger } from "./lib/logger";
@@ -10,7 +11,6 @@ import { sql } from "drizzle-orm";
 
 const isProd = process.env.NODE_ENV === "production";
 
-// Fail closed in production — never use a predictable fallback secret
 const sessionSecret = process.env.SESSION_SECRET;
 if (isProd && !sessionSecret) {
   throw new Error(
@@ -57,6 +57,11 @@ app.use(
   }),
 );
 
+// Passport initialization — required for Google OAuth strategy.
+// We do NOT use passport.session() — session management is handled
+// directly via express-session in the auth route callbacks.
+app.use(passport.initialize());
+
 // ---------------------------------------------------------------------------
 // Security headers — applied to every response
 // ---------------------------------------------------------------------------
@@ -96,20 +101,31 @@ app.use(publicHtmlRouter);
 
 app.use("/api", router);
 
-// Seed admin user on startup (idempotent)
-async function seedAdminUser(): Promise<void> {
+// ---------------------------------------------------------------------------
+// Startup migrations — idempotent DDL changes applied on every restart.
+// Delay slightly so the DB connection pool is fully ready.
+// ---------------------------------------------------------------------------
+async function runMigrations(): Promise<void> {
   try {
     await db.execute(sql`
-      INSERT INTO users (email, role)
-      VALUES ('david@collbar.io', 'admin')
-      ON CONFLICT (email) DO NOTHING
+      CREATE TABLE IF NOT EXISTS approved_customers (
+        id BIGSERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL,
+        active BOOLEAN NOT NULL DEFAULT true,
+        district_id BIGINT REFERENCES districts(id),
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        last_sign_in_at TIMESTAMPTZ,
+        CONSTRAINT approved_customers_email_unique UNIQUE (email)
+      )
     `);
-    logger.info("Admin user seed: david@collbar.io ensured");
+    logger.info("Migration OK: approved_customers table ensured");
   } catch (err) {
-    logger.warn({ err }, "Failed to seed admin user (will retry on next restart)");
+    logger.warn({ err }, "Migration failed — will retry on next restart");
   }
 }
 
-seedAdminUser().catch(() => {});
+// Run after event loop yields so server is fully initialised first
+setImmediate(() => { runMigrations().catch(() => {}); });
 
 export default app;

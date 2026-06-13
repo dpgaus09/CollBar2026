@@ -1,8 +1,14 @@
 import { Router, type IRouter, type Request, type Response } from "express";
-import { randomBytes } from "crypto";
+import * as oidc from "openid-client";
+import passport from "passport";
+import { Strategy as GoogleStrategy } from "passport-google-oauth20";
+import type { Profile as GoogleProfile } from "passport-google-oauth20";
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 
+// ============================================================================
+// Session type augmentation
+// ============================================================================
 declare module "express-session" {
   interface SessionData {
     userId?: number;
@@ -10,220 +16,289 @@ declare module "express-session" {
     userDistrictId?: number | null;
     userEmail?: string;
     userPlan?: "free" | "pro";
+    adminAuthenticated?: boolean;
+    // Temporary storage for Replit OIDC PKCE flow
+    _oidcCodeVerifier?: string;
+    _oidcNonce?: string;
+    _oidcState?: string;
   }
 }
 
 const router: IRouter = Router();
 
-interface MagicLinkEntry {
-  userId: number;
-  expiresAt: number;
+// ============================================================================
+// Helpers
+// ============================================================================
+
+function getOrigin(req: Request): string {
+  const proto =
+    (req.headers["x-forwarded-proto"] as string | undefined) ?? "https";
+  const host =
+    (req.headers["x-forwarded-host"] as string | undefined) ??
+    req.headers.host ??
+    "localhost";
+  return `${proto}://${host}`;
 }
 
-interface RateLimitEntry {
-  count: number;
-  windowStart: number;
-}
+// ============================================================================
+// Google OAuth — customer (district user) sign-in
+// Email must be in approved_customers where active = true.
+// ============================================================================
 
-const magicLinks = new Map<string, MagicLinkEntry>();
-const rateLimits = new Map<string, RateLimitEntry>();
-
-const TOKEN_EXPIRY_MS = 15 * 60 * 1000;
-const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
-const RATE_LIMIT_MAX = 5;
-
-function cleanupExpired(): void {
-  const now = Date.now();
-  for (const [t, e] of magicLinks.entries()) {
-    if (e.expiresAt < now) magicLinks.delete(t);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Email delivery via Resend (production) or response body (development)
-// ---------------------------------------------------------------------------
-
-async function sendMagicLinkEmail(to: string, link: string): Promise<void> {
-  const apiKey = process.env.RESEND_API_KEY;
-  const fromAddress = process.env.RESEND_FROM_ADDRESS ?? "CollBar <noreply@collbar.io>";
-
-  if (!apiKey) {
-    throw new Error(
-      "RESEND_API_KEY environment variable is not set. " +
-        "Configure it in the Replit Secrets panel to enable email delivery.",
-    );
-  }
-
-  const res = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
+passport.use(
+  "google",
+  new GoogleStrategy(
+    {
+      clientID: process.env.GOOGLE_CLIENT_ID ?? "GOOGLE_CLIENT_ID_NOT_SET",
+      clientSecret:
+        process.env.GOOGLE_CLIENT_SECRET ?? "GOOGLE_CLIENT_SECRET_NOT_SET",
+      // Relative URL — Express trust proxy setting reconstructs the absolute URL
+      callbackURL: "/api/auth/google/callback",
+      proxy: true,
+      scope: ["email", "profile"],
     },
-    body: JSON.stringify({
-      from: fromAddress,
-      to: [to],
-      subject: "Your CollBar sign-in link",
-      html: `
-        <p>Click the link below to sign in to CollBar:</p>
-        <p><a href="${link}" style="display:inline-block;padding:12px 24px;background:#1d4ed8;color:#fff;border-radius:6px;text-decoration:none;font-family:sans-serif;">Sign in to CollBar →</a></p>
-        <p style="color:#64748b;font-size:12px;">This link expires in 15 minutes and can only be used once. If you did not request this, ignore this email.</p>
-      `,
-      text: `Sign in to CollBar:\n${link}\n\nThis link expires in 15 minutes and can only be used once.`,
-    }),
-  });
+    (_accessToken, _refreshToken, profile: GoogleProfile, done) => {
+      done(null, profile);
+    },
+  ),
+);
 
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Email send failed (HTTP ${res.status}): ${body}`);
-  }
-}
+// Minimal serialize/deserialize — we do NOT use passport sessions;
+// session management is handled directly with express-session.
+passport.serializeUser((user, done) => done(null, user));
+passport.deserializeUser((user, done) =>
+  done(null, user as Express.User),
+);
 
-// ---------------------------------------------------------------------------
-// POST /api/auth/request — request a magic link
-// ---------------------------------------------------------------------------
-router.post("/auth/request", async (req: Request, res: Response) => {
-  const { email } = req.body as { email?: string };
-  if (!email || !email.includes("@")) {
-    res.status(400).json({ error: "Valid email required" });
+// GET /api/auth/google — initiate Google OAuth
+router.get("/auth/google", (req: Request, res: Response, next) => {
+  if (!process.env.GOOGLE_CLIENT_ID) {
+    res.status(503).json({
+      error:
+        "Google OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in Replit Secrets.",
+    });
     return;
   }
+  passport.authenticate("google", {
+    scope: ["email", "profile"],
+    session: false,
+  })(req, res, next);
+});
 
-  const normalEmail = email.toLowerCase().trim();
-  const now = Date.now();
+// GET /api/auth/google/callback — Google returns here after consent
+router.get(
+  "/auth/google/callback",
+  (req: Request, res: Response, next) => {
+    passport.authenticate("google", {
+      session: false,
+      failureRedirect: "/login?error=auth_failed",
+    })(req, res, next);
+  },
+  async (req: Request, res: Response) => {
+    const profile = req.user as GoogleProfile | undefined;
+    const email = profile?.emails?.[0]?.value?.toLowerCase();
 
-  const entry = rateLimits.get(normalEmail);
-  if (entry && now - entry.windowStart < RATE_LIMIT_WINDOW_MS) {
-    if (entry.count >= RATE_LIMIT_MAX) {
-      res.status(429).json({ error: "Too many login attempts. Try again in an hour." });
-      return;
-    }
-    entry.count++;
-  } else {
-    rateLimits.set(normalEmail, { count: 1, windowStart: now });
-  }
-
-  try {
-    const rows = await db.execute(
-      sql`SELECT id, email, role, district_id FROM users WHERE email = ${normalEmail}`,
-    );
-    const user = rows.rows[0] as
-      | { id: number; email: string; role: string; district_id: number | null }
-      | undefined;
-
-    // Return generic message to avoid user enumeration
-    if (!user) {
-      res.json({
-        message:
-          process.env.NODE_ENV !== "production"
-            ? "Email not found in users table (dev: add via admin panel or DB seed)"
-            : "If this email is registered, you'll receive a magic link.",
-      });
+    if (!email) {
+      res.redirect("/login?error=no_email");
       return;
     }
 
-    cleanupExpired();
-    const token = randomBytes(32).toString("hex");
-    magicLinks.set(token, { userId: user.id, expiresAt: now + TOKEN_EXPIRY_MS });
-
-    // Use APP_URL (trusted, configured) to build the magic link.
-    // Never use req.headers.origin — it is attacker-controlled and could
-    // redirect tokens to an attacker's domain in emailed links.
-    const configuredUrl = process.env.APP_URL;
-    if (!configuredUrl && process.env.NODE_ENV === "production") {
-      res.status(503).json({
-        error: "APP_URL environment variable is not configured.",
-        hint: "Set APP_URL to your deployed domain (e.g. https://collbar.replit.app) in Replit Secrets.",
-      });
-      return;
-    }
-    const base =
-      configuredUrl ??
-      // Dev-only fallback: derive from request (acceptable since no email is sent)
-      ((req.headers.origin as string | undefined) ??
-        `${(req.headers["x-forwarded-proto"] as string | undefined) ?? "http"}://${req.headers.host ?? "localhost"}`);
-    const magicLink = `${base}/auth/verify?token=${token}`;
-
-    const isDev = process.env.NODE_ENV !== "production";
-
-    if (isDev) {
-      // Development: return link in response body (no email provider needed)
-      res.json({
-        message: "Magic link generated (dev mode — link returned in response body, not emailed)",
-        magicLink,
-      });
-      return;
-    }
-
-    // Production: send via Resend; fail with 503 if not configured
     try {
-      await sendMagicLinkEmail(normalEmail, magicLink);
-      res.json({ message: "Magic link sent. Check your email." });
-    } catch (emailErr) {
-      res.status(503).json({
-        error: String(emailErr),
-        hint: "Configure RESEND_API_KEY in Replit Secrets to enable email delivery.",
+      // Check approved customer list
+      const rows = await db.execute(
+        sql`SELECT id, name, active, district_id FROM approved_customers WHERE email = ${email}`,
+      );
+      const customer = rows.rows[0] as
+        | {
+            id: number;
+            name: string;
+            active: boolean;
+            district_id: number | null;
+          }
+        | undefined;
+
+      if (!customer || !customer.active) {
+        res.redirect("/login?error=not_registered");
+        return;
+      }
+
+      // Update last sign-in timestamp
+      await db.execute(
+        sql`UPDATE approved_customers SET last_sign_in_at = NOW() WHERE id = ${customer.id}`,
+      );
+
+      // Upsert into users table (preserves existing district association)
+      const upsertRows = await db.execute(
+        sql`INSERT INTO users (email, role, plan, district_id)
+            VALUES (${email}, 'district_user', 'free', ${customer.district_id ?? null})
+            ON CONFLICT (email) DO UPDATE
+              SET district_id = COALESCE(EXCLUDED.district_id, users.district_id)
+            RETURNING id, email, role, plan, district_id`,
+      );
+      const user = upsertRows.rows[0] as {
+        id: number;
+        email: string;
+        role: string;
+        plan: string;
+        district_id: number | null;
+      };
+
+      req.session.regenerate((err) => {
+        if (err) {
+          res.redirect("/login?error=session_error");
+          return;
+        }
+        req.session.userId = user.id;
+        req.session.userRole = "district_user";
+        req.session.userDistrictId =
+          user.district_id != null ? Number(user.district_id) : null;
+        req.session.userEmail = user.email;
+        req.session.userPlan = (user.plan ?? "free") as "free" | "pro";
+
+        const dest = user.district_id
+          ? `/dashboard/${user.district_id}`
+          : "/dashboard";
+        res.redirect(dest);
       });
+    } catch (err) {
+      console.error("Google OAuth callback error:", err);
+      res.redirect("/login?error=server_error");
     }
+  },
+);
+
+// ============================================================================
+// Replit OIDC — admin sign-in
+// Only the Replit user whose `sub` matches ADMIN_REPLIT_ID is granted access.
+// ============================================================================
+
+let _oidcConfig: oidc.Configuration | null = null;
+
+async function getReplitOidcConfig(): Promise<oidc.Configuration> {
+  if (!_oidcConfig) {
+    _oidcConfig = await oidc.discovery(
+      new URL("https://replit.com/oidc"),
+      process.env.REPL_ID!,
+    );
+  }
+  return _oidcConfig;
+}
+
+// GET /api/auth/replit — initiate Replit OIDC (PKCE)
+router.get("/auth/replit", async (req: Request, res: Response) => {
+  try {
+    const config = await getReplitOidcConfig();
+    const callbackUrl = `${getOrigin(req)}/api/auth/replit/callback`;
+
+    const state = oidc.randomState();
+    const nonce = oidc.randomNonce();
+    const codeVerifier = oidc.randomPKCECodeVerifier();
+    const codeChallenge = await oidc.calculatePKCECodeChallenge(codeVerifier);
+
+    // Stash PKCE params in the existing express-session (no cookie-parser needed)
+    req.session._oidcCodeVerifier = codeVerifier;
+    req.session._oidcNonce = nonce;
+    req.session._oidcState = state;
+
+    await new Promise<void>((resolve, reject) =>
+      req.session.save((err) => (err ? reject(err) : resolve())),
+    );
+
+    const redirectTo = oidc.buildAuthorizationUrl(config, {
+      redirect_uri: callbackUrl,
+      scope: "openid email profile",
+      code_challenge: codeChallenge,
+      code_challenge_method: "S256",
+      state,
+      nonce,
+    });
+
+    res.redirect(redirectTo.href);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error("Replit OIDC init error:", err);
+    res.redirect("/admin?error=oidc_init_failed");
   }
 });
 
-// ---------------------------------------------------------------------------
-// GET /api/auth/verify?token=... — verify magic link token, create session
-// ---------------------------------------------------------------------------
-router.get("/auth/verify", async (req: Request, res: Response) => {
-  const token = String(req.query.token ?? "");
-  if (!token) {
-    res.status(400).json({ error: "Token required" });
+// GET /api/auth/replit/callback — Replit returns here
+router.get("/auth/replit/callback", async (req: Request, res: Response) => {
+  const codeVerifier = req.session._oidcCodeVerifier;
+  const nonce = req.session._oidcNonce;
+  const expectedState = req.session._oidcState;
+
+  // Clear OIDC transient state regardless of outcome
+  delete req.session._oidcCodeVerifier;
+  delete req.session._oidcNonce;
+  delete req.session._oidcState;
+
+  if (!codeVerifier || !expectedState) {
+    res.redirect("/admin?error=no_oidc_state");
     return;
   }
-
-  const entry = magicLinks.get(token);
-  if (!entry || entry.expiresAt < Date.now()) {
-    magicLinks.delete(token);
-    res.status(401).json({ error: "Invalid or expired magic link. Request a new one." });
-    return;
-  }
-
-  // One-time use: delete before session creation to prevent replay
-  magicLinks.delete(token);
 
   try {
-    const rows = await db.execute(
-      sql`SELECT id, email, role, district_id, plan FROM users WHERE id = ${entry.userId}`,
-    );
-    const user = rows.rows[0] as
-      | { id: number; email: string; role: string; district_id: number | null; plan: string | null }
-      | undefined;
+    const config = await getReplitOidcConfig();
+    const callbackUrl = `${getOrigin(req)}/api/auth/replit/callback`;
 
-    if (!user) {
-      res.status(401).json({ error: "User not found" });
+    const currentUrl = new URL(
+      `${callbackUrl}?${new URL(req.url, `http://${req.headers.host}`).searchParams}`,
+    );
+
+    const tokens = await oidc.authorizationCodeGrant(config, currentUrl, {
+      pkceCodeVerifier: codeVerifier,
+      expectedNonce: nonce,
+      expectedState,
+      idTokenExpected: true,
+    });
+
+    const claims = tokens.claims();
+    if (!claims) {
+      res.redirect("/admin?error=no_claims");
       return;
     }
 
-    // Regenerate session ID to mitigate session fixation attacks
+    const replitId = claims.sub;
+    const adminReplitId = process.env.ADMIN_REPLIT_ID;
+
+    if (!adminReplitId) {
+      // ADMIN_REPLIT_ID not yet configured — log the ID so the admin can set it
+      console.warn(
+        `ADMIN_REPLIT_ID is not set. ` +
+          `Replit user attempted admin login with sub="${replitId}". ` +
+          `Set ADMIN_REPLIT_ID=${replitId} in Replit Secrets to grant admin access.`,
+      );
+      res.redirect("/admin?error=admin_not_configured");
+      return;
+    }
+
+    if (replitId !== adminReplitId) {
+      res.redirect("/admin?error=access_denied");
+      return;
+    }
+
+    // Granted — set admin session
     req.session.regenerate((err) => {
-      if (err) { res.status(500).json({ error: "Session error" }); return; }
-      req.session.userId = user!.id;
-      req.session.userRole = user!.role as "admin" | "district_user";
-      // Normalize to Number: postgres bigint comes back as string from node-postgres
-      req.session.userDistrictId = user!.district_id != null ? Number(user!.district_id) : null;
-      req.session.userEmail = user!.email;
-      req.session.userPlan = (user!.plan ?? "free") as "free" | "pro";
-      res.json({ ok: true, role: user!.role, districtId: user!.district_id, plan: user!.plan ?? "free" });
+      if (err) {
+        res.redirect("/admin?error=session_error");
+        return;
+      }
+      req.session.adminAuthenticated = true;
+      req.session.userRole = "admin";
+      req.session.userEmail =
+        (claims.email as string | undefined) ?? undefined;
+      res.redirect("/admin");
     });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error("Replit OIDC callback error:", err);
+    res.redirect("/admin?error=oidc_callback_failed");
   }
 });
 
-// ---------------------------------------------------------------------------
-// GET /api/auth/me — return current session info
-// ---------------------------------------------------------------------------
+// ============================================================================
+// GET /api/auth/me — return current session state
+// ============================================================================
 router.get("/auth/me", (req: Request, res: Response) => {
-  if (!req.session.userId) {
+  if (!req.session.userId && !req.session.adminAuthenticated) {
     res.json({ authenticated: false });
     return;
   }
@@ -237,95 +312,9 @@ router.get("/auth/me", (req: Request, res: Response) => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// POST /api/auth/signup — create free account then issue magic link
-// ---------------------------------------------------------------------------
-router.post("/auth/signup", async (req: Request, res: Response) => {
-  const { email, district_id } = req.body as { email?: string; district_id?: number };
-
-  if (!email || !email.includes("@")) {
-    res.status(400).json({ error: "Valid email required" });
-    return;
-  }
-
-  const normalEmail = email.toLowerCase().trim();
-  const now = Date.now();
-
-  const rl = rateLimits.get(normalEmail);
-  if (rl && now - rl.windowStart < RATE_LIMIT_WINDOW_MS) {
-    if (rl.count >= RATE_LIMIT_MAX) {
-      res.status(429).json({ error: "Too many requests — try again in an hour." });
-      return;
-    }
-    rl.count++;
-  } else {
-    rateLimits.set(normalEmail, { count: 1, windowStart: now });
-  }
-
-  try {
-    // Validate district_id if provided
-    let validDistrictId: number | null = null;
-    if (district_id && Number.isInteger(Number(district_id))) {
-      const dRows = await db.execute(
-        sql`SELECT id FROM districts WHERE id = ${Number(district_id)} LIMIT 1`,
-      );
-      if (dRows.rows.length > 0) validDistrictId = Number(district_id);
-    }
-
-    // Upsert user — create if new, update district_id if it changes
-    const upsertRows = await db.execute(
-      sql`INSERT INTO users (email, role, plan, district_id)
-          VALUES (${normalEmail}, 'district_user', 'free', ${validDistrictId})
-          ON CONFLICT (email) DO UPDATE
-            SET district_id = COALESCE(EXCLUDED.district_id, users.district_id)
-          RETURNING id, email, role, plan, district_id`,
-    );
-
-    const user = upsertRows.rows[0] as {
-      id: number; email: string; role: string; plan: string; district_id: number | null;
-    };
-
-    cleanupExpired();
-    const token = randomBytes(32).toString("hex");
-    magicLinks.set(token, { userId: user.id, expiresAt: now + TOKEN_EXPIRY_MS });
-
-    const configuredUrl = process.env.APP_URL;
-    if (!configuredUrl && process.env.NODE_ENV === "production") {
-      res.status(503).json({ error: "APP_URL environment variable is not configured." });
-      return;
-    }
-    const base =
-      configuredUrl ??
-      ((req.headers.origin as string | undefined) ??
-        `${(req.headers["x-forwarded-proto"] as string | undefined) ?? "http"}://${req.headers.host ?? "localhost"}`);
-    const magicLink = `${base}/auth/verify?token=${token}`;
-
-    const isDev = process.env.NODE_ENV !== "production";
-    if (isDev) {
-      res.json({
-        message: "Account created. Magic link generated (dev mode).",
-        magicLink,
-      });
-      return;
-    }
-
-    try {
-      await sendMagicLinkEmail(normalEmail, magicLink);
-      res.json({ message: "Account created. Check your email for a sign-in link." });
-    } catch (emailErr) {
-      res.status(503).json({
-        error: String(emailErr),
-        hint: "Configure RESEND_API_KEY in Replit Secrets to enable email delivery.",
-      });
-    }
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-// ---------------------------------------------------------------------------
+// ============================================================================
 // POST /api/auth/logout
-// ---------------------------------------------------------------------------
+// ============================================================================
 router.post("/auth/logout", (req: Request, res: Response) => {
   req.session.destroy(() => {});
   res.json({ ok: true });

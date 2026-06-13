@@ -5,7 +5,6 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import AdminPage from "@/pages/admin";
 import LoginPage from "@/pages/login";
-import AuthVerifyPage from "@/pages/auth-verify";
 import DashboardIndexPage from "@/pages/dashboard/index";
 import DistrictDashboardPage from "@/pages/dashboard/district";
 import ClausesPage from "@/pages/dashboard/clauses";
@@ -13,7 +12,6 @@ import ComparablesPage from "@/pages/dashboard/comparables";
 import AskVsGotPage from "@/pages/dashboard/ask-vs-got";
 import ExpirationCalendarPage from "@/pages/expiration-calendar";
 import PeerSetsPage from "@/pages/peer-sets";
-import SignupPage from "@/pages/signup";
 import PlansPage from "@/pages/plans";
 import TrackerPage from "@/pages/tracker";
 
@@ -40,13 +38,13 @@ function Home() {
         <p className="text-slate-500 text-xs mt-6">Phase 4 — District Dashboard</p>
         <div className="mt-4 flex items-center justify-center gap-3">
           <a
-            href="login"
+            href={`${import.meta.env.BASE_URL}api/auth/google`}
             className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-blue-800 text-slate-100 text-sm hover:bg-blue-700 transition-colors border border-blue-700"
           >
             Sign In →
           </a>
           <a
-            href="admin"
+            href={`${import.meta.env.BASE_URL}api/auth/replit`}
             className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-slate-800 text-slate-300 text-sm hover:bg-slate-700 transition-colors border border-slate-700"
           >
             Admin →
@@ -64,12 +62,10 @@ function Router() {
 
       {/* Public */}
       <Route path="/tracker" component={TrackerPage} />
-      <Route path="/signup" component={SignupPage} />
       <Route path="/plans" component={PlansPage} />
 
       {/* Auth */}
       <Route path="/login" component={LoginPage} />
-      <Route path="/auth/verify" component={AuthVerifyPage} />
 
       {/* Dashboard */}
       <Route path="/dashboard" component={DashboardIndexPage} />
@@ -84,7 +80,7 @@ function Router() {
       {/* Admin calendar */}
       <Route path="/expiration-calendar" component={ExpirationCalendarPage} />
 
-      {/* Legacy admin */}
+      {/* Admin */}
       <Route path="/admin" component={AdminPage} />
       <Route path="/admin/:rest*" component={AdminPage} />
 

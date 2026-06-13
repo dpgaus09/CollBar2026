@@ -339,60 +339,20 @@ function useReviewQueue(page: number, category: string) {
 // Admin login modal
 // ---------------------------------------------------------------------------
 
-function AdminLoginModal({ onSuccess }: { onSuccess: () => void }) {
-  const [token, setToken] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    setError("");
-    try {
-      const r = await fetch(apiUrl("/api/admin/login"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ token }),
-      });
-      if (!r.ok) {
-        const body = (await r.json().catch(() => ({}))) as { error?: string };
-        setError(body.error ?? "Login failed");
-      } else {
-        onSuccess();
-      }
-    } catch {
-      setError("Network error — is the API server running?");
-    } finally {
-      setLoading(false);
-    }
-  };
-
+function AdminLoginModal({ onSuccess: _onSuccess }: { onSuccess: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm">
-      <div className="w-full max-w-sm rounded-xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
-        <h2 className="text-sm font-semibold text-slate-200 mb-1">Admin Authentication</h2>
-        <p className="text-xs text-slate-500 mb-5">
-          Enter the server-side ADMIN_TOKEN to unlock mutation endpoints.
+      <div className="w-full max-w-sm rounded-xl border border-slate-700 bg-slate-900 p-6 shadow-2xl space-y-4">
+        <h2 className="text-sm font-semibold text-slate-200">Admin Sign-in</h2>
+        <p className="text-xs text-slate-500 leading-relaxed">
+          Sign in with your Replit account to unlock the admin panel.
         </p>
-        <form onSubmit={submit} className="space-y-3">
-          <input
-            type="password"
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-            placeholder="Admin token"
-            autoFocus
-            className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
-          />
-          {error && <p className="text-xs text-red-400">{error}</p>}
-          <button
-            type="submit"
-            disabled={loading || !token}
-            className="w-full text-xs px-3 py-2 rounded bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-50 transition-colors"
-          >
-            {loading ? "Authenticating…" : "Authenticate"}
-          </button>
-        </form>
+        <a
+          href={`${import.meta.env.BASE_URL}api/auth/replit`}
+          className="block w-full text-center text-xs px-3 py-2 rounded bg-blue-700 hover:bg-blue-600 text-white transition-colors"
+        >
+          Sign in with Replit →
+        </a>
       </div>
     </div>
   );
@@ -2466,10 +2426,223 @@ function AlertsTab() {
 }
 
 // ---------------------------------------------------------------------------
+// Customers Tab
+// ---------------------------------------------------------------------------
+
+interface Customer {
+  id: number;
+  name: string;
+  email: string;
+  active: boolean;
+  district_id: number | null;
+  created_at: string | null;
+  last_sign_in_at: string | null;
+}
+
+function CustomersTab() {
+  const { data: session } = useAdminSession();
+  const isAuthenticated = session?.authenticated === true;
+  const qc = useQueryClient();
+
+  const { data, isLoading, error } = useQuery<{ customers: Customer[] }>({
+    queryKey: ["/api/admin/customers"],
+    queryFn: () =>
+      fetch(apiUrl("/api/admin/customers"), { credentials: "include" }).then(
+        (r) => r.json(),
+      ),
+    enabled: isAuthenticated,
+  });
+
+  const [showAdd, setShowAdd] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newEmail, setNewEmail] = useState("");
+  const [addError, setAddError] = useState("");
+  const [adding, setAdding] = useState(false);
+
+  const handleAdd = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAddError("");
+    setAdding(true);
+    try {
+      const r = await fetch(apiUrl("/api/admin/customers"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ name: newName.trim(), email: newEmail.trim() }),
+      });
+      const body = (await r.json()) as { customer?: Customer; error?: string };
+      if (!r.ok) {
+        setAddError(body.error ?? "Failed to add customer");
+      } else {
+        setNewName("");
+        setNewEmail("");
+        setShowAdd(false);
+        qc.invalidateQueries({ queryKey: ["/api/admin/customers"] });
+      }
+    } catch {
+      setAddError("Network error");
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const toggleActive = async (id: number, active: boolean) => {
+    await fetch(apiUrl(`/api/admin/customers/${id}`), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ active }),
+    });
+    qc.invalidateQueries({ queryKey: ["/api/admin/customers"] });
+  };
+
+  const removeCustomer = async (id: number, email: string) => {
+    if (!confirm(`Remove ${email} from approved customers?`)) return;
+    await fetch(apiUrl(`/api/admin/customers/${id}`), {
+      method: "DELETE",
+      credentials: "include",
+    });
+    qc.invalidateQueries({ queryKey: ["/api/admin/customers"] });
+  };
+
+  if (!isAuthenticated) {
+    return (
+      <div className="rounded-xl border border-amber-800/50 bg-amber-950/10 p-6 text-center space-y-3">
+        <p className="text-amber-300 text-sm">Sign in to manage customers.</p>
+        <a
+          href={`${import.meta.env.BASE_URL}api/auth/replit`}
+          className="inline-block text-xs px-4 py-2 rounded bg-blue-700 hover:bg-blue-600 text-white transition-colors"
+        >
+          Sign in with Replit →
+        </a>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-sm font-semibold text-slate-200">Approved Customers</h2>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Only listed emails can sign in via Google OAuth.
+          </p>
+        </div>
+        <button
+          onClick={() => setShowAdd((v) => !v)}
+          className="text-xs px-3 py-1.5 rounded border border-slate-600 text-slate-300 hover:border-blue-500 hover:text-blue-300 transition-colors"
+        >
+          {showAdd ? "Cancel" : "+ Add customer"}
+        </button>
+      </div>
+
+      {showAdd && (
+        <form
+          onSubmit={handleAdd}
+          className="rounded-lg border border-slate-700 bg-slate-900 p-4 space-y-3"
+        >
+          <div className="flex gap-3">
+            <input
+              type="text"
+              placeholder="Full name"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              required
+              className="flex-1 text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+            />
+            <input
+              type="email"
+              placeholder="email@district.org"
+              value={newEmail}
+              onChange={(e) => setNewEmail(e.target.value)}
+              required
+              className="flex-1 text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+            />
+            <button
+              type="submit"
+              disabled={adding}
+              className="text-xs px-4 py-2 rounded bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-50 transition-colors whitespace-nowrap"
+            >
+              {adding ? "Adding…" : "Add"}
+            </button>
+          </div>
+          {addError && <p className="text-xs text-red-400">{addError}</p>}
+        </form>
+      )}
+
+      {isLoading && (
+        <p className="text-xs text-slate-500">Loading customers…</p>
+      )}
+      {error && (
+        <p className="text-xs text-red-400">Failed to load customers.</p>
+      )}
+
+      {data && data.customers.length === 0 && (
+        <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-6 text-center">
+          <p className="text-xs text-slate-500">No customers yet. Add one above.</p>
+        </div>
+      )}
+
+      {data && data.customers.length > 0 && (
+        <div className="rounded-lg border border-slate-800 overflow-hidden">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-slate-800 bg-slate-900">
+                <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Name</th>
+                <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Email</th>
+                <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Status</th>
+                <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Last sign-in</th>
+                <th className="px-4 py-2.5" />
+              </tr>
+            </thead>
+            <tbody>
+              {data.customers.map((c, i) => (
+                <tr
+                  key={c.id}
+                  className={`border-b border-slate-800/50 ${i % 2 === 0 ? "bg-slate-950" : "bg-slate-900/30"}`}
+                >
+                  <td className="px-4 py-2.5 text-slate-200">{c.name}</td>
+                  <td className="px-4 py-2.5 text-slate-400 font-mono">{c.email}</td>
+                  <td className="px-4 py-2.5">
+                    <button
+                      onClick={() => toggleActive(c.id, !c.active)}
+                      className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                        c.active
+                          ? "bg-emerald-900/50 text-emerald-400 hover:bg-red-900/50 hover:text-red-400"
+                          : "bg-slate-800 text-slate-500 hover:bg-emerald-900/50 hover:text-emerald-400"
+                      }`}
+                    >
+                      {c.active ? "Active" : "Inactive"}
+                    </button>
+                  </td>
+                  <td className="px-4 py-2.5 text-slate-500">
+                    {c.last_sign_in_at
+                      ? new Date(c.last_sign_in_at).toLocaleDateString()
+                      : "Never"}
+                  </td>
+                  <td className="px-4 py-2.5 text-right">
+                    <button
+                      onClick={() => removeCustomer(c.id, c.email)}
+                      className="text-slate-600 hover:text-red-400 transition-colors text-[10px]"
+                    >
+                      Remove
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page shell with tab routing
 // ---------------------------------------------------------------------------
 
-type TabKey = "overview" | "crawl-report" | "extraction-report" | "review-queue" | "alerts" | "eis-crosscheck";
+type TabKey = "overview" | "crawl-report" | "extraction-report" | "review-queue" | "alerts" | "eis-crosscheck" | "customers";
 
 function useAlertsPendingCount() {
   return useQuery<{ pendingCount: number }>({
@@ -2490,6 +2663,7 @@ const TABS: { key: TabKey; label: string; path: string }[] = [
   { key: "review-queue", label: "Review Queue", path: "/admin/review-queue" },
   { key: "alerts", label: "Alerts", path: "/admin/alerts" },
   { key: "eis-crosscheck", label: "EIS Cross-Check", path: "/admin/eis-crosscheck" },
+  { key: "customers", label: "Customers", path: "/admin/customers" },
 ];
 
 function activeTab(location: string): TabKey {
@@ -2498,6 +2672,7 @@ function activeTab(location: string): TabKey {
   if (location.includes("extraction-report")) return "extraction-report";
   if (location.includes("crawl-report")) return "crawl-report";
   if (location.includes("eis-crosscheck")) return "eis-crosscheck";
+  if (location.includes("customers")) return "customers";
   return "overview";
 }
 
@@ -2508,6 +2683,9 @@ export default function AdminPage() {
   const pendingAlerts = alertsData?.pendingCount ?? 0;
   const { data: session, refetch: refetchSession } = useAdminSession();
   const [showLoginBanner, setShowLoginBanner] = useState(false);
+
+  // refetchSession kept for compatibility with child tabs that call it
+  void refetchSession;
 
   const isAuthenticated = session?.authenticated === true;
 
@@ -2528,12 +2706,12 @@ export default function AdminPage() {
               Admin session active
             </span>
           ) : (
-            <button
-              onClick={() => setShowLoginBanner(true)}
+            <a
+              href={`${import.meta.env.BASE_URL}api/auth/replit`}
               className="text-xs px-3 py-1.5 rounded border border-slate-700 text-slate-300 hover:border-blue-600 hover:text-blue-300 transition-colors"
             >
               Log in
-            </button>
+            </a>
           )}
         </div>
       </header>
@@ -2541,14 +2719,14 @@ export default function AdminPage() {
       {!isAuthenticated && (
         <div className="border-b border-amber-800/60 bg-amber-950/20 px-6 py-3 flex items-center justify-between">
           <span className="text-xs text-amber-300">
-            Log in with your admin token to see live pipeline data and table counts.
+            Sign in with your Replit account to see live pipeline data and table counts.
           </span>
-          <button
-            onClick={() => setShowLoginBanner(true)}
+          <a
+            href={`${import.meta.env.BASE_URL}api/auth/replit`}
             className="text-xs px-3 py-1 rounded bg-amber-800 hover:bg-amber-700 text-amber-100 transition-colors"
           >
             Log in
-          </button>
+          </a>
         </div>
       )}
 
@@ -2556,7 +2734,6 @@ export default function AdminPage() {
         <AdminLoginModal
           onSuccess={() => {
             setShowLoginBanner(false);
-            refetchSession();
           }}
         />
       )}
@@ -2591,6 +2768,7 @@ export default function AdminPage() {
         {tab === "review-queue" && <ReviewQueueTab />}
         {tab === "alerts" && <AlertsTab />}
         {tab === "eis-crosscheck" && <EisXCheckTab />}
+        {tab === "customers" && <CustomersTab />}
       </main>
     </div>
   );
