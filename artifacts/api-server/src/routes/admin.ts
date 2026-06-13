@@ -335,7 +335,9 @@ router.get("/admin/il-cba-unfound.csv", requireAdminToken, async (_req, res) => 
 // merged with a live DB join for district metadata + last settlement year +
 // source_documents (so DB-indexed CBAs override stale/missing JSON state).
 // Query params: page, limit, status (found|failed|search_failed|no_url|skip|not_crawled),
-//               search (district name substring, case-insensitive)
+//               search (district name substring, case-insensitive),
+//               sort (district_name|enrollment|crawl_status|last_attempted|last_settlement_year, default: enrollment),
+//               dir (asc|desc, default: desc)
 // ---------------------------------------------------------------------------
 router.get("/admin/il-cba-district-log", requireAdminToken, async (req, res) => {
   const page  = Math.max(1, parseInt(String(req.query.page  ?? "1"),  10));
@@ -350,6 +352,11 @@ router.get("/admin/il-cba-district-log", requireAdminToken, async (req, res) => 
   }
   const statusFilter = rawStatus || null;
   const searchFilter = req.query.search ? String(req.query.search).toLowerCase().trim() : null;
+
+  const VALID_SORT_COLS = new Set(["district_name", "enrollment", "crawl_status", "last_attempted", "last_settlement_year"]);
+  const rawSort = req.query.sort ? String(req.query.sort) : "enrollment";
+  const sortCol = VALID_SORT_COLS.has(rawSort) ? rawSort : "enrollment";
+  const sortDir = req.query.dir === "asc" ? "asc" : "desc";
 
   // Load per-district crawl data from JSON (keyed by RCDTS / state_district_id)
   let perDistrict: Record<string, {
@@ -466,6 +473,41 @@ router.get("/admin/il-cba-district-log", requireAdminToken, async (req, res) => 
     if (statusFilter && row.crawl_status !== statusFilter) return false;
     if (searchFilter && !row.district_name.toLowerCase().includes(searchFilter)) return false;
     return true;
+  });
+
+  // Apply sort
+  type MergedRow = typeof filtered[number];
+  filtered.sort((a: MergedRow, b: MergedRow) => {
+    let aVal: string | number | null;
+    let bVal: string | number | null;
+    switch (sortCol) {
+      case "district_name":
+        aVal = a.district_name.toLowerCase();
+        bVal = b.district_name.toLowerCase();
+        break;
+      case "enrollment":
+        aVal = a.enrollment ?? -1;
+        bVal = b.enrollment ?? -1;
+        break;
+      case "crawl_status":
+        aVal = a.crawl_status;
+        bVal = b.crawl_status;
+        break;
+      case "last_attempted":
+        aVal = a.last_attempted ?? "";
+        bVal = b.last_attempted ?? "";
+        break;
+      case "last_settlement_year":
+        aVal = a.last_settlement_year != null ? Number(a.last_settlement_year) : -1;
+        bVal = b.last_settlement_year != null ? Number(b.last_settlement_year) : -1;
+        break;
+      default:
+        aVal = a.enrollment ?? -1;
+        bVal = b.enrollment ?? -1;
+    }
+    if (aVal === bVal) return 0;
+    const cmp = aVal < bVal ? -1 : 1;
+    return sortDir === "asc" ? cmp : -cmp;
   });
 
   const total = filtered.length;

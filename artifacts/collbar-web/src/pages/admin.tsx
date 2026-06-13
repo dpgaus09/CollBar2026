@@ -218,11 +218,11 @@ function useIlCbaCoverage() {
   });
 }
 
-function useIlCbaDistrictLog(page: number, status: string, search: string) {
+function useIlCbaDistrictLog(page: number, status: string, search: string, sort: string, dir: string) {
   return useQuery<IlCbaDistrictLogResponse>({
-    queryKey: ["/api/admin/il-cba-district-log", page, status, search],
+    queryKey: ["/api/admin/il-cba-district-log", page, status, search, sort, dir],
     queryFn: () => {
-      const params = new URLSearchParams({ page: String(page), limit: "50" });
+      const params = new URLSearchParams({ page: String(page), limit: "50", sort, dir });
       if (status) params.set("status", status);
       if (search) params.set("search", search);
       return fetch(apiUrl(`/api/admin/il-cba-district-log?${params}`), { credentials: "include" }).then(
@@ -545,11 +545,16 @@ function CrawlStatusBadge({ status }: { status: string }) {
 // IL CBA District Log table (within CrawlReportTab)
 // ---------------------------------------------------------------------------
 
+type SortCol = "district_name" | "enrollment" | "crawl_status" | "last_attempted" | "last_settlement_year";
+type SortDir = "asc" | "desc";
+
 function IlCbaDistrictLogTable() {
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [sortCol, setSortCol] = useState<SortCol>("enrollment");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
 
   const handleSearchChange = (val: string) => {
     setSearchInput(val);
@@ -562,7 +567,25 @@ function IlCbaDistrictLogTable() {
     setPage(1);
   };
 
-  const { data, isLoading, isError } = useIlCbaDistrictLog(page, statusFilter, debouncedSearch);
+  const handleSort = (col: SortCol) => {
+    if (col === sortCol) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortCol(col);
+      setSortDir(col === "district_name" || col === "crawl_status" ? "asc" : "desc");
+    }
+    setPage(1);
+  };
+
+  const SortIcon = ({ col }: { col: SortCol }) => {
+    if (col !== sortCol) return <span className="text-slate-700 ml-1">↕</span>;
+    return <span className="text-blue-400 ml-1">{sortDir === "asc" ? "↑" : "↓"}</span>;
+  };
+
+  const thCls = "text-left px-3 py-2 text-slate-400 font-medium whitespace-nowrap cursor-pointer select-none hover:text-slate-200 transition-colors";
+  const thClsRight = "text-right px-3 py-2 text-slate-400 font-medium whitespace-nowrap cursor-pointer select-none hover:text-slate-200 transition-colors";
+
+  const { data, isLoading, isError } = useIlCbaDistrictLog(page, statusFilter, debouncedSearch, sortCol, sortDir);
 
   const STATUS_OPTIONS = [
     { value: "",             label: "All statuses" },
@@ -632,14 +655,24 @@ function IlCbaDistrictLogTable() {
             <table className="w-full text-xs">
               <thead className="bg-slate-900 border-b border-slate-800">
                 <tr>
-                  <th className="text-left px-3 py-2 text-slate-400 font-medium whitespace-nowrap">District</th>
+                  <th className={thCls} onClick={() => handleSort("district_name")}>
+                    District<SortIcon col="district_name" />
+                  </th>
                   <th className="text-left px-3 py-2 text-slate-400 font-medium whitespace-nowrap">County</th>
-                  <th className="text-right px-3 py-2 text-slate-400 font-medium whitespace-nowrap">Enrollment</th>
+                  <th className={thClsRight} onClick={() => handleSort("enrollment")}>
+                    Enrollment<SortIcon col="enrollment" />
+                  </th>
                   <th className="text-left px-3 py-2 text-slate-400 font-medium whitespace-nowrap">Website URL</th>
-                  <th className="text-left px-3 py-2 text-slate-400 font-medium whitespace-nowrap">Status</th>
-                  <th className="text-left px-3 py-2 text-slate-400 font-medium whitespace-nowrap">Last Attempted</th>
+                  <th className={thCls} onClick={() => handleSort("crawl_status")}>
+                    Status<SortIcon col="crawl_status" />
+                  </th>
+                  <th className={thCls} onClick={() => handleSort("last_attempted")}>
+                    Last Attempted<SortIcon col="last_attempted" />
+                  </th>
                   <th className="text-left px-3 py-2 text-slate-400 font-medium whitespace-nowrap">Storage Key</th>
-                  <th className="text-right px-3 py-2 text-slate-400 font-medium whitespace-nowrap">Last Settlement</th>
+                  <th className={thClsRight} onClick={() => handleSort("last_settlement_year")}>
+                    Last Settlement<SortIcon col="last_settlement_year" />
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/50">
