@@ -66,6 +66,28 @@ interface IlCbaCoverage {
   lastUpdated: string | null;
 }
 
+interface IlCbaDistrictLogItem {
+  district_name: string;
+  county: string | null;
+  enrollment: number | null;
+  website_url: string | null;
+  state_district_id: string;
+  crawl_status: string;
+  last_attempted: string | null;
+  storage_key: string | null;
+  pdf_url: string | null;
+  found_via: string | null;
+  last_settlement_year: string | number | null;
+}
+
+interface IlCbaDistrictLogResponse {
+  items: IlCbaDistrictLogItem[];
+  total: number;
+  page: number;
+  limit: number;
+  pages: number;
+}
+
 interface ReviewQueueItem {
   id: number;
   category: string;
@@ -192,6 +214,24 @@ function useIlCbaCoverage() {
         return r.json();
       }),
     refetchInterval: 30_000,
+    retry: false,
+  });
+}
+
+function useIlCbaDistrictLog(page: number, status: string, search: string) {
+  return useQuery<IlCbaDistrictLogResponse>({
+    queryKey: ["/api/admin/il-cba-district-log", page, status, search],
+    queryFn: () => {
+      const params = new URLSearchParams({ page: String(page), limit: "50" });
+      if (status) params.set("status", status);
+      if (search) params.set("search", search);
+      return fetch(apiUrl(`/api/admin/il-cba-district-log?${params}`), { credentials: "include" }).then(
+        (r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        },
+      );
+    },
     retry: false,
   });
 }
@@ -480,11 +520,233 @@ function OverviewTab() {
 // Crawl Report Tab
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// IL CBA District Log status badge
+// ---------------------------------------------------------------------------
+
+function CrawlStatusBadge({ status }: { status: string }) {
+  const map: Record<string, { label: string; cls: string }> = {
+    found:         { label: "found",         cls: "bg-emerald-950 text-emerald-400 border-emerald-800" },
+    failed:        { label: "failed",        cls: "bg-red-950 text-red-400 border-red-800" },
+    search_failed: { label: "search failed", cls: "bg-orange-950 text-orange-400 border-orange-800" },
+    no_url:        { label: "no URL",        cls: "bg-slate-900 text-slate-500 border-slate-700" },
+    skip:          { label: "skip",          cls: "bg-slate-900 text-slate-500 border-slate-700" },
+    not_crawled:   { label: "not crawled",   cls: "bg-amber-950 text-amber-400 border-amber-800" },
+  };
+  const { label, cls } = map[status] ?? { label: status, cls: "bg-slate-900 text-slate-400 border-slate-700" };
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-mono border ${cls}`}>
+      {label}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// IL CBA District Log table (within CrawlReportTab)
+// ---------------------------------------------------------------------------
+
+function IlCbaDistrictLogTable() {
+  const [page, setPage] = useState(1);
+  const [statusFilter, setStatusFilter] = useState("");
+  const [searchInput, setSearchInput] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+
+  const handleSearchChange = (val: string) => {
+    setSearchInput(val);
+    setPage(1);
+  };
+
+  // Debounce search to avoid hammering API on every keystroke
+  const applySearch = () => {
+    setDebouncedSearch(searchInput);
+    setPage(1);
+  };
+
+  const { data, isLoading, isError } = useIlCbaDistrictLog(page, statusFilter, debouncedSearch);
+
+  const STATUS_OPTIONS = [
+    { value: "",             label: "All statuses" },
+    { value: "found",        label: "Found" },
+    { value: "failed",       label: "Failed" },
+    { value: "search_failed",label: "Search failed" },
+    { value: "no_url",       label: "No URL" },
+    { value: "not_crawled",  label: "Not crawled yet" },
+  ];
+
+  return (
+    <div className="space-y-3">
+      {/* Controls */}
+      <div className="flex flex-wrap gap-2 items-center">
+        <div className="flex flex-1 min-w-[180px] items-center gap-1 rounded border border-slate-700 bg-slate-950 px-2 py-1">
+          <span className="text-slate-600 text-xs">🔍</span>
+          <input
+            type="text"
+            value={searchInput}
+            onChange={(e) => handleSearchChange(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && applySearch()}
+            placeholder="Search district name…"
+            className="flex-1 bg-transparent text-xs text-slate-200 placeholder-slate-600 focus:outline-none"
+          />
+          {searchInput && (
+            <button
+              onClick={() => { setSearchInput(""); setDebouncedSearch(""); setPage(1); }}
+              className="text-slate-600 hover:text-slate-400 text-xs"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+        <button
+          onClick={applySearch}
+          className="text-xs px-3 py-1 rounded border border-slate-700 hover:border-slate-500 text-slate-400 hover:text-slate-200 transition-colors"
+        >
+          Search
+        </button>
+        <select
+          value={statusFilter}
+          onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}
+          className="text-xs bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-300 focus:outline-none focus:border-blue-500"
+        >
+          {STATUS_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+        {data && (
+          <span className="text-xs text-slate-500 ml-auto whitespace-nowrap">
+            {data.total.toLocaleString()} districts
+            {statusFilter && ` · filter: ${statusFilter}`}
+          </span>
+        )}
+      </div>
+
+      {/* Table */}
+      {isLoading ? (
+        <div className="py-8 text-center text-xs text-slate-500 animate-pulse">Loading districts…</div>
+      ) : isError ? (
+        <div className="py-6 text-center text-xs text-red-400">Failed to load district log.</div>
+      ) : !data || data.items.length === 0 ? (
+        <div className="py-8 text-center text-xs text-slate-600">No districts match the current filters.</div>
+      ) : (
+        <>
+          <div className="rounded-lg border border-slate-800 overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-900 border-b border-slate-800">
+                <tr>
+                  <th className="text-left px-3 py-2 text-slate-400 font-medium whitespace-nowrap">District</th>
+                  <th className="text-left px-3 py-2 text-slate-400 font-medium whitespace-nowrap">County</th>
+                  <th className="text-right px-3 py-2 text-slate-400 font-medium whitespace-nowrap">Enrollment</th>
+                  <th className="text-left px-3 py-2 text-slate-400 font-medium whitespace-nowrap">Website URL</th>
+                  <th className="text-left px-3 py-2 text-slate-400 font-medium whitespace-nowrap">Status</th>
+                  <th className="text-left px-3 py-2 text-slate-400 font-medium whitespace-nowrap">Last Attempted</th>
+                  <th className="text-left px-3 py-2 text-slate-400 font-medium whitespace-nowrap">Storage Key</th>
+                  <th className="text-right px-3 py-2 text-slate-400 font-medium whitespace-nowrap">Last Settlement</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/50">
+                {data.items.map((row) => (
+                  <tr key={row.state_district_id || row.district_name} className="bg-slate-950 hover:bg-slate-900/50 transition-colors">
+                    <td className="px-3 py-2.5 text-slate-200 font-medium max-w-[180px]">
+                      <span className="truncate block" title={row.district_name}>
+                        {row.district_name}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5 text-slate-400 whitespace-nowrap">
+                      {row.county ?? <span className="text-slate-700">—</span>}
+                    </td>
+                    <td className="px-3 py-2.5 text-right text-slate-400 font-mono whitespace-nowrap">
+                      {row.enrollment != null ? row.enrollment.toLocaleString() : <span className="text-slate-700">—</span>}
+                    </td>
+                    <td className="px-3 py-2.5 max-w-[140px]">
+                      {row.website_url ? (
+                        <a
+                          href={row.website_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-400 hover:text-blue-300 font-mono text-xs truncate block transition-colors"
+                          title={row.website_url}
+                        >
+                          {row.website_url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
+                        </a>
+                      ) : (
+                        <span className="text-slate-700">—</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5 whitespace-nowrap">
+                      <CrawlStatusBadge status={row.crawl_status} />
+                    </td>
+                    <td className="px-3 py-2.5 text-slate-500 font-mono whitespace-nowrap">
+                      {row.last_attempted
+                        ? new Date(row.last_attempted).toLocaleDateString()
+                        : <span className="text-slate-700">—</span>}
+                    </td>
+                    <td className="px-3 py-2.5 max-w-[160px]">
+                      {row.storage_key ? (
+                        row.pdf_url ? (
+                          <a
+                            href={row.pdf_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-sky-500 hover:text-sky-400 font-mono truncate block transition-colors"
+                            title={row.storage_key}
+                          >
+                            {row.storage_key.split("/").pop()}
+                          </a>
+                        ) : (
+                          <span className="text-slate-400 font-mono truncate block" title={row.storage_key}>
+                            {row.storage_key.split("/").pop()}
+                          </span>
+                        )
+                      ) : (
+                        <span className="text-slate-700">—</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5 text-right font-mono whitespace-nowrap">
+                      {row.last_settlement_year != null ? (
+                        <span className="text-slate-300">{row.last_settlement_year}</span>
+                      ) : (
+                        <span className="text-slate-700">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Pagination */}
+          {data.pages > 1 && (
+            <div className="flex items-center justify-between pt-1">
+              <button
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page <= 1}
+                className="text-xs px-3 py-1 rounded border border-slate-700 hover:border-slate-500 text-slate-400 hover:text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                ← Prev
+              </button>
+              <span className="text-xs text-slate-500">
+                Page {data.page} of {data.pages}
+              </span>
+              <button
+                onClick={() => setPage((p) => Math.min(data.pages, p + 1))}
+                disabled={page >= data.pages}
+                className="text-xs px-3 py-1 rounded border border-slate-700 hover:border-slate-500 text-slate-400 hover:text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                Next →
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function CrawlReportTab() {
   const [showLogin, setShowLogin] = useState(false);
   const { data: session, refetch: refetchSession } = useAdminSession();
   const { data, isLoading, isError, refetch } = useCrawlReport();
   const { data: ilCba } = useIlCbaCoverage();
+  const [showDistrictLog, setShowDistrictLog] = useState(false);
 
   if (!session?.authenticated) {
     return (
@@ -784,6 +1046,29 @@ function CrawlReportTab() {
             <code className="font-mono text-slate-400">pipeline/11_crawl_il_cbas.py</code> to
             begin collecting district CBAs.
           </div>
+        )}
+      </section>
+
+      {/* Per-district crawl log */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
+            IL District-by-District Log
+          </h2>
+          <button
+            onClick={() => setShowDistrictLog((v) => !v)}
+            className="text-xs px-3 py-1 rounded border border-slate-700 hover:border-slate-500 text-slate-400 hover:text-slate-200 transition-colors"
+          >
+            {showDistrictLog ? "▲ Hide" : "▼ Show all 956 districts"}
+          </button>
+        </div>
+        {!showDistrictLog ? (
+          <p className="text-xs text-slate-600">
+            Expand to see a searchable, filterable table of every IL district with its crawl status,
+            last attempted date, storage key, and last settlement year.
+          </p>
+        ) : (
+          <IlCbaDistrictLogTable />
         )}
       </section>
     </div>

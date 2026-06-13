@@ -328,6 +328,157 @@ router.get("/admin/il-cba-unfound.csv", requireAdminToken, async (_req, res) => 
 });
 
 // ---------------------------------------------------------------------------
+// GET /admin/il-cba-district-log
+// Paginated per-district IL CBA crawl status, sourced from il_cba_crawl.json
+// merged with a live DB join for district metadata + last settlement year +
+// source_documents (so DB-indexed CBAs override stale/missing JSON state).
+// Query params: page, limit, status (found|failed|search_failed|no_url|skip|not_crawled),
+//               search (district name substring, case-insensitive)
+// ---------------------------------------------------------------------------
+router.get("/admin/il-cba-district-log", requireAdminToken, async (req, res) => {
+  const page  = Math.max(1, parseInt(String(req.query.page  ?? "1"),  10));
+  const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10)));
+  const offset = (page - 1) * limit;
+
+  const VALID_STATUSES = new Set(["found", "failed", "search_failed", "no_url", "skip", "not_crawled"]);
+  const rawStatus = req.query.status ? String(req.query.status) : "";
+  if (rawStatus && !VALID_STATUSES.has(rawStatus)) {
+    res.status(400).json({ error: `Invalid status. Must be one of: ${[...VALID_STATUSES].join(", ")}` });
+    return;
+  }
+  const statusFilter = rawStatus || null;
+  const searchFilter = req.query.search ? String(req.query.search).toLowerCase().trim() : null;
+
+  // Load per-district crawl data from JSON (keyed by RCDTS / state_district_id)
+  let perDistrict: Record<string, {
+    status: string;
+    timestamp?: string;
+    url?: string;
+    found_via?: string;
+    storage_key?: string;
+  }> = {};
+
+  if (existsSync(IL_CBA_CRAWL_STATE_PATH)) {
+    try {
+      const raw = JSON.parse(readFileSync(IL_CBA_CRAWL_STATE_PATH, "utf-8")) as Record<string, unknown>;
+      perDistrict = (raw["per_district"] as typeof perDistrict) ?? {};
+    } catch {
+      perDistrict = {};
+    }
+  }
+
+  // Load all IL districts from DB with last settlement year + live source_documents evidence.
+  // The LEFT JOIN on source_documents lets DB-indexed CBAs override stale/missing JSON entries.
+  const dbRows = await db.execute(sql.raw(`
+    SELECT
+      d.id,
+      d.name,
+      d.county,
+      d.enrollment,
+      d.website_url,
+      d.state_district_id,
+      MAX(s.to_year)   AS last_settlement_year,
+      MAX(sd.id)       AS sd_id,
+      MAX(sd.source_url)    AS sd_source_url,
+      MAX(sd.storage_key)   AS sd_storage_key,
+      MAX(sd.retrieved_at)  AS sd_created_at
+    FROM districts d
+    LEFT JOIN settlements s   ON s.district_id  = d.id
+    LEFT JOIN source_documents sd
+           ON sd.district_id = d.id
+          AND sd.doc_type    = 'cba_pdf'
+    WHERE d.state = 'IL'
+    GROUP BY d.id, d.name, d.county, d.enrollment, d.website_url, d.state_district_id
+    ORDER BY d.name
+  `));
+
+  type DbDistrict = {
+    id: number;
+    name: string;
+    county: string | null;
+    enrollment: number | null;
+    website_url: string | null;
+    state_district_id: string | null;
+    last_settlement_year: string | number | null;
+    sd_id: number | null;
+    sd_source_url: string | null;
+    sd_storage_key: string | null;
+    sd_created_at: string | null;
+  };
+
+  // Merge DB rows with JSON crawl data.
+  // DB source_documents evidence is authoritative when present — it overrides
+  // stale or missing JSON entries so a district with an indexed CBA is never
+  // shown as "not_crawled" or "failed".
+  const merged = (dbRows.rows as DbDistrict[]).map((d) => {
+    const rcdts  = d.state_district_id ?? "";
+    const crawl  = perDistrict[rcdts] ?? null;
+    const hasDbCba = d.sd_id != null;
+
+    let crawlStatus: string;
+    let pdfUrl: string | null;
+    let storageKey: string | null;
+    let lastAttempted: string | null;
+    let foundVia: string | null;
+
+    if (hasDbCba) {
+      // DB evidence is authoritative: district has an indexed CBA PDF
+      crawlStatus   = "found";
+      pdfUrl        = d.sd_source_url;
+      storageKey    = d.sd_storage_key ?? crawl?.storage_key ?? null;
+      lastAttempted = d.sd_created_at ?? crawl?.timestamp ?? null;
+      foundVia      = crawl?.found_via ?? null;
+    } else if (crawl) {
+      // No DB CBA but JSON crawl entry exists — trust JSON status
+      crawlStatus   = crawl.status;
+      pdfUrl        = crawl.url ?? null;
+      storageKey    = crawl.storage_key ?? null;
+      lastAttempted = crawl.timestamp ?? null;
+      foundVia      = crawl.found_via ?? null;
+    } else {
+      // No JSON entry and no DB record — derive from whether the district has a URL
+      crawlStatus   = d.website_url ? "not_crawled" : "no_url";
+      pdfUrl        = null;
+      storageKey    = null;
+      lastAttempted = null;
+      foundVia      = null;
+    }
+
+    return {
+      district_name:        d.name,
+      county:               d.county,
+      enrollment:           d.enrollment,
+      website_url:          d.website_url,
+      state_district_id:    rcdts,
+      crawl_status:         crawlStatus,
+      last_attempted:       lastAttempted,
+      storage_key:          storageKey,
+      pdf_url:              pdfUrl,
+      found_via:            foundVia,
+      last_settlement_year: d.last_settlement_year,
+    };
+  });
+
+  // Apply filters
+  const filtered = merged.filter((row) => {
+    if (statusFilter && row.crawl_status !== statusFilter) return false;
+    if (searchFilter && !row.district_name.toLowerCase().includes(searchFilter)) return false;
+    return true;
+  });
+
+  const total = filtered.length;
+  const items = filtered.slice(offset, offset + limit);
+
+  res.json({
+    items,
+    total,
+    page,
+    limit,
+    pages: Math.ceil(total / limit),
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /admin/extraction-report
 // ---------------------------------------------------------------------------
 router.get("/admin/extraction-report", requireAdminToken, async (_req, res) => {
