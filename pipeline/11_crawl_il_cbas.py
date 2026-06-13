@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import re
+import signal
 import sys
 import time
 from pathlib import Path
@@ -51,13 +52,18 @@ IL_CBA_CRAWL_STATE = Path(__file__).parent / "state" / "il_cba_crawl.json"
 IL_CBA_DATA_DIR    = common.DATA_DIR / "il_cba"
 IL_UNFOUND_CSV     = common.DATA_DIR / "il_cba_unfound.csv"
 
-IL_CBA_BOT_UA   = "CollBarBot/1.0 (hello@collbar.com; Illinois K-12 CBA research)"
-BROWSER_UA      = common.BROWSER_UA
-REQUEST_TIMEOUT = 15   # seconds
-MAX_HOPS        = 2    # max link depth from homepage
-MAX_CANDIDATES  = 3    # top-scoring links to follow per page
-MAX_RETRIES     = 3    # per request
-RETRY_DELAYS    = [2, 4, 8]   # exponential backoff seconds
+IL_CBA_BOT_UA        = "CollBarBot/1.0 (hello@collbar.com; Illinois K-12 CBA research)"
+BROWSER_UA           = common.BROWSER_UA
+REQUEST_TIMEOUT      = 15   # seconds per HTTP request
+DISTRICT_TIMEOUT     = 120  # seconds total per district crawl (SIGALRM watchdog)
+MAX_HOPS             = 2    # max link depth from homepage
+MAX_CANDIDATES       = 5    # top-scoring links to follow per page (CBA + nav)
+MAX_RETRIES          = 3    # per request
+RETRY_DELAYS         = [2, 4, 8]   # exponential backoff seconds
+
+
+def _district_timeout_handler(signum, frame):
+    raise TimeoutError("District crawl exceeded time limit")
 
 # CBA keyword list (case-insensitive, matched on link text AND href)
 CBA_KEYWORDS = [
@@ -71,6 +77,34 @@ CBA_KEYWORDS = [
     "iea",
     "ift",
     "board policy",
+]
+
+# Navigation keywords — broader terms for following links that may lead to CBA pages.
+# These don't directly mention a CBA but commonly lead to pages that do.
+NAV_KEYWORDS = [
+    "board of education",
+    "school board",
+    "board docs",
+    "boarddocs",
+    "human resources",
+    " hr ",
+    "staff resources",
+    "employment",
+    "personnel",
+    "superintendent",
+    "labor relations",
+    "contract",
+    "agreement",
+    "bargaining",
+    "teachers union",
+    "labor union",
+    "transparency",
+    "teacher resources",
+    "employee resources",
+    "negotiat",
+    "district document",
+    "board document",
+    "download",
 ]
 
 # Keywords that strongly suggest a PDF is a CBA
@@ -378,6 +412,13 @@ def _score_text(text: str) -> int:
     return sum(1 for kw in CBA_KEYWORDS if kw in tl)
 
 
+def _score_nav(text: str) -> int:
+    """Count navigation keywords — used to decide which links are worth following
+    even when they don't directly mention a CBA (e.g. Board, Human Resources)."""
+    tl = text.lower()
+    return sum(1 for kw in NAV_KEYWORDS if kw in tl)
+
+
 def _score_pdf_text(text: str) -> int:
     """Count PDF-specific keywords for a PDF candidate link."""
     tl = text.lower()
@@ -417,8 +458,10 @@ def _extract_links(soup: BeautifulSoup, base_url: str) -> list[dict]:
             continue
         text = a.get_text(" ", strip=True)
         combined = f"{text} {href}"
-        score = _score_text(combined)
-        links.append({"url": abs_url, "text": text, "href": href, "score": score})
+        score     = _score_text(combined)
+        nav_score = _score_nav(combined)
+        links.append({"url": abs_url, "text": text, "href": href,
+                      "score": score, "nav_score": nav_score})
     return links
 
 
@@ -481,16 +524,30 @@ def _crawl_district(session: requests.Session, homepage: str, dry_run: bool) -> 
     # Check for PDF candidates directly on the homepage (same-domain enforced inside)
     pdf_candidates = _extract_pdf_candidates(soup0, r.url, homepage)
 
-    # Collect high-scoring internal links to follow
+    # Collect internal links to follow: strict CBA matches first, then broader
+    # navigation links (Board, Human Resources, Staff, Documents, etc.) that may
+    # lead to CBA pages even when they don't mention CBA directly.
     all_links = _extract_links(soup0, r.url)
-    top_links = sorted(
-        [l for l in all_links if l["score"] > 0 and _same_domain(homepage, l["url"])],
+    same_domain_links = [l for l in all_links if _same_domain(homepage, l["url"])]
+
+    cba_links = sorted(
+        [l for l in same_domain_links if l["score"] > 0],
         key=lambda l: l["score"],
         reverse=True,
     )[:MAX_CANDIDATES]
+    cba_urls = {l["url"] for l in cba_links}
 
-    log.info("  Homepage: %d PDF candidates, %d links to follow",
-             len(pdf_candidates), len(top_links))
+    nav_links = sorted(
+        [l for l in same_domain_links
+         if l["score"] == 0 and l["nav_score"] > 0 and l["url"] not in cba_urls],
+        key=lambda l: l["nav_score"],
+        reverse=True,
+    )[:MAX_CANDIDATES]
+
+    top_links = cba_links + nav_links
+
+    log.info("  Homepage: %d PDF candidates, %d links to follow (%d CBA + %d nav)",
+             len(pdf_candidates), len(top_links), len(cba_links), len(nav_links))
 
     visited = {r.url, homepage}
 
@@ -529,16 +586,27 @@ def _crawl_district(session: requests.Session, homepage: str, dry_run: bool) -> 
         pdf_candidates.extend(new_pdfs)
         log.info("    Found %d PDF candidates on hop page", len(new_pdfs))
 
-        # At depth 1, also collect sub-links (for hop 2)
+        # At depth 1, also collect sub-links (for hop 2) — include nav-scored links
+        # so pages like "Board of Education" lead us deeper toward the CBA PDF.
         if depth == 1:
             sub_links = _extract_links(soup2, r2.url)
-            sub_top = sorted(
-                [l for l in sub_links if l["score"] > 0 and _same_domain(homepage, l["url"])
-                 and l["url"] not in visited],
-                key=lambda l: l["score"],
-                reverse=True,
+            sub_same = [l for l in sub_links
+                        if _same_domain(homepage, l["url"]) and l["url"] not in visited]
+
+            cba_sub = sorted(
+                [l for l in sub_same if l["score"] > 0],
+                key=lambda l: l["score"], reverse=True,
             )[:MAX_CANDIDATES]
-            queue.extend([(l["url"], l["text"], 2) for l in sub_top])
+            cba_sub_urls = {l["url"] for l in cba_sub}
+
+            nav_sub = sorted(
+                [l for l in sub_same
+                 if l["score"] == 0 and l["nav_score"] > 0
+                 and l["url"] not in cba_sub_urls],
+                key=lambda l: l["nav_score"], reverse=True,
+            )[:MAX_CANDIDATES]
+
+            queue.extend([(l["url"], l["text"], 2) for l in cba_sub + nav_sub])
 
     if not pdf_candidates:
         log.info("  No CBA PDF candidates found")
@@ -812,7 +880,24 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
         log.info("[ATTEMPT] %s (%s) → %s", name, rcdts, homepage)
         attempted += 1
 
-        best_pdf = _crawl_district(session, homepage, dry_run)
+        # Per-district watchdog: SIGALRM fires if a district hangs > DISTRICT_TIMEOUT secs.
+        signal.signal(signal.SIGALRM, _district_timeout_handler)
+        signal.alarm(DISTRICT_TIMEOUT)
+        try:
+            best_pdf = _crawl_district(session, homepage, dry_run)
+        except TimeoutError:
+            signal.alarm(0)
+            log.warning("  [TIMEOUT] %s exceeded %ds — skipping", name, DISTRICT_TIMEOUT)
+            failed += 1
+            state["per_district"][rcdts] = {
+                "status":    "failed",
+                "reason":    "timeout",
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            _save_crawl_state(state)
+            continue
+        finally:
+            signal.alarm(0)
 
         if best_pdf is None and search_fallback:
             log.info("  Direct crawl failed — trying search-engine fallback")
