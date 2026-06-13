@@ -47,3 +47,4 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+pipeline/state/il_cba_crawl.json
