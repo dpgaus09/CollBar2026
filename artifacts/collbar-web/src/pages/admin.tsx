@@ -970,7 +970,7 @@ function CrawlReportTab() {
       <section className="space-y-3">
         <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Corpus Metrics</h2>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <Metric label="Districts loaded" value={crawlState.districtsLoaded} sub="from FY2025 Ohio DEW XLSX" />
+          <Metric label="Districts loaded" value={crawlState.districtsLoaded} sub="from ISBE district directory" />
           <Metric
             label="CBA PDFs downloaded"
             value={crawlState.cbaDocsDownloaded}
@@ -979,7 +979,7 @@ function CrawlReportTab() {
           <Metric
             label="FF proposals"
             value={crawlState.ffProposalsLoaded}
-            sub={crawlState.ffPageAccessible ? "from SERB" : "page requires JS render"}
+            sub={crawlState.ffPageAccessible ? "from ILRB/IDOL" : "page requires JS render"}
           />
           <Metric
             label="Wage settlement PDFs"
@@ -999,7 +999,7 @@ function CrawlReportTab() {
         <div className="rounded-lg border border-slate-800 bg-slate-950 p-5 space-y-3">
           {[
             {
-              label: "School-sector docs found (SERB catalog)",
+              label: "School-sector docs found (IL crawl)",
               value: crawlState.cbaDocsFound,
               pct: null,
               color: "text-slate-300",
@@ -2218,7 +2218,7 @@ function AlertsTab() {
           </p>
           <p className="text-slate-500 text-xs mt-1">
             {statusFilter === "pending"
-              ? "Run the nightly cron (pipeline/08_cron_incremental.py) to detect new SERB documents."
+              ? "Run the nightly cron (pipeline/08_cron_incremental.py) to detect new IL CBA documents."
               : "Acknowledged alerts will appear here."}
           </p>
         </div>
