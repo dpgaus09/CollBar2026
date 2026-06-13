@@ -389,7 +389,7 @@ def main():
     except Exception as exc:
         log.exception("Directory refresh failed: %s", exc)
         # Never write to DB in dry-run mode, not even error rows.
-        if not dry_run:
+        if not args.dry_run:
             try:
                 conn = common.get_db_conn()
                 _ensure_log_table(conn)
