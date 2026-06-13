@@ -8,11 +8,15 @@ with doc_type='cba_pdf' so the existing 06_extract_contracts.py picks it up.
 
 Usage:
     python3 pipeline/11_crawl_il_cbas.py [--dry-run] [--limit N] [--district RCDTS]
+                                          [--search-fallback]
 
 Options:
-    --dry-run       Fetch and score pages, but don't download PDFs or write DB rows.
-    --limit N       Stop after attempting N districts (for testing).
-    --district RCDTS  Only crawl the specified district (by 11-digit RCDTS code).
+    --dry-run           Fetch and score pages, but don't download PDFs or write DB rows.
+    --limit N           Stop after attempting N districts (for testing).
+    --district RCDTS    Only crawl the specified district (by 11-digit RCDTS code).
+    --search-fallback   After a direct crawl fails, issue a search-engine query to find
+                        the CBA PDF (uses Google CSE if GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX
+                        env vars are set, otherwise falls back to DuckDuckGo HTML search).
 
 Resumable: already-found districts are skipped on re-run.
 Priority:  Districts with most-recent settlement to_year 2025-26 or 2026-27 first.
@@ -22,12 +26,13 @@ import argparse
 import csv
 import json
 import logging
+import os
 import re
 import sys
 import time
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -78,6 +83,236 @@ PDF_KEYWORDS = CBA_KEYWORDS + [
     "teachers",
     "education association",
 ]
+
+# Search-engine fallback settings
+SEARCH_API_DELAY    = 1.0   # seconds between Google CSE calls
+SEARCH_DDG_DELAY    = 3.0   # seconds between DuckDuckGo calls (be polite)
+SEARCH_MAX_RESULTS  = 10    # max results to inspect from search API
+# How many retries when DDG returns a captcha / empty page
+DDG_MAX_RETRIES     = 2
+
+# Module-level timestamps for per-engine rate limiting
+_google_cse_last_call: float = 0.0
+_ddg_last_call: float = 0.0
+
+# Set to True once Google CSE returns a quota/auth error so we stop
+# burning API calls for the rest of the run while still using DDG.
+_google_cse_quota_exhausted: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Search-engine helpers
+# ---------------------------------------------------------------------------
+
+def _google_cse_search(
+    query: str, session: requests.Session, api_key: str, cx: str
+) -> Optional[list[str]]:
+    """
+    Search using Google Custom Search API.
+
+    Returns a list of candidate URLs (may be empty), or *None* to signal
+    a hard quota / auth error.  On a quota/auth error the module-level
+    ``_google_cse_quota_exhausted`` flag is set so subsequent calls in the
+    same run are skipped immediately without wasting additional API quota.
+    """
+    global _google_cse_last_call, _google_cse_quota_exhausted
+
+    if _google_cse_quota_exhausted:
+        log.debug("  Google CSE disabled for this run (quota/auth error earlier)")
+        return None
+
+    wait = SEARCH_API_DELAY - (time.time() - _google_cse_last_call)
+    if wait > 0:
+        time.sleep(wait)
+    _google_cse_last_call = time.time()
+
+    params = {
+        "key":      api_key,
+        "cx":       cx,
+        "q":        query,
+        "num":      SEARCH_MAX_RESULTS,
+        "fileType": "pdf",
+    }
+    try:
+        r = session.get(
+            "https://www.googleapis.com/customsearch/v1",
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+            headers={"User-Agent": IL_CBA_BOT_UA},
+        )
+    except Exception as e:
+        log.warning("Google CSE request error: %s", e)
+        return []
+
+    if r.status_code in (403, 429):
+        log.warning(
+            "Google CSE quota/auth error (HTTP %s) — disabling for this run",
+            r.status_code,
+        )
+        _google_cse_quota_exhausted = True
+        return None   # Caller will fall through to DuckDuckGo
+
+    if not r.ok:
+        log.warning("Google CSE returned HTTP %s for query: %s", r.status_code, query)
+        return []
+
+    try:
+        data = r.json()
+    except Exception:
+        return []
+
+    items = data.get("items") or []
+    urls = [
+        item["link"]
+        for item in items
+        if item.get("link") and ".pdf" in item["link"].lower()
+    ]
+    log.info("  Google CSE: %d PDF result(s) for %r", len(urls), query)
+    return urls
+
+
+def _ddg_search(query: str, session: requests.Session) -> list[str]:
+    """
+    Search DuckDuckGo HTML interface (no API key required).
+
+    Parses <a class="result__a"> elements and resolves DDG redirect wrappers
+    (uddg= query param) to real URLs.  Returns a list of candidate URLs
+    (may be empty).
+    """
+    global _ddg_last_call
+    wait = SEARCH_DDG_DELAY - (time.time() - _ddg_last_call)
+    if wait > 0:
+        time.sleep(wait)
+    _ddg_last_call = time.time()
+
+    for attempt in range(DDG_MAX_RETRIES):
+        try:
+            r = session.get(
+                "https://html.duckduckgo.com/html/",
+                params={"q": query},
+                headers={
+                    "User-Agent":      BROWSER_UA,
+                    "Accept":          "text/html,application/xhtml+xml",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+                timeout=REQUEST_TIMEOUT,
+            )
+        except Exception as e:
+            log.warning("DuckDuckGo request error: %s", e)
+            return []
+
+        if r.status_code == 429:
+            wait_s = int(r.headers.get("Retry-After", SEARCH_DDG_DELAY * (attempt + 2)))
+            log.warning("DuckDuckGo rate-limited — waiting %ds", wait_s)
+            time.sleep(wait_s)
+            _ddg_last_call = time.time()
+            continue
+
+        if not r.ok:
+            log.warning("DuckDuckGo returned HTTP %s", r.status_code)
+            return []
+
+        soup = BeautifulSoup(r.text, "html.parser")
+        urls: list[str] = []
+        for a in soup.select("a.result__a"):
+            href = a.get("href", "")
+            # DDG wraps links: /l/?uddg=<encoded-real-url>&...
+            if "uddg=" in href:
+                qs = parse_qs(urlparse(href).query)
+                real = qs.get("uddg", [""])[0]
+                if real:
+                    href = real
+            if href and ".pdf" in href.lower():
+                urls.append(href)
+
+        log.info("  DuckDuckGo: %d PDF result(s) for %r", len(urls), query)
+        return urls
+
+    return []
+
+
+def _search_fallback(district: dict, session: requests.Session) -> Optional[dict]:
+    """
+    Issue a search-engine query to find a CBA PDF for a district whose
+    direct crawl failed.
+
+    Strategy:
+      1. If GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX env vars are set, try
+         ``site:<domain> "collective bargaining" filetype:pdf`` via Google CSE.
+      2. Otherwise (or if Google CSE returns nothing), try DuckDuckGo HTML
+         search with a site-scoped query, then a broader name-based query.
+      3. Score each candidate URL; return the best match or None.
+
+    Returns dict {url, score, found_via} or None.
+    """
+    name     = district["name"]
+    homepage = district["website_url"]
+    domain   = urlparse(homepage).netloc.lstrip("www.")
+
+    api_key = os.environ.get("GOOGLE_CSE_API_KEY", "").strip()
+    cx      = os.environ.get("GOOGLE_CSE_CX", "").strip()
+
+    candidate_urls: list[str] = []
+
+    # --- Google CSE (preferred when configured) ---
+    if api_key and cx:
+        google_query = (
+            f'site:{domain} "collective bargaining" filetype:pdf'
+        )
+        log.info("  Search fallback [Google CSE]: %s", google_query)
+        result = _google_cse_search(google_query, session, api_key, cx)
+        if result is None:
+            # Quota/auth error — Google CSE is disabled for the rest of this
+            # run (tracked inside _google_cse_search via module-level flag),
+            # but DuckDuckGo is still available and should be tried below.
+            log.warning("  Google CSE quota exhausted — will still try DuckDuckGo")
+        else:
+            candidate_urls.extend(result)
+
+    # --- DuckDuckGo (free fallback) ---
+    # Always run when there are no candidates yet, regardless of whether
+    # Google CSE hit a quota error — DDG is independent and should not be
+    # suppressed by a Google-specific failure.
+    if not candidate_urls:
+        # First: site-scoped query (often effective for indexed district sites)
+        site_query = (
+            f'site:{domain} "collective bargaining" filetype:pdf'
+        )
+        log.info("  Search fallback [DuckDuckGo, site-scoped]: %s", site_query)
+        candidate_urls.extend(_ddg_search(site_query, session))
+
+        # Second pass: broader name + district query (catches hosted copies)
+        if not candidate_urls:
+            broad_query = (
+                f'"{name}" "collective bargaining agreement" filetype:pdf'
+            )
+            log.info("  Search fallback [DuckDuckGo, broad]: %s", broad_query)
+            candidate_urls.extend(_ddg_search(broad_query, session))
+
+    if not candidate_urls:
+        log.info("  Search fallback found no PDF candidates")
+        return None
+
+    # Score candidates; prefer same-domain, then highest keyword score
+    scored = []
+    for url in candidate_urls:
+        score = _score_pdf_text(url)
+        on_domain = _same_domain(homepage, url)
+        scored.append((score + (5 if on_domain else 0), url, on_domain))
+
+    scored.sort(key=lambda t: t[0], reverse=True)
+    best_score, best_url, on_domain = scored[0]
+
+    if best_score <= 0:
+        log.info("  Search fallback: no candidate scored above 0")
+        return None
+
+    log.info(
+        "  Search fallback best: score=%d  on_domain=%s  %s",
+        best_score, on_domain, best_url,
+    )
+    return {"url": best_url, "score": best_score, "found_via": "search_fallback"}
+
 
 # ---------------------------------------------------------------------------
 # Per-domain rate limiter
@@ -508,7 +743,8 @@ def _ensure_website_urls(conn):
 # ---------------------------------------------------------------------------
 
 def crawl(dry_run: bool = False, limit: Optional[int] = None,
-          target_rcdts: Optional[str] = None):
+          target_rcdts: Optional[str] = None,
+          search_fallback: bool = False):
     conn = common.get_db_conn()
 
     _ensure_website_urls(conn)
@@ -522,8 +758,11 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
             log.error("District with RCDTS %s not found or has no website URL", target_rcdts)
             sys.exit(1)
 
-    log.info("IL CBA crawler starting: %d districts with URL (dry_run=%s, limit=%s)",
-             len(districts), dry_run, limit)
+    log.info(
+        "IL CBA crawler starting: %d districts with URL "
+        "(dry_run=%s, limit=%s, search_fallback=%s)",
+        len(districts), dry_run, limit, search_fallback,
+    )
 
     state = _load_crawl_state()
     state["il_no_url"] = no_url_count
@@ -556,7 +795,12 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
 
         # Skip already-resolved districts
         prev = state["per_district"].get(rcdts, {})
-        if prev.get("status") in ("found", "skip"):
+        skip_statuses = {"found", "skip"}
+        # When running with --search-fallback, also skip districts whose
+        # search fallback already ran and failed (to preserve quota).
+        if search_fallback:
+            skip_statuses.add("search_failed")
+        if prev.get("status") in skip_statuses:
             log.info("[SKIP] %s (%s) — already %s", name, rcdts, prev["status"])
             skipped += 1
             continue
@@ -570,31 +814,43 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
 
         best_pdf = _crawl_district(session, homepage, dry_run)
 
+        if best_pdf is None and search_fallback:
+            log.info("  Direct crawl failed — trying search-engine fallback")
+            best_pdf = _search_fallback(dist, session)
+
         if best_pdf is None:
             failed += 1
+            # Use "search_failed" when search fallback also ran and found nothing,
+            # so subsequent runs with --search-fallback don't repeat the query.
+            fail_status = "search_failed" if search_fallback else "failed"
             state["per_district"][rcdts] = {
-                "status":    "failed",
+                "status":    fail_status,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
             _save_crawl_state(state)
             continue
 
-        pdf_url = best_pdf["url"]
+        pdf_url  = best_pdf["url"]
+        found_via = best_pdf.get("found_via", "direct_crawl")
 
         if dry_run:
-            log.info("[DRY-RUN] Would download: %s", pdf_url)
+            log.info("[DRY-RUN] Would download: %s  (via %s)", pdf_url, found_via)
             found += 1
             state["per_district"][rcdts] = {
                 "status":    "found",
                 "url":       pdf_url,
+                "found_via": found_via,
                 "dry_run":   True,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
             _save_crawl_state(state)
             continue
 
-        # Final domain guard before download (defense-in-depth)
-        if not _same_domain(homepage, pdf_url):
+        # Final domain guard before download (defense-in-depth).
+        # Search-fallback results are allowed to be off-domain — the search
+        # engine already vetted them, and district PDFs are sometimes hosted
+        # on external platforms (Google Drive, BoardDocs, etc.).
+        if found_via == "direct_crawl" and not _same_domain(homepage, pdf_url):
             log.info("  Rejecting off-domain PDF URL (final check): %s", pdf_url)
             failed += 1
             state["per_district"][rcdts] = {
@@ -670,6 +926,7 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
         state["per_district"][rcdts] = {
             "status":      "found",
             "url":         pdf_url,
+            "found_via":   found_via,
             "storage_key": stored_key,
             "file_hash":   file_hash,
             "doc_id":      str(doc_id),
@@ -679,10 +936,17 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
 
     # Update aggregate counters
     all_statuses = [v["status"] for v in state["per_district"].values()]
-    state["il_attempted"] = sum(1 for s in all_statuses if s in ("found", "failed"))
-    state["il_found"]     = sum(1 for s in all_statuses if s == "found")
-    state["il_failed"]    = sum(1 for s in all_statuses if s == "failed")
-    state["il_skipped"]   = sum(1 for s in all_statuses if s in ("skip",))
+    state["il_attempted"]      = sum(1 for s in all_statuses if s in ("found", "failed", "search_failed"))
+    state["il_found"]          = sum(1 for s in all_statuses if s == "found")
+    state["il_failed"]         = sum(1 for s in all_statuses if s in ("failed", "search_failed"))
+    state["il_skipped"]        = sum(1 for s in all_statuses if s in ("skip",))
+    # Break out search-fallback stats for visibility
+    all_entries = list(state["per_district"].values())
+    state["il_found_via_search"] = sum(
+        1 for e in all_entries
+        if e.get("status") == "found" and e.get("found_via") == "search_fallback"
+    )
+    state["il_search_failed"]  = sum(1 for s in all_statuses if s == "search_failed")
     _save_crawl_state(state)
 
     # Write unfound CSV
@@ -696,6 +960,8 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
 
     total_with_url = len(districts)
     pct = (found / total_with_url * 100) if total_with_url > 0 else 0.0
+    search_found = state.get("il_found_via_search", 0)
+    search_fail  = state.get("il_search_failed", 0)
 
     print(f"\n{'='*65}")
     print(f"IL CBA Crawl Results{'  [DRY RUN]' if dry_run else ''}")
@@ -704,7 +970,11 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
     print(f"  Districts without URL:       {no_url_count:>6,}")
     print(f"  Attempted this run:          {attempted:>6,}")
     print(f"  PDFs found/downloaded:       {found:>6,}  ({pct:.1f}%)")
+    if search_fallback:
+        print(f"    via search fallback:       {search_found:>6,}")
     print(f"  Failed / no PDF found:       {failed:>6,}")
+    if search_fallback and search_fail:
+        print(f"    incl. search also failed:  {search_fail:>6,}")
     print(f"  Skipped (done or dup):       {skipped:>6,}")
     if not dry_run:
         print(f"  Unfound CSV:                 {unfound_n:>6,} rows")
@@ -723,5 +993,21 @@ if __name__ == "__main__":
                         help="Stop after N districts")
     parser.add_argument("--district", type=str, default=None,
                         help="Only crawl this district (11-digit RCDTS code)")
+    parser.add_argument(
+        "--search-fallback", action="store_true",
+        help=(
+            "After a direct crawl fails, issue a search-engine query to find "
+            "the CBA PDF.  Uses Google Custom Search API if GOOGLE_CSE_API_KEY "
+            "and GOOGLE_CSE_CX env vars are set; otherwise uses DuckDuckGo "
+            "HTML search (no API key required).  Quota errors are handled "
+            "gracefully and the failed status is recorded so the district is "
+            "not retried on subsequent runs."
+        ),
+    )
     args = parser.parse_args()
-    crawl(dry_run=args.dry_run, limit=args.limit, target_rcdts=args.district)
+    crawl(
+        dry_run=args.dry_run,
+        limit=args.limit,
+        target_rcdts=args.district,
+        search_fallback=args.search_fallback,
+    )
