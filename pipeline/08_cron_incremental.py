@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Nightly incremental SERB scraper — Phase 5 cron job.
+Nightly incremental scraper — Phase 5 cron job.
 
-Fetches the SERB CBA catalog and:
+Step 1 (OH): Fetches the SERB CBA catalog and:
   1. Detects NEW documents (URL not in source_documents) → 'new_doc' alert
   2. Detects CHANGED documents (URL known but file hash changed) → 'changed_doc' alert
      Uses HTTP HEAD to check Last-Modified before doing a full download.
 
-Does NOT run full LLM extraction — alerts surface in the admin UI so an
-operator can trigger a pipeline run when needed.
+Step 2 (OH): Runs LLM extraction on any unprocessed OH CBA PDFs (gated on count).
+
+Step 3 (IL): Runs LLM extraction on any unprocessed IL CBA PDFs (gated on count).
 
 Usage:
-    python3 pipeline/08_cron_incremental.py [--dry-run]
+    python3 pipeline/08_cron_incremental.py [--dry-run] [--max-docs-per-state N]
 
 Cron example (run at 3am daily):
     0 3 * * * /usr/bin/python3 /home/runner/workspace/pipeline/08_cron_incremental.py >> /var/log/collbar_cron.log 2>&1
@@ -21,6 +22,7 @@ import hashlib
 import html
 import logging
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -255,10 +257,90 @@ def check_changed_docs(session, conn, records: list, known_docs: dict,
     return changed_alerts
 
 
+DEFAULT_MAX_DOCS_PER_STATE = 20
+EXTRACT_SCRIPT = Path(__file__).parent / "06_extract_contracts.py"
+
+
+def count_unprocessed_docs(conn, state: str) -> int:
+    """Return the number of cba_pdf source_documents with no successful extraction_run for a state."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COUNT(*)
+        FROM source_documents sd
+        LEFT JOIN districts d ON d.id = sd.district_id
+        WHERE sd.doc_type = 'cba_pdf'
+          AND COALESCE(d.state, 'OH') = %s
+          AND sd.id NOT IN (
+              SELECT er.source_doc_id
+              FROM extraction_runs er
+              WHERE er.status = 'success'
+                AND er.source_doc_id IS NOT NULL
+          )
+        """,
+        (state,),
+    )
+    row = cur.fetchone()
+    cur.close()
+    return int(row[0]) if row else 0
+
+
+def run_extraction_for_state(state: str, max_docs: int, dry_run: bool) -> dict:
+    """
+    Invoke 06_extract_contracts.py --state STATE --max-docs N as a subprocess.
+    Returns a dict with keys: state, returncode, stdout_tail, stderr_tail.
+    """
+    cmd = [
+        sys.executable,
+        str(EXTRACT_SCRIPT),
+        "--state", state,
+        "--max-docs", str(max_docs),
+    ]
+    if dry_run:
+        cmd.append("--dry-run")
+
+    log.info("Launching extraction: %s", " ".join(cmd))
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
+        stdout_tail = result.stdout[-3000:] if result.stdout else ""
+        stderr_tail = result.stderr[-3000:] if result.stderr else ""
+        if result.returncode != 0:
+            log.error(
+                "Extraction for %s exited %d.\nSTDERR tail:\n%s",
+                state, result.returncode, stderr_tail,
+            )
+        else:
+            log.info("Extraction for %s completed successfully.", state)
+        return {
+            "state": state,
+            "returncode": result.returncode,
+            "stdout_tail": stdout_tail,
+            "stderr_tail": stderr_tail,
+        }
+    except subprocess.TimeoutExpired:
+        log.error("Extraction for %s timed out after 3600 s", state)
+        return {"state": state, "returncode": -1, "stdout_tail": "", "stderr_tail": "TIMEOUT"}
+    except Exception as exc:
+        log.error("Extraction for %s failed to launch: %s", state, exc)
+        return {"state": state, "returncode": -1, "stdout_tail": "", "stderr_tail": str(exc)}
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Nightly incremental SERB scraper")
+    parser = argparse.ArgumentParser(description="Nightly incremental scraper")
     parser.add_argument("--dry-run", action="store_true",
                         help="Do not write to database")
+    parser.add_argument(
+        "--max-docs-per-state",
+        type=int,
+        default=DEFAULT_MAX_DOCS_PER_STATE,
+        metavar="N",
+        help=f"Max CBA docs to extract per state per nightly run (default: {DEFAULT_MAX_DOCS_PER_STATE})",
+    )
     args = parser.parse_args()
 
     log.info("=== CollBar nightly incremental scraper ===")
@@ -371,6 +453,34 @@ def main():
         session, conn, records, known_docs, dist_index, dry_run=args.dry_run
     )
 
+    # ── Phase C: OH extraction ─────────────────────────────────────────────
+    oh_unprocessed = count_unprocessed_docs(conn, "OH")
+    log.info("Unprocessed OH CBA docs: %d", oh_unprocessed)
+    oh_result = None
+    if oh_unprocessed > 0:
+        log.info(
+            "Running OH extraction (up to %d docs)…", args.max_docs_per_state
+        )
+        oh_result = run_extraction_for_state(
+            "OH", args.max_docs_per_state, args.dry_run
+        )
+    else:
+        log.info("No unprocessed OH CBA docs — skipping OH extraction.")
+
+    # ── Phase D: IL extraction ─────────────────────────────────────────────
+    il_unprocessed = count_unprocessed_docs(conn, "IL")
+    log.info("Unprocessed IL CBA docs: %d", il_unprocessed)
+    il_result = None
+    if il_unprocessed > 0:
+        log.info(
+            "Running IL extraction (up to %d docs)…", args.max_docs_per_state
+        )
+        il_result = run_extraction_for_state(
+            "IL", args.max_docs_per_state, args.dry_run
+        )
+    else:
+        log.info("No unprocessed IL CBA docs — skipping IL extraction.")
+
     conn.close()
 
     print()
@@ -387,6 +497,19 @@ def main():
         print(f"  Changed alerts inserted : {changed_alerts:>8,}")
     else:
         print("  [DRY RUN — no DB writes]")
+    print("-" * 60)
+    print(f"  OH unprocessed docs     : {oh_unprocessed:>8,}")
+    if oh_result is not None:
+        status = "OK" if oh_result["returncode"] == 0 else f"ERR({oh_result['returncode']})"
+        print(f"  OH extraction result    : {status:>8}")
+    else:
+        print(f"  OH extraction           : {'skipped':>8}")
+    print(f"  IL unprocessed docs     : {il_unprocessed:>8,}")
+    if il_result is not None:
+        status = "OK" if il_result["returncode"] == 0 else f"ERR({il_result['returncode']})"
+        print(f"  IL extraction result    : {status:>8}")
+    else:
+        print(f"  IL extraction           : {'skipped':>8}")
     print("=" * 60)
     print()
 

@@ -604,6 +604,36 @@ router.get("/admin/extraction-report", requireAdminToken, async (_req, res) => {
         ? Math.round((auditAgreedCount / auditReviewedCount) * 1000) / 10
         : null;
 
+    // Per-state CBA doc counts and extraction run counts
+    const stateDocRows = await db.execute(sql.raw(`
+      SELECT COALESCE(d.state, 'OH') AS state, COUNT(*)::int AS total,
+             COUNT(er.source_doc_id)::int AS processed
+      FROM source_documents sd
+      LEFT JOIN districts d ON d.id = sd.district_id
+      LEFT JOIN (
+        SELECT DISTINCT source_doc_id FROM extraction_runs WHERE status = 'success'
+      ) er ON er.source_doc_id = sd.id
+      WHERE sd.doc_type = 'cba_pdf'
+      GROUP BY COALESCE(d.state, 'OH')
+    `));
+    const stateDocMap: Record<string, { total: number; processed: number }> = {};
+    for (const r of stateDocRows.rows as { state: string; total: number; processed: number }[]) {
+      stateDocMap[r.state] = { total: r.total, processed: r.processed };
+    }
+
+    const stateRunRows = await db.execute(sql.raw(`
+      SELECT COALESCE(d.state, 'OH') AS state, er.status, COUNT(*)::int AS n
+      FROM extraction_runs er
+      LEFT JOIN source_documents sd ON sd.id = er.source_doc_id
+      LEFT JOIN districts d ON d.id = sd.district_id
+      GROUP BY COALESCE(d.state, 'OH'), er.status
+    `));
+    const stateRunMap: Record<string, Record<string, number>> = {};
+    for (const r of stateRunRows.rows as { state: string; status: string; n: number }[]) {
+      if (!stateRunMap[r.state]) stateRunMap[r.state] = {};
+      stateRunMap[r.state][r.status] = r.n;
+    }
+
     res.json({
       runCounts,
       totalContracts,
@@ -617,6 +647,8 @@ router.get("/admin/extraction-report", requireAdminToken, async (_req, res) => {
       auditSampleCount,
       auditReviewedCount,
       auditAgreementRate,
+      stateDocMap,
+      stateRunMap,
     });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -1013,7 +1045,8 @@ router.post("/admin/start-il-crawl", requireAdminToken, (req, res) => {
     // Check if still alive
     try {
       process.kill(_crawlPid, 0);
-      return res.json({ status: "already_running", pid: _crawlPid });
+      res.json({ status: "already_running", pid: _crawlPid });
+      return;
     } catch {
       _crawlPid = null;
     }

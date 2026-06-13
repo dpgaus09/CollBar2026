@@ -53,6 +53,8 @@ interface ExtractionReport {
   auditSampleCount: number;
   auditReviewedCount: number;
   auditAgreementRate: number | null;
+  stateDocMap: Record<string, { total: number; processed: number }>;
+  stateRunMap: Record<string, Record<string, number>>;
 }
 
 interface IlCbaCoverage {
@@ -1284,6 +1286,55 @@ function ExtractionReportTab() {
           </table>
         </div>
       </section>
+
+      {/* Per-state extraction breakdown */}
+      {(data.stateDocMap && Object.keys(data.stateDocMap).length > 0) && (
+        <section className="space-y-3">
+          <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
+            Extraction by State
+          </h2>
+          <div className="rounded-lg border border-slate-800 overflow-hidden">
+            <table className="w-full">
+              <thead className="bg-slate-900 border-b border-slate-800">
+                <tr>
+                  <th className="text-left px-4 py-2 text-xs text-slate-400 font-medium">State</th>
+                  <th className="text-right px-4 py-2 text-xs text-slate-400 font-medium">CBA PDFs</th>
+                  <th className="text-right px-4 py-2 text-xs text-slate-400 font-medium">Processed</th>
+                  <th className="text-right px-4 py-2 text-xs text-slate-400 font-medium">Coverage</th>
+                  <th className="text-right px-4 py-2 text-xs text-slate-400 font-medium">Runs (success)</th>
+                  <th className="text-right px-4 py-2 text-xs text-slate-400 font-medium">Runs (failed)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/50">
+                {["OH", "IL", ...Object.keys(data.stateDocMap).filter((s) => s !== "OH" && s !== "IL")].map((state) => {
+                  const docs = data.stateDocMap[state];
+                  if (!docs) return null;
+                  const pct = docs.total > 0 ? Math.round((docs.processed / docs.total) * 1000) / 10 : null;
+                  const runs = data.stateRunMap?.[state] ?? {};
+                  return (
+                    <tr key={state} className="bg-slate-950 hover:bg-slate-900/50">
+                      <td className="px-4 py-3 text-xs font-bold text-slate-200">{state}</td>
+                      <td className="px-4 py-3 text-right text-xs font-mono text-slate-300">{docs.total.toLocaleString()}</td>
+                      <td className="px-4 py-3 text-right text-xs font-mono text-slate-300">{docs.processed.toLocaleString()}</td>
+                      <td className={`px-4 py-3 text-right text-xs font-mono font-bold ${
+                        pct === null ? "text-slate-600" : pct >= 95 ? "text-emerald-400" : pct > 0 ? "text-amber-400" : "text-slate-500"
+                      }`}>
+                        {pct !== null ? `${pct}%` : "—"}
+                      </td>
+                      <td className="px-4 py-3 text-right text-xs font-mono text-emerald-400">
+                        {(runs["success"] ?? 0).toLocaleString()}
+                      </td>
+                      <td className="px-4 py-3 text-right text-xs font-mono text-red-400">
+                        {(runs["failed"] ?? 0).toLocaleString()}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       <section className="space-y-3">
         <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
