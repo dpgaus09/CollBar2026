@@ -48,13 +48,14 @@ schedule(
 );
 logger.info("Cron registered: extraction cron at 03:00 America/Chicago daily");
 
-// Weekly IL CBA crawl — 2:00 AM every Sunday America/Chicago
+// Bi-monthly IL CBA crawl — 2:00 AM on the 1st and 15th of each month, America/Chicago
+// (Districts settle on a fiscal-year calendar; weekly is unnecessary churn)
 schedule(
-  "0 2 * * 0",
+  "0 2 1,15 * *",
   () => {
-    logger.info("Cron: starting weekly IL CBA crawl");
+    logger.info("Cron: starting bi-monthly IL CBA crawl");
     spawnIlCrawl();
   },
   { timezone: "America/Chicago" },
 );
-logger.info("Cron registered: IL CBA crawl at 02:00 America/Chicago every Sunday");
+logger.info("Cron registered: IL CBA crawl at 02:00 America/Chicago on 1st and 15th of each month");

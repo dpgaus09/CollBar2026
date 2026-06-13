@@ -942,6 +942,95 @@ function DirectoryRefreshCard() {
   );
 }
 
+function ScheduledAutomationsCard() {
+  const queryClient = useQueryClient();
+  const { data: crawlData, refetch: refetchCrawl } = useIlCrawlStatus();
+  const { data: cronData, refetch: refetchCron } = useExtractionCronStatus();
+
+  const runCrawl = useMutation({
+    mutationFn: () =>
+      fetch(apiUrl("/api/admin/start-il-crawl"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({}),
+      }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/il-crawl-status"] });
+      refetchCrawl();
+    },
+  });
+
+  const runCron = useMutation({
+    mutationFn: () =>
+      fetch(apiUrl("/api/admin/run-extraction-cron"), {
+        method: "POST",
+        credentials: "include",
+      }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/extraction-cron-status"] });
+      refetchCron();
+    },
+  });
+
+  const jobs = [
+    {
+      label: "IL CBA Crawl",
+      schedule: "2 AM on 1st & 15th",
+      running: crawlData?.running ?? false,
+      tail: crawlData?.tail ?? [],
+      mutate: () => runCrawl.mutate(),
+      isPending: runCrawl.isPending,
+    },
+    {
+      label: "Extraction Cron",
+      schedule: "3 AM daily",
+      running: cronData?.running ?? false,
+      tail: cronData?.tail ?? [],
+      mutate: () => runCron.mutate(),
+      isPending: runCron.isPending,
+    },
+  ];
+
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-950 p-5 space-y-5">
+      {jobs.map((job) => (
+        <div key={job.label} className="space-y-2">
+          <div className="flex items-center justify-between gap-4">
+            <div className="space-y-0.5">
+              <div className="flex items-center gap-2">
+                {job.running && (
+                  <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                )}
+                <span className={`text-sm font-mono font-medium ${job.running ? "text-amber-400" : "text-slate-300"}`}>
+                  {job.label}
+                </span>
+                <span className="text-xs text-slate-600">{job.schedule}</span>
+              </div>
+              <div className="text-xs text-slate-500">
+                {job.running ? "Running…" : job.tail.length > 0 ? job.tail[job.tail.length - 1]?.slice(0, 120) : "No runs yet"}
+              </div>
+            </div>
+            <button
+              onClick={job.mutate}
+              disabled={job.running || job.isPending}
+              className="shrink-0 text-xs px-3 py-1.5 rounded border border-slate-700 hover:border-sky-600 text-slate-400 hover:text-sky-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {job.running ? "Running…" : job.isPending ? "Starting…" : "Run now"}
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function CrawlReportTab() {
   const [showLogin, setShowLogin] = useState(false);
   const { data: session, refetch: refetchSession } = useAdminSession();
@@ -1261,6 +1350,19 @@ function CrawlReportTab() {
           logged but not reprocessed. Schedule fires only on a reserved VM deployment.
         </p>
         <DirectoryRefreshCard />
+      </section>
+
+      {/* Scheduled Automations */}
+      <section className="space-y-3">
+        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
+          Scheduled Automations
+        </h2>
+        <p className="text-xs text-slate-500">
+          These jobs run automatically on the API server. IL CBA Crawl re-crawls all district
+          websites on the 1st and 15th of each month at 2 AM Central. Extraction Cron processes
+          any unextracted CBA PDFs nightly at 3 AM Central. Both skip if already running.
+        </p>
+        <ScheduledAutomationsCard />
       </section>
 
       {/* Per-district crawl log */}
