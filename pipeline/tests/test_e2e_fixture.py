@@ -179,8 +179,8 @@ class TestDBInsertFlow(unittest.TestCase):
         cur = cls.conn.cursor()
         cur.execute(
             """
-            INSERT INTO districts (state, state_district_id, name)
-            VALUES ('OH', '999999', '__fixture_test_district__')
+            INSERT INTO districts (state, state_district_id, name, slug)
+            VALUES ('OH', '999999', '__fixture_test_district__', '__fixture-test-district__')
             ON CONFLICT (state, state_district_id) DO UPDATE SET name = EXCLUDED.name
             RETURNING id
             """
@@ -259,8 +259,8 @@ class TestExtractionPipelineFromFixturePDF(unittest.TestCase):
         cur = cls.conn.cursor()
         cur.execute(
             """
-            INSERT INTO districts (state, state_district_id, name)
-            VALUES ('OH', '999998', '__e2e_pdf_test_district__')
+            INSERT INTO districts (state, state_district_id, name, slug)
+            VALUES ('OH', '999998', '__e2e_pdf_test_district__', '__e2e-pdf-test-district__')
             ON CONFLICT (state, state_district_id) DO UPDATE SET name = EXCLUDED.name
             RETURNING id
             """
@@ -281,7 +281,7 @@ class TestExtractionPipelineFromFixturePDF(unittest.TestCase):
 
     def test_pdf_text_extraction_produces_content(self):
         """extract_pdf_text on the fixture PDF must return non-empty text."""
-        text, used_ocr = _MOD.extract_pdf_text(self.FIXTURE_PDF)
+        text, used_ocr, _ = _MOD.extract_pdf_text(self.FIXTURE_PDF)
         self.assertIsInstance(text, str)
         self.assertGreater(len(text), 50, "Expected meaningful text from fixture PDF")
         self.assertFalse(used_ocr, "Fixture PDF should have a usable text layer")
@@ -292,7 +292,7 @@ class TestExtractionPipelineFromFixturePDF(unittest.TestCase):
         upsert_contract → insert_provisions — all in a rolled-back transaction.
         """
         # Step 1: extract real text from the fixture PDF
-        text, _ = _MOD.extract_pdf_text(self.FIXTURE_PDF)
+        text, _, _ = _MOD.extract_pdf_text(self.FIXTURE_PDF)
         self.assertGreater(len(text), 50, "PDF text extraction failed")
 
         # Step 2: call the LLM (mocked) using the extracted text

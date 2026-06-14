@@ -142,12 +142,18 @@ PDF_KEYWORDS = CBA_KEYWORDS + [
 # Search-engine fallback settings
 SEARCH_MAX_RESULTS  = 10    # max results to inspect per engine
 SEARCH_API_DELAY    = 1.0   # seconds between Google CSE calls
+SEARCH_SERPER_DELAY = 1.0   # seconds between Serper.dev calls (politeness/backoff)
 SEARCH_DDG_DELAY    = 3.0   # seconds between DuckDuckGo calls
 DDG_MAX_RETRIES     = 2
 
 # Module-level rate-limit timestamps
 _google_cse_last_call: float = 0.0
+_serper_last_call: float = 0.0
 _ddg_last_call: float = 0.0
+
+# Per-run cache of search query -> result URLs (avoids repeating identical
+# queries across the per-unit variants and across districts that share a host).
+_search_query_cache: dict[str, list[str]] = {}
 
 # Set to True once Google CSE returns a quota/auth error
 _google_cse_quota_exhausted: bool = False
@@ -163,9 +169,24 @@ def _serper_search(query: str, session: requests.Session) -> list[str]:
     Returns a list of result URLs (all types — not just PDF).
     Set SERPER_API_KEY env var to enable.
     """
+    global _serper_last_call
+
     api_key = os.environ.get("SERPER_API_KEY", "").strip()
     if not api_key:
         return []
+
+    cache_key = f"serper::{query}"
+    if cache_key in _search_query_cache:
+        cached = _search_query_cache[cache_key]
+        log.info("  Serper [cache]: %d result(s) for %r", len(cached), query)
+        return cached
+
+    # Politeness/backoff: keep at least SEARCH_SERPER_DELAY seconds between calls.
+    wait = SEARCH_SERPER_DELAY - (time.time() - _serper_last_call)
+    if wait > 0:
+        time.sleep(wait)
+    _serper_last_call = time.time()
+
     try:
         r = session.post(
             "https://google.serper.dev/search",
@@ -176,6 +197,23 @@ def _serper_search(query: str, session: requests.Session) -> list[str]:
     except Exception as e:
         log.warning("Serper request error: %s", e)
         return []
+
+    if r.status_code == 429:
+        # Rate limited — back off once and retry a single time.
+        log.warning("Serper rate-limited (429) — backing off %.1fs and retrying once",
+                    SEARCH_SERPER_DELAY * 3)
+        time.sleep(SEARCH_SERPER_DELAY * 3)
+        try:
+            r = session.post(
+                "https://google.serper.dev/search",
+                json={"q": query, "num": SEARCH_MAX_RESULTS},
+                headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+                timeout=REQUEST_TIMEOUT,
+            )
+            _serper_last_call = time.time()
+        except Exception as e:
+            log.warning("Serper retry error: %s", e)
+            return []
 
     if not r.ok:
         log.warning("Serper API HTTP %s for query %r: %s", r.status_code, query, r.text[:120])
@@ -188,6 +226,7 @@ def _serper_search(query: str, session: requests.Session) -> list[str]:
 
     urls = [item["link"] for item in data.get("organic", []) if item.get("link")]
     log.info("  Serper: %d result(s) for %r", len(urls), query)
+    _search_query_cache[cache_key] = urls
     return urls
 
 
@@ -318,22 +357,91 @@ def _ddg_search(query: str, session: requests.Session) -> list[str]:
     return []
 
 
-def _search_fallback(district: dict, session: requests.Session) -> Optional[dict]:
+# Per-unit search phrases. Each adds a unit-targeted query variant so the
+# crawler can surface separate non-teacher CBAs (support staff, custodial,
+# ESP, etc.) that a single generic "collective bargaining" query would miss.
+# The bargaining unit of each returned PDF is still decided by
+# _classify_candidate (filename/link text), never by which query surfaced it —
+# so units are never mixed.
+_SEARCH_UNIT_PHRASES = [
+    "collective bargaining agreement",
+    "support staff collective bargaining agreement",
+    "educational support personnel agreement",
+]
+
+
+# Domains that host generic, district-agnostic documents (state board-meeting
+# packets, legislative records, association libraries). For a no-URL district
+# these routinely match on the district name alone and yield false-positive
+# "CBAs"; some (isbe.net) are also unreachable from this environment, wasting
+# download retries. A CBA candidate from one of these is never accepted.
+_SEARCH_DOMAIN_DENYLIST = (
+    "isbe.net",
+    "ilga.gov",
+    "illinois.gov",
+)
+
+
+def _is_denied_search_domain(url: str) -> bool:
+    """True if url's host is (a subdomain of) a denylisted aggregator domain."""
+    try:
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        return False
+    if host.startswith("www."):
+        host = host[4:]
+    return any(host == d or host.endswith("." + d) for d in _SEARCH_DOMAIN_DENYLIST)
+
+
+def _serper_collect(name: str, domain: Optional[str],
+                    session: requests.Session) -> list[str]:
+    """Run Serper queries (generic + per-unit variants) and return all URLs.
+
+    Site-scoped queries run first when a domain is known (cheap, precise). Only
+    when those return nothing do we fall back to off-site name-scoped queries
+    (union/state-hosted PDFs) — which is also the only path for the ~194 IL
+    districts that have no website_url at all.
     """
-    Issue search-engine queries to find a CBA PDF for a district whose
-    direct crawl failed.
+    urls: list[str] = []
+
+    if domain:
+        for phrase in _SEARCH_UNIT_PHRASES:
+            q = f'site:{domain} "{phrase}" filetype:pdf'
+            log.info("  Search fallback [Serper, site]: %s", q)
+            urls.extend(_serper_search(q, session))
+        if not urls:
+            # Broader site-scoped (catches non-.pdf doc-management links).
+            q = f'site:{domain} "collective bargaining" OR "negotiated agreement"'
+            log.info("  Search fallback [Serper, site-broad]: %s", q)
+            urls.extend(_serper_search(q, session))
+
+    if not urls:
+        # Off-site / no-domain: constrain to the exact district name + Illinois.
+        for phrase in ("collective bargaining agreement", "support staff agreement"):
+            q = f'"{name}" Illinois "{phrase}" filetype:pdf'
+            log.info("  Search fallback [Serper, name]: %s", q)
+            urls.extend(_serper_search(q, session))
+
+    return urls
+
+
+def _search_fallback(district: dict, session: requests.Session) -> list[dict]:
+    """
+    Issue search-engine queries to find CBA PDF(s) for a district whose direct
+    crawl failed, or which has no website_url at all.
 
     Priority order:
       1. Serper.dev (SERPER_API_KEY) — reliable Google results JSON API
       2. Google CSE (GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX)
       3. DuckDuckGo HTML scraping (no key required, fragile fallback)
 
-    Serper and Google CSE return all organic results (not just .pdf).  We
-    score every candidate URL+title against CBA keywords and give a +5 bonus
-    to same-domain results and a +3 bonus when the URL ends in .pdf.
-    When homepage is None, site-scoped queries are skipped.
+    Every candidate URL is scored against CBA keywords (+5 same-domain bonus,
+    +3 .pdf bonus) and classified into a bargaining unit. The best-scoring PDF
+    *per unit* is kept, so a district that publishes separate teacher / support
+    staff / custodial CBAs yields one candidate per unit (units never mixed).
 
-    Returns dict {url, score, found_via} or None.
+    Returns a list of candidate dicts {url, score, found_via, bargaining_unit,
+    text} (possibly empty).
     """
     name     = district["name"]
     homepage = district.get("website_url") or None
@@ -346,25 +454,8 @@ def _search_fallback(district: dict, session: requests.Session) -> Optional[dict
     serper_key = os.environ.get("SERPER_API_KEY", "").strip()
 
     # --- 1. Serper (primary — uses Google's index, reliable JSON API) ---
-    if serper_key and not candidate_urls:
-        if domain:
-            # Site-scoped with filetype hint
-            q1 = f'site:{domain} "collective bargaining" filetype:pdf'
-            log.info("  Search fallback [Serper, site+pdf]: %s", q1)
-            candidate_urls.extend(_serper_search(q1, session))
-
-            # Broader site-scoped (catches non-.pdf doc-management links)
-            if not candidate_urls:
-                q2 = f'site:{domain} "collective bargaining" OR "negotiated agreement"'
-                log.info("  Search fallback [Serper, site-broad]: %s", q2)
-                candidate_urls.extend(_serper_search(q2, session))
-
-        # Off-site: district name + state (hosted on union/state sites)
-        if not candidate_urls:
-            q3 = f'"{name}" Illinois "collective bargaining agreement" filetype:pdf'
-            log.info("  Search fallback [Serper, name-pdf]: %s", q3)
-            candidate_urls.extend(_serper_search(q3, session))
-
+    if serper_key:
+        candidate_urls = _serper_collect(name, domain, session)
         if candidate_urls:
             engine_used = "serper"
 
@@ -400,29 +491,47 @@ def _search_fallback(district: dict, session: requests.Session) -> Optional[dict
 
     if not candidate_urls:
         log.info("  Search fallback found no candidates")
-        return None
+        return []
 
-    # Score: keyword match + same-domain bonus + .pdf bonus
-    scored = []
+    # Score + classify each unique URL; keep the best-scoring PDF per unit.
+    found_via = f"search_fallback:{engine_used}"
+    best_per_unit: dict[str, dict] = {}
+    seen: set[str] = set()
     for url in candidate_urls:
+        if url in seen:
+            continue
+        seen.add(url)
+        if _is_denied_search_domain(url):
+            log.info("  [search] skipping denylisted (non-district) domain: %s", url)
+            continue
         kw_score  = _score_pdf_text(url)
         on_domain = _same_domain(homepage, url) if homepage else False
         pdf_bonus = 3 if ".pdf" in url.lower().split("?")[0] else 0
         total     = kw_score + (5 if on_domain else 0) + pdf_bonus
-        scored.append((total, url, on_domain))
+        if total <= 0:
+            continue
+        unit = _classify_candidate(url, "")
+        cur_best = best_per_unit.get(unit)
+        if cur_best is None or total > cur_best["score"]:
+            best_per_unit[unit] = {
+                "url":             url,
+                "score":           total,
+                "found_via":       found_via,
+                "bargaining_unit": unit,
+                "text":            "",
+            }
 
-    scored.sort(key=lambda t: t[0], reverse=True)
-    best_score, best_url, on_domain = scored[0]
-
-    if best_score <= 0:
+    if not best_per_unit:
         log.info("  Search fallback: no candidate scored above 0")
-        return None
+        return []
 
+    results = sorted(best_per_unit.values(), key=lambda c: c["score"], reverse=True)
     log.info(
-        "  Search fallback [%s] best: score=%d  on_domain=%s  %s",
-        engine_used, best_score, on_domain, best_url,
+        "  Search fallback [%s] %d unit(s): %s",
+        engine_used, len(results),
+        ", ".join(f'{c["bargaining_unit"]}({c["score"]})' for c in results),
     )
-    return {"url": best_url, "score": best_score, "found_via": f"search_fallback:{engine_used}"}
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -970,6 +1079,19 @@ def _store_candidate(cur, conn, session, district_id, candidate, homepage, dry_r
         return "failed", {"status": "failed", "url": pdf_url,
                           "reason": "too_small", "bargaining_unit": unit}
 
+    # Content guard: many candidates (doc-management landing pages, board index
+    # pages) are HTML, not PDFs. The broad site-scoped search query intentionally
+    # returns such non-.pdf URLs because some redirect to a PDF — but when the
+    # body is actually HTML, storing it under a .pdf key marks the district
+    # 'found' with junk and guarantees a downstream extraction failure. Require
+    # the %PDF header (tolerating a small leading BOM/whitespace offset).
+    if b"%PDF" not in pdf_bytes[:1024]:
+        ctype = pdf_resp.headers.get("Content-Type", "?")
+        log.info("  Not a PDF (Content-Type=%s, no %%PDF header) — rejecting: %s",
+                 ctype, pdf_url)
+        return "failed", {"status": "failed", "url": pdf_url,
+                          "reason": "not_a_pdf", "bargaining_unit": unit}
+
     file_hash   = common.sha256_bytes(pdf_bytes)
     storage_key = f"il/cba/{file_hash}.pdf"
 
@@ -1006,22 +1128,28 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
           search_fallback: bool = False):
     conn = common.get_db_conn()
 
+    # Always-on Serper discovery: when a Serper key is present, enable
+    # search-engine discovery even without the explicit --search-fallback flag,
+    # so the ~194 IL districts with no website_url are still covered and failed
+    # homepage crawls get a search retry.
+    if not search_fallback and os.environ.get("SERPER_API_KEY", "").strip():
+        log.info("SERPER_API_KEY present — enabling Serper-first search discovery (always-on)")
+        search_fallback = True
+
     _ensure_website_urls(conn)
 
     districts = _load_districts(conn)
+    url_district_count = len(districts)
     no_url_count = _count_il_no_url(conn)
 
-    # When search-fallback is enabled AND no districts have website URLs yet,
-    # fall back to processing all IL districts using search-engine discovery.
-    # This allows the crawler to run even before the ISBE directory is loaded.
-    if search_fallback and not districts:
-        log.info(
-            "No IL districts have website URLs — using search-engine fallback for all %d districts",
-            no_url_count,
-        )
+    # When search is enabled, also process the no-URL districts via search-engine
+    # discovery (a homepage crawl is impossible without a URL). Known-URL
+    # districts keep the cheap homepage crawl first and only fall back to search
+    # on failure; no-URL districts go straight to search.
+    if search_fallback:
         all_no_url = _load_il_no_url_districts(conn)
         # Synthesise minimal district dicts (no website_url) compatible with the crawl loop
-        districts = [
+        synth = [
             {
                 "id":                d["id"],
                 "name":              d["name"],
@@ -1033,6 +1161,12 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
             }
             for d in all_no_url
         ]
+        if synth:
+            log.info(
+                "Including %d no-URL IL district(s) for search-engine discovery",
+                len(synth),
+            )
+        districts = districts + synth
 
     if target_rcdts:
         districts = [d for d in districts if d["state_district_id"] == target_rcdts]
@@ -1118,10 +1252,7 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
         if not candidates and search_fallback:
             log.info("  %s — trying search-engine fallback",
                      "Direct crawl failed" if homepage else "No website URL")
-            sf = _search_fallback(dist, session)
-            if sf:
-                sf["bargaining_unit"] = _classify_candidate(sf["url"], sf.get("text", ""))
-                candidates = [sf]
+            candidates = _search_fallback(dist, session)
 
         if not candidates:
             failed += 1
@@ -1188,7 +1319,8 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
     all_entries = list(state["per_district"].values())
     state["il_found_via_search"] = sum(
         1 for e in all_entries
-        if e.get("status") == "found" and e.get("found_via") == "search_fallback"
+        if e.get("status") == "found"
+        and str(e.get("found_via", "")).startswith("search_fallback")
     )
     state["il_search_failed"]  = sum(1 for s in all_statuses if s == "search_failed")
     _save_crawl_state(state)
@@ -1202,15 +1334,15 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
     cur.close()
     conn.close()
 
-    total_with_url = len(districts)
-    pct = (found / total_with_url * 100) if total_with_url > 0 else 0.0
+    total_districts = len(districts)
+    pct = (found / total_districts * 100) if total_districts > 0 else 0.0
     search_found = state.get("il_found_via_search", 0)
     search_fail  = state.get("il_search_failed", 0)
 
     print(f"\n{'='*65}")
     print(f"IL CBA Crawl Results{'  [DRY RUN]' if dry_run else ''}")
     print(f"{'='*65}")
-    print(f"  Districts with website URL:  {total_with_url:>6,}")
+    print(f"  Districts with website URL:  {url_district_count:>6,}")
     print(f"  Districts without URL:       {no_url_count:>6,}")
     print(f"  Attempted this run:          {attempted:>6,}")
     print(f"  PDFs found/downloaded:       {found:>6,}  ({pct:.1f}%)")

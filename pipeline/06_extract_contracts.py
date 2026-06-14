@@ -38,6 +38,16 @@ MODEL = "claude-haiku-4-5"
 MAX_TEXT_CHARS = 80_000  # truncate context sent to LLM
 MAX_TOKENS = 16000
 
+# Minimum chars for a text layer to count as "usable" (below this we OCR).
+MIN_TEXT_CHARS = 100
+
+# OCR configuration (scanned / image-only PDFs)
+OCR_DPI = 150               # render resolution for rasterizing pages
+OCR_MAX_PAGES = 60          # cap pages OCR'd per doc (most CBAs fit; bounds time)
+OCR_DOC_TIMEOUT_SEC = 600   # wall-clock budget per document
+OCR_PER_PAGE_TIMEOUT_SEC = 30  # hard timeout per page (tesseract)
+OCR_TEXT_DIR = Path(__file__).parent / "state" / "ocr_text"  # cache OCR by file hash
+
 # Anthropic claude-3-5-haiku pricing (USD per 1M tokens) — update if rates change.
 COST_PER_1M_INPUT_TOKENS: float = 0.80
 COST_PER_1M_OUTPUT_TOKENS: float = 4.00
@@ -107,69 +117,186 @@ if PYDANTIC_OK:
 
 
 def validate_extraction(raw: str) -> Optional["ExtractionResult"]:
-    """Parse and validate the LLM's JSON output. Returns None on failure."""
+    """Parse and validate the LLM's JSON output. Returns None on failure.
+
+    Lenient validation: individual provisions or contracts that fail schema
+    validation are dropped rather than failing the whole document (a single bad
+    provision, e.g. a null clause_excerpt, must not discard an otherwise valid
+    CBA). Returns None only when the JSON is unparseable, is not an object, or
+    has a ``contracts`` key that is present but not a list.
+    """
     try:
         data = json.loads(raw)
-        if PYDANTIC_OK:
-            return ExtractionResult(**data)
-        # Loose validation without pydantic
-        if "contracts" in data and isinstance(data["contracts"], list):
-            return data  # type: ignore[return-value]
-        return None
     except Exception as e:
-        log.debug("JSON validation error: %s", e)
+        log.debug("JSON parse error: %s", e)
         return None
+
+    if not isinstance(data, dict):
+        return None
+    # Missing "contracts" defaults to empty; present-but-wrong-type is invalid.
+    if "contracts" in data and not isinstance(data["contracts"], list):
+        return None
+    raw_contracts = data.get("contracts", []) or []
+
+    if not PYDANTIC_OK:
+        return data  # type: ignore[return-value]
+
+    clean_contracts: "List[ContractData]" = []
+    for c in raw_contracts:
+        if not isinstance(c, dict):
+            continue
+        good_provisions: "List[ProvisionItem]" = []
+        for p in (c.get("provisions") or []):
+            if not isinstance(p, dict):
+                continue
+            try:
+                good_provisions.append(ProvisionItem(**p))
+            except Exception as e:
+                log.debug("Dropping invalid provision: %s", e)
+        fields = {k: v for k, v in c.items() if k != "provisions"}
+        try:
+            clean_contracts.append(ContractData(**fields, provisions=good_provisions))
+        except Exception as e:
+            log.debug("Dropping invalid contract: %s", e)
+    return ExtractionResult(contracts=clean_contracts)
 
 
 # ---------------------------------------------------------------------------
 # PDF text extraction
 # ---------------------------------------------------------------------------
 
-def extract_pdf_text(pdf_path: Path) -> tuple[str, bool]:
-    """
-    Extract text from PDF using pdfplumber. Falls back to pytesseract OCR
-    if the text layer is empty.
+def _text_layer(pdf_path: Path) -> tuple[str, bool]:
+    """Read an embedded text layer using pdfplumber, then pypdfium2 as a second
+    engine (PDFium sometimes recovers text pdfminer/pdfplumber misses).
 
-    Returns (text, used_ocr).
+    Returns (text, readable). readable=False means neither library could open
+    the file (corrupt / not a real PDF).
     """
+    best = ""
+    readable = False
     try:
         import pdfplumber
-    except ImportError:
-        log.warning("pdfplumber not installed")
-        return "", False
-
-    pages_text: list[str] = []
-    try:
+        parts: list[str] = []
         with pdfplumber.open(pdf_path) as pdf:
+            readable = True
             for page in pdf.pages:
-                t = page.extract_text() or ""
-                pages_text.append(t)
+                parts.append(page.extract_text() or "")
+        best = "\n\n".join(parts).strip()
     except Exception as e:
-        log.warning("pdfplumber error for %s: %s", pdf_path, e)
-        return "", False
+        log.debug("pdfplumber failed for %s: %s", pdf_path.name, e)
 
-    full_text = "\n\n".join(pages_text).strip()
-    used_ocr = False
+    if len(best) >= MIN_TEXT_CHARS:
+        return best, True
 
-    if not full_text or len(full_text) < 100:
-        log.info("Empty text layer for %s — attempting OCR", pdf_path.name)
+    try:
+        import pypdfium2 as pdfium
+        doc = pdfium.PdfDocument(str(pdf_path))
+        readable = True
+        parts = []
+        for i in range(len(doc)):
+            tp = doc[i].get_textpage()
+            parts.append(tp.get_text_range() or "")
+            tp.close()
+        doc.close()
+        alt = "\n\n".join(parts).strip()
+        if len(alt) > len(best):
+            best = alt
+    except Exception as e:
+        log.debug("pypdfium2 text failed for %s: %s", pdf_path.name, e)
+
+    return best, readable
+
+
+def _ocr_pdf(pdf_path: Path) -> tuple[str, str]:
+    """OCR a scanned PDF (pypdfium2 render + pytesseract). Caches the result by
+    file hash under OCR_TEXT_DIR so retries don't redo the work.
+
+    Returns (text, reason). reason is '' on success, otherwise a taxonomy code:
+    SCANNED_PDF_OCR_UNAVAILABLE, PDF_CORRUPT_OR_UNREADABLE, OCR_FAILED_OR_TIMEOUT,
+    or NO_TEXT_AFTER_OCR.
+    """
+    cache_key: Optional[str] = None
+    try:
+        cache_key = common.sha256_bytes(pdf_path.read_bytes())
+    except Exception as e:
+        log.debug("Could not hash %s for OCR cache: %s", pdf_path.name, e)
+    if cache_key:
+        cache_file = OCR_TEXT_DIR / f"{cache_key}.txt"
+        if cache_file.exists():
+            cached = cache_file.read_text(encoding="utf-8")
+            if len(cached.strip()) >= MIN_TEXT_CHARS:
+                log.info("Using cached OCR text for %s", pdf_path.name)
+                return cached, ""
+
+    try:
+        import pytesseract
+        import pypdfium2 as pdfium
+    except ImportError as e:
+        log.warning("OCR unavailable (%s) for %s", e, pdf_path.name)
+        return "", "SCANNED_PDF_OCR_UNAVAILABLE"
+    try:
+        pytesseract.get_tesseract_version()
+    except Exception as e:
+        log.warning("tesseract binary missing (%s)", e)
+        return "", "SCANNED_PDF_OCR_UNAVAILABLE"
+
+    try:
+        doc = pdfium.PdfDocument(str(pdf_path))
+    except Exception as e:
+        log.warning("pypdfium2 cannot open %s for OCR: %s", pdf_path.name, e)
+        return "", "PDF_CORRUPT_OR_UNREADABLE"
+
+    n_pages = min(len(doc), OCR_MAX_PAGES)
+    scale = OCR_DPI / 72.0
+    parts: list[str] = []
+    started = time.time()
+    timed_out = False
+    for i in range(n_pages):
+        if time.time() - started > OCR_DOC_TIMEOUT_SEC:
+            log.warning("OCR doc-timeout after %d/%d pages for %s", i, n_pages, pdf_path.name)
+            timed_out = True
+            break
         try:
-            import pytesseract
-            from PIL import Image
-            import pdfplumber
-            pages_text = []
-            with pdfplumber.open(pdf_path) as pdf:
-                for page in pdf.pages:
-                    img = page.to_image(resolution=150).original
-                    pages_text.append(pytesseract.image_to_string(img))
-            full_text = "\n\n".join(pages_text).strip()
-            used_ocr = True
-        except ImportError:
-            log.warning("pytesseract not available; cannot OCR %s", pdf_path.name)
+            pil = doc[i].render(scale=scale).to_pil().convert("L")
+            parts.append(pytesseract.image_to_string(pil, timeout=OCR_PER_PAGE_TIMEOUT_SEC))
         except Exception as e:
-            log.warning("OCR error for %s: %s", pdf_path.name, e)
+            log.debug("OCR page %d failed for %s: %s", i, pdf_path.name, e)
+    doc.close()
 
-    return full_text, used_ocr
+    text = "\n\n".join(parts).strip()
+    if len(text) < MIN_TEXT_CHARS:
+        return text, "OCR_FAILED_OR_TIMEOUT" if timed_out else "NO_TEXT_AFTER_OCR"
+
+    if cache_key:
+        try:
+            OCR_TEXT_DIR.mkdir(parents=True, exist_ok=True)
+            (OCR_TEXT_DIR / f"{cache_key}.txt").write_text(text, encoding="utf-8")
+        except OSError as e:
+            log.debug("Could not cache OCR text for %s: %s", pdf_path.name, e)
+    return text, ""
+
+
+def extract_pdf_text(pdf_path: Path) -> tuple[str, bool, str]:
+    """
+    Extract text from a PDF. Tries the embedded text layer first (pdfplumber,
+    then pypdfium2); if that is empty (scanned / image-only PDF), falls back to
+    OCR (pypdfium2 render + pytesseract).
+
+    Returns (text, used_ocr, reason). reason is '' on success, otherwise a
+    failure-taxonomy code (PDF_CORRUPT_OR_UNREADABLE, SCANNED_PDF_OCR_UNAVAILABLE,
+    OCR_FAILED_OR_TIMEOUT, NO_TEXT_AFTER_OCR).
+    """
+    text, readable = _text_layer(pdf_path)
+    if len(text) >= MIN_TEXT_CHARS:
+        return text, False, ""
+    if not readable:
+        return "", False, "PDF_CORRUPT_OR_UNREADABLE"
+
+    log.info("Empty text layer for %s — attempting OCR", pdf_path.name)
+    ocr_text, reason = _ocr_pdf(pdf_path)
+    if len(ocr_text) >= MIN_TEXT_CHARS:
+        return ocr_text, True, ""
+    return ocr_text, bool(ocr_text), reason or "NO_TEXT_AFTER_OCR"
 
 
 def chunk_by_articles(text: str) -> str:
@@ -284,16 +411,81 @@ def call_anthropic(
 
 
 def extract_json_from_response(raw: str) -> str:
-    """Strip any markdown fences around JSON returned by the model."""
+    """Extract the JSON object/array from a model response.
+
+    Scans for the first ``{`` or ``[`` and returns the substring up to its
+    matching close bracket using a string-aware balanced scan. This ignores
+    leading ```json fences, trailing ``` fences, and any prose the model emits
+    before or after the JSON (a common cause of spurious json.loads failures).
+    Falls back to the substring from the first bracket if no balanced match is
+    found (likely a truncated response).
+    """
     raw = raw.strip()
-    # Remove ```json ... ``` fences
-    fence_re = re.compile(r"^```(?:json)?\s*([\s\S]+?)\s*```$")
-    m = fence_re.match(raw)
-    if m:
-        return m.group(1).strip()
-    # Find the first { or [ in the string
-    start = next((i for i, c in enumerate(raw) if c in "{["), 0)
+    start = next((i for i, c in enumerate(raw) if c in "{["), -1)
+    if start == -1:
+        return raw
+
+    open_ch = raw[start]
+    close_ch = "}" if open_ch == "{" else "]"
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return raw[start:i + 1]
+    # No balanced close found — return remainder (caller treats as truncated).
     return raw[start:]
+
+
+def _looks_truncated(s: str) -> bool:
+    """Heuristic: are brackets/quotes unbalanced (string-aware)? True suggests
+    the JSON was cut off (e.g. the model hit max_tokens mid-output)."""
+    depth = 0
+    in_str = False
+    esc = False
+    for ch in s:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+    return depth != 0 or in_str
+
+
+def _classify_json_failure(cleaned: str, stop_reason: Optional[str]) -> str:
+    """Map a failed JSON parse/validation to a taxonomy code."""
+    try:
+        json.loads(cleaned)
+        # Parses fine but validate_extraction rejected it (e.g. contracts not a list).
+        return "LLM_SCHEMA_INVALID"
+    except Exception:
+        if stop_reason == "max_tokens" or _looks_truncated(cleaned):
+            return "LLM_TRUNCATED_JSON"
+        return "LLM_SCHEMA_INVALID"
 
 
 # ---------------------------------------------------------------------------
@@ -627,22 +819,45 @@ def backfill_contract_units(conn) -> int:
     finds a real signal (i.e. a non-'other' result that differs from the
     current value), so it never clobbers a more specific value with 'other'.
     """
+    import psycopg2  # driver is always available where this runs
+
     cur = conn.cursor()
     cur.execute(
         "SELECT id, unit_scope, union_name, affiliation, bargaining_unit FROM contracts"
     )
     rows = cur.fetchall()
     updated = 0
+    skipped_conflict = 0
     for cid, scope, uname, affil, current in rows:
         guess = common.classify_bargaining_unit(scope, uname, affil, default="other")
         if guess == "other" or guess == current:
             continue
-        cur.execute(
-            "UPDATE contracts SET bargaining_unit = %s WHERE id = %s", (guess, cid)
-        )
-        updated += 1
+        # Reclassifying can collide with the
+        # (district_id, bargaining_unit, unit_scope, effective_start) unique
+        # constraint when a duplicate contract already holds the corrected unit
+        # (e.g. one doc tagged 'teachers' by migration 0008 and a sibling doc
+        # already tagged 'support_staff' for the same scope/term). Use a per-row
+        # savepoint so one such conflict cannot abort the whole pass.
+        cur.execute("SAVEPOINT bf_unit")
+        try:
+            cur.execute(
+                "UPDATE contracts SET bargaining_unit = %s WHERE id = %s", (guess, cid)
+            )
+        except psycopg2.errors.UniqueViolation:
+            cur.execute("ROLLBACK TO SAVEPOINT bf_unit")
+            cur.execute("RELEASE SAVEPOINT bf_unit")
+            skipped_conflict += 1
+        else:
+            cur.execute("RELEASE SAVEPOINT bf_unit")
+            updated += 1
     conn.commit()
     cur.close()
+    if skipped_conflict:
+        log.warning(
+            "backfill_contract_units: left %d contract(s) unchanged — reclassified "
+            "unit would duplicate an existing (district, unit, scope, start) row",
+            skipped_conflict,
+        )
     return updated
 
 
@@ -1130,19 +1345,20 @@ def main():
             log.warning("Cannot find PDF for doc %d — skipping", source_doc_id)
             if not args.dry_run:
                 cur = conn.cursor()
-                insert_extraction_run(cur, source_doc_id, "failed", "PDF file not found locally")
+                insert_extraction_run(cur, source_doc_id, "failed", "PDF_NOT_FOUND")
                 conn.commit()
                 cur.close()
             failures += 1
             continue
 
         # --- Step 2: Extract text ---
-        text, used_ocr = extract_pdf_text(pdf_path)
-        if not text:
-            log.warning("No text extracted from %s", pdf_path.name)
+        text, used_ocr, extract_reason = extract_pdf_text(pdf_path)
+        if extract_reason or len(text) < MIN_TEXT_CHARS:
+            reason = extract_reason or "NO_TEXT_AFTER_OCR"
+            log.warning("No usable text from %s (%s)", pdf_path.name, reason)
             if not args.dry_run:
                 cur = conn.cursor()
-                insert_extraction_run(cur, source_doc_id, "failed", "No text extracted from PDF")
+                insert_extraction_run(cur, source_doc_id, "failed", reason)
                 conn.commit()
                 cur.close()
             failures += 1
@@ -1172,7 +1388,7 @@ def main():
             doc_input_tokens += in_tok
             doc_output_tokens += out_tok
             if raw is None:
-                last_error = "Anthropic API returned no response"
+                last_error = "LLM_API_ERROR"
                 time.sleep(2 ** attempt)
                 continue
             last_raw = raw
@@ -1184,7 +1400,7 @@ def main():
                     "Doc %d hit max_tokens on attempt 1 — retrying with short-form prompt",
                     source_doc_id,
                 )
-                raw2, in_tok2, out_tok2, _ = call_anthropic(
+                raw2, in_tok2, out_tok2, stop2 = call_anthropic(
                     system_prompt, chunked_text, short_form=True
                 )
                 doc_input_tokens += in_tok2
@@ -1192,13 +1408,14 @@ def main():
                 if raw2:
                     last_raw = raw2
                     raw = raw2
+                    stop_reason = stop2
 
             cleaned = extract_json_from_response(raw)
             result = validate_extraction(cleaned)
             if result is not None:
                 break
-            last_error = f"JSON validation failed (attempt {attempt+1})"
-            log.warning("Attempt %d: JSON validation failed for doc %d", attempt+1, source_doc_id)
+            last_error = _classify_json_failure(cleaned, stop_reason)
+            log.warning("Attempt %d: %s for doc %d", attempt + 1, last_error, source_doc_id)
             time.sleep(1)
 
         # Accumulate cost for this doc

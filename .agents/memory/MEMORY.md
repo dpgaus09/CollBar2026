@@ -6,5 +6,7 @@
 - [IL CBA search fallback](il-cba-search-fallback.md) — Serper (primary) → Google CSE → DuckDuckGo; SERPER_API_KEY now set; run --search-fallback after direct crawl finishes.
 - [Cron requires Reserved VM](cron-reserved-vm.md) — node-cron fires only on Reserved VM; deployment type is set in the Replit Publishing UI (serve="vm" is NOT a valid artifact.toml value).
 - [ISBE connectivity from repl](isbe-connectivity.md) — isbe.net is unreachable from the sandbox (ConnectTimeoutError); only testable once deployed on a Reserved VM.
+- [IL CBA crawl precision](il-crawl-precision.md) — denylist aggregator/gov domains in name-search; require %PDF bytes before storing (HTML-as-PDF falsely marks districts found).
+- [Derive vs unit reclassification](il-extraction-derive-savepoint.md) — backfill_contract_units must wrap each UPDATE in a SAVEPOINT or a unique-constraint conflict aborts the whole derive transaction.
 - [drizzle push-force + unique constraints](drizzle-push-unique-constraints.md) — push-force can't apply UNIQUE on populated tables (errors under closed stdin; a TTY would TRUNCATE); apply via raw SQL instead.
 - [Bargaining-unit scoping](bargaining-unit-scoping.md) — benchmarks never mix units, default teachers; parseUnit whitelist; provenance own-doc→same-unit fallback; cost-impact teachers-only; contracts-unique gap.

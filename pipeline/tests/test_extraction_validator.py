@@ -128,18 +128,24 @@ class TestValidateExtraction(unittest.TestCase):
         self.assertIsNotNone(result)
 
     @unittest.skipUnless(PYDANTIC_OK, "Pydantic not installed")
-    def test_invalid_category_rejected_pydantic(self):
+    def test_invalid_category_provision_dropped_pydantic(self):
+        # Lenient validation: a single bad provision is dropped, not fatal to the doc.
         payload = json.loads(json.dumps(VALID_PAYLOAD))
         payload["contracts"][0]["provisions"][0]["category"] = "invalid_category_xyz"
         result = validate_extraction(json.dumps(payload))
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result.contracts), 1)
+        # The invalid provision is dropped; the second (valid) provision remains.
+        self.assertEqual(len(result.contracts[0].provisions), 1)
 
     @unittest.skipUnless(PYDANTIC_OK, "Pydantic not installed")
-    def test_empty_clause_excerpt_rejected_pydantic(self):
+    def test_empty_clause_excerpt_provision_dropped_pydantic(self):
+        # Lenient validation: a null/empty clause_excerpt drops the provision only.
         payload = json.loads(json.dumps(VALID_PAYLOAD))
         payload["contracts"][0]["provisions"][0]["clause_excerpt"] = "   "
         result = validate_extraction(json.dumps(payload))
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result.contracts[0].provisions), 1)
 
     @unittest.skipUnless(PYDANTIC_OK, "Pydantic not installed")
     def test_contracts_have_correct_field_count(self):

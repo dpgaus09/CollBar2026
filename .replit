@@ -76,7 +76,7 @@ externalPort = 3001
 
 [nix]
 channel = "stable-25_05"
-packages = ["postgresql"]
+packages = ["libxcrypt", "postgresql", "rapidfuzz-cpp", "taskflow", "tesseract"]
 
 [userenv]
 
