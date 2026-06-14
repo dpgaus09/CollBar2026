@@ -71,6 +71,13 @@
       "when": 1781750400000,
       "tag": "0009_contracts_unit_unique",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1781836800000,
+      "tag": "0010_ocr_quality",
+      "breakpoints": true
     }
   ]
 }

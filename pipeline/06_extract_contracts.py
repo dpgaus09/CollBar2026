@@ -48,6 +48,11 @@ OCR_DOC_TIMEOUT_SEC = 600   # wall-clock budget per document
 OCR_PER_PAGE_TIMEOUT_SEC = 30  # hard timeout per page (tesseract)
 OCR_TEXT_DIR = Path(__file__).parent / "state" / "ocr_text"  # cache OCR by file hash
 
+# Mean tesseract word confidence (0-100) below which an OCR'd document is treated
+# as low-trust and flagged for human review. Clean digital scans typically score
+# 85-95; faint/skewed/handwritten copies fall well below this.
+OCR_MIN_CONFIDENCE: float = 70.0
+
 # Anthropic claude-3-5-haiku pricing (USD per 1M tokens) — update if rates change.
 COST_PER_1M_INPUT_TOKENS: float = 0.80
 COST_PER_1M_OUTPUT_TOKENS: float = 4.00
@@ -207,13 +212,62 @@ def _text_layer(pdf_path: Path) -> tuple[str, bool]:
     return best, readable
 
 
-def _ocr_pdf(pdf_path: Path) -> tuple[str, str]:
+def _ocr_page(pytesseract, pil) -> tuple[str, list[float]]:
+    """OCR a single rasterized page, returning (text, word_confidences).
+
+    Uses ``image_to_data`` (rather than ``image_to_string``) so we get both the
+    recognized text and tesseract's per-word confidence in a single pass. Text
+    is reconstructed from words grouped by (block, paragraph, line). Confidences
+    are the per-word ``conf`` values for non-empty tokens (tesseract reports -1
+    for layout boxes with no text, which we drop).
+    """
+    from pytesseract import Output
+    data = pytesseract.image_to_data(
+        pil, timeout=OCR_PER_PAGE_TIMEOUT_SEC, output_type=Output.DICT
+    )
+    words = data.get("text", [])
+    confs = data.get("conf", [])
+    blocks = data.get("block_num", [])
+    pars = data.get("par_num", [])
+    line_nums = data.get("line_num", [])
+
+    lines: dict = {}
+    order: list = []
+    page_confs: list[float] = []
+    for i, raw_word in enumerate(words):
+        token = (raw_word or "").strip()
+        if not token:
+            continue
+        try:
+            conf = float(confs[i])
+        except (ValueError, TypeError, IndexError):
+            conf = -1.0
+        if conf >= 0:
+            page_confs.append(conf)
+        key = (
+            blocks[i] if i < len(blocks) else 0,
+            pars[i] if i < len(pars) else 0,
+            line_nums[i] if i < len(line_nums) else i,
+        )
+        if key not in lines:
+            lines[key] = []
+            order.append(key)
+        lines[key].append(token)
+
+    text = "\n".join(" ".join(lines[k]) for k in order)
+    return text, page_confs
+
+
+def _ocr_pdf(pdf_path: Path) -> tuple[str, str, Optional[float]]:
     """OCR a scanned PDF (pypdfium2 render + pytesseract). Caches the result by
     file hash under OCR_TEXT_DIR so retries don't redo the work.
 
-    Returns (text, reason). reason is '' on success, otherwise a taxonomy code:
-    SCANNED_PDF_OCR_UNAVAILABLE, PDF_CORRUPT_OR_UNREADABLE, OCR_FAILED_OR_TIMEOUT,
-    or NO_TEXT_AFTER_OCR.
+    Returns (text, reason, confidence). reason is '' on success, otherwise a
+    taxonomy code: SCANNED_PDF_OCR_UNAVAILABLE, PDF_CORRUPT_OR_UNREADABLE,
+    OCR_FAILED_OR_TIMEOUT, or NO_TEXT_AFTER_OCR. confidence is the mean
+    tesseract word confidence (0-100) over recognized words, or None when no
+    words were recognized (or the result came from a legacy cache without a
+    confidence sidecar).
     """
     cache_key: Optional[str] = None
     try:
@@ -226,29 +280,30 @@ def _ocr_pdf(pdf_path: Path) -> tuple[str, str]:
             cached = cache_file.read_text(encoding="utf-8")
             if len(cached.strip()) >= MIN_TEXT_CHARS:
                 log.info("Using cached OCR text for %s", pdf_path.name)
-                return cached, ""
+                return cached, "", _read_cached_ocr_confidence(cache_key)
 
     try:
         import pytesseract
         import pypdfium2 as pdfium
     except ImportError as e:
         log.warning("OCR unavailable (%s) for %s", e, pdf_path.name)
-        return "", "SCANNED_PDF_OCR_UNAVAILABLE"
+        return "", "SCANNED_PDF_OCR_UNAVAILABLE", None
     try:
         pytesseract.get_tesseract_version()
     except Exception as e:
         log.warning("tesseract binary missing (%s)", e)
-        return "", "SCANNED_PDF_OCR_UNAVAILABLE"
+        return "", "SCANNED_PDF_OCR_UNAVAILABLE", None
 
     try:
         doc = pdfium.PdfDocument(str(pdf_path))
     except Exception as e:
         log.warning("pypdfium2 cannot open %s for OCR: %s", pdf_path.name, e)
-        return "", "PDF_CORRUPT_OR_UNREADABLE"
+        return "", "PDF_CORRUPT_OR_UNREADABLE", None
 
     n_pages = min(len(doc), OCR_MAX_PAGES)
     scale = OCR_DPI / 72.0
     parts: list[str] = []
+    all_confs: list[float] = []
     started = time.time()
     timed_out = False
     for i in range(n_pages):
@@ -258,45 +313,80 @@ def _ocr_pdf(pdf_path: Path) -> tuple[str, str]:
             break
         try:
             pil = doc[i].render(scale=scale).to_pil().convert("L")
-            parts.append(pytesseract.image_to_string(pil, timeout=OCR_PER_PAGE_TIMEOUT_SEC))
+            page_text, page_confs = _ocr_page(pytesseract, pil)
+            parts.append(page_text)
+            all_confs.extend(page_confs)
         except Exception as e:
             log.debug("OCR page %d failed for %s: %s", i, pdf_path.name, e)
     doc.close()
 
     text = "\n\n".join(parts).strip()
+    confidence = round(sum(all_confs) / len(all_confs), 2) if all_confs else None
     if len(text) < MIN_TEXT_CHARS:
-        return text, "OCR_FAILED_OR_TIMEOUT" if timed_out else "NO_TEXT_AFTER_OCR"
+        return text, ("OCR_FAILED_OR_TIMEOUT" if timed_out else "NO_TEXT_AFTER_OCR"), confidence
 
     if cache_key:
         try:
             OCR_TEXT_DIR.mkdir(parents=True, exist_ok=True)
             (OCR_TEXT_DIR / f"{cache_key}.txt").write_text(text, encoding="utf-8")
+            _write_cached_ocr_confidence(cache_key, confidence, len(all_confs))
         except OSError as e:
             log.debug("Could not cache OCR text for %s: %s", pdf_path.name, e)
-    return text, ""
+    return text, "", confidence
 
 
-def extract_pdf_text(pdf_path: Path) -> tuple[str, bool, str]:
+def _ocr_meta_path(cache_key: str) -> Path:
+    return OCR_TEXT_DIR / f"{cache_key}.meta.json"
+
+
+def _read_cached_ocr_confidence(cache_key: str) -> Optional[float]:
+    """Read the cached mean OCR confidence sidecar, or None if absent/legacy."""
+    meta_path = _ocr_meta_path(cache_key)
+    if not meta_path.exists():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        val = meta.get("ocr_confidence")
+        return float(val) if val is not None else None
+    except (OSError, ValueError, TypeError) as e:
+        log.debug("Could not read OCR confidence sidecar %s: %s", meta_path.name, e)
+        return None
+
+
+def _write_cached_ocr_confidence(cache_key: str, confidence: Optional[float], word_count: int) -> None:
+    """Persist OCR confidence next to the cached text so retries reuse it."""
+    try:
+        _ocr_meta_path(cache_key).write_text(
+            json.dumps({"ocr_confidence": confidence, "ocr_word_count": word_count}),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        log.debug("Could not write OCR confidence sidecar for %s: %s", cache_key, e)
+
+
+def extract_pdf_text(pdf_path: Path) -> tuple[str, bool, str, Optional[float]]:
     """
     Extract text from a PDF. Tries the embedded text layer first (pdfplumber,
     then pypdfium2); if that is empty (scanned / image-only PDF), falls back to
     OCR (pypdfium2 render + pytesseract).
 
-    Returns (text, used_ocr, reason). reason is '' on success, otherwise a
-    failure-taxonomy code (PDF_CORRUPT_OR_UNREADABLE, SCANNED_PDF_OCR_UNAVAILABLE,
-    OCR_FAILED_OR_TIMEOUT, NO_TEXT_AFTER_OCR).
+    Returns (text, used_ocr, reason, ocr_confidence). reason is '' on success,
+    otherwise a failure-taxonomy code (PDF_CORRUPT_OR_UNREADABLE,
+    SCANNED_PDF_OCR_UNAVAILABLE, OCR_FAILED_OR_TIMEOUT, NO_TEXT_AFTER_OCR).
+    ocr_confidence is the mean tesseract word confidence (0-100) when OCR ran,
+    or None when the text came from an embedded layer or no words were recognized.
     """
     text, readable = _text_layer(pdf_path)
     if len(text) >= MIN_TEXT_CHARS:
-        return text, False, ""
+        return text, False, "", None
     if not readable:
-        return "", False, "PDF_CORRUPT_OR_UNREADABLE"
+        return "", False, "PDF_CORRUPT_OR_UNREADABLE", None
 
     log.info("Empty text layer for %s — attempting OCR", pdf_path.name)
-    ocr_text, reason = _ocr_pdf(pdf_path)
+    ocr_text, reason, confidence = _ocr_pdf(pdf_path)
     if len(ocr_text) >= MIN_TEXT_CHARS:
-        return ocr_text, True, ""
-    return ocr_text, bool(ocr_text), reason or "NO_TEXT_AFTER_OCR"
+        return ocr_text, True, "", confidence
+    return ocr_text, bool(ocr_text), reason or "NO_TEXT_AFTER_OCR", confidence
 
 
 def chunk_by_articles(text: str) -> str:
@@ -585,14 +675,19 @@ def get_unprocessed_docs(conn, doc_id: Optional[int] = None, priority: bool = Fa
 
 
 def insert_extraction_run(cur, source_doc_id: int, status: str, error: Optional[str] = None,
-                          prompt_version: str = PROMPT_VERSION) -> int:
+                          prompt_version: str = PROMPT_VERSION, *,
+                          used_ocr: bool = False, ocr_confidence: Optional[float] = None,
+                          ocr_low_quality: bool = False) -> int:
     cur.execute(
         """
-        INSERT INTO extraction_runs (source_doc_id, model, prompt_version, status, error)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO extraction_runs
+            (source_doc_id, model, prompt_version, status, error,
+             used_ocr, ocr_confidence, ocr_low_quality)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (source_doc_id, MODEL, prompt_version, status, error),
+        (source_doc_id, MODEL, prompt_version, status, error,
+         used_ocr, ocr_confidence, ocr_low_quality),
     )
     row = cur.fetchone()
     return row[0] if row else -1
@@ -1357,13 +1452,22 @@ def main():
             continue
 
         # --- Step 2: Extract text ---
-        text, used_ocr, extract_reason = extract_pdf_text(pdf_path)
+        text, used_ocr, extract_reason, ocr_confidence = extract_pdf_text(pdf_path)
+        # An OCR'd doc is low-quality (flag for human review) when its mean
+        # tesseract word confidence falls below the trust threshold.
+        ocr_low_quality = (
+            used_ocr and ocr_confidence is not None and ocr_confidence < OCR_MIN_CONFIDENCE
+        )
         if extract_reason or len(text) < MIN_TEXT_CHARS:
             reason = extract_reason or "NO_TEXT_AFTER_OCR"
             log.warning("No usable text from %s (%s)", pdf_path.name, reason)
             if not args.dry_run:
                 cur = conn.cursor()
-                insert_extraction_run(cur, source_doc_id, "failed", reason)
+                insert_extraction_run(
+                    cur, source_doc_id, "failed", reason,
+                    used_ocr=used_ocr, ocr_confidence=ocr_confidence,
+                    ocr_low_quality=ocr_low_quality,
+                )
                 conn.commit()
                 cur.close()
             failures += 1
@@ -1371,6 +1475,13 @@ def main():
 
         log.info("Extracted %d chars from %s%s", len(text), pdf_path.name,
                  " (OCR)" if used_ocr else "")
+        if used_ocr:
+            conf_str = f"{ocr_confidence:.1f}" if ocr_confidence is not None else "n/a"
+            log.info(
+                "OCR quality for %s: mean confidence=%s%s",
+                pdf_path.name, conf_str,
+                " — LOW QUALITY, flagged for review" if ocr_low_quality else "",
+            )
         chunked_text = chunk_by_articles(text)
 
         if args.dry_run:
@@ -1379,7 +1490,11 @@ def main():
             continue
 
         cur = conn.cursor()
-        run_id = insert_extraction_run(cur, source_doc_id, "pending", prompt_version=prompt_ver)
+        run_id = insert_extraction_run(
+            cur, source_doc_id, "pending", prompt_version=prompt_ver,
+            used_ocr=used_ocr, ocr_confidence=ocr_confidence,
+            ocr_low_quality=ocr_low_quality,
+        )
         conn.commit()
 
         # --- Step 3: LLM call (with one retry) ---

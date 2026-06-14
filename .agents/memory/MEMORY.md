@@ -11,3 +11,4 @@
 - [Derive vs unit reclassification](il-extraction-derive-savepoint.md) — backfill_contract_units must wrap each UPDATE in a SAVEPOINT or a unique-constraint conflict aborts the whole derive transaction.
 - [drizzle push-force + unique constraints](drizzle-push-unique-constraints.md) — push-force can't apply UNIQUE on populated tables (errors under closed stdin; a TTY would TRUNCATE); apply via raw SQL instead.
 - [Bargaining-unit scoping](bargaining-unit-scoping.md) — benchmarks never mix units, default teachers; parseUnit whitelist; provenance own-doc→same-unit fallback; cost-impact teachers-only; contracts-unique gap.
+- [OCR quality flag](ocr-quality-flag.md) — extraction_runs.ocr_confidence/ocr_low_quality (threshold 70); use latest-per-doc; legacy cache has no score (NULL != good).
