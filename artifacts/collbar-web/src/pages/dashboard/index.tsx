@@ -49,12 +49,14 @@ function TopBar() {
             Expiration Calendar
           </a>
         )}
-        <a
-          href={`${import.meta.env.BASE_URL}admin`}
-          className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
-        >
-          Admin
-        </a>
+        {isAdmin && (
+          <a
+            href={`${import.meta.env.BASE_URL}admin`}
+            className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
+          >
+            Admin
+          </a>
+        )}
         <span className="text-xs text-slate-600">{email}</span>
         <button
           onClick={() => logout.mutate()}
@@ -82,12 +84,19 @@ export default function DashboardIndexPage() {
     return null;
   }
 
+  const noDistrictAssigned = !isLoading && !isAdmin && !districtId;
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-mono">
       <TopBar />
       <main className="max-w-3xl mx-auto px-6 py-10">
         {isLoading ? (
           <div className="text-slate-500 text-sm animate-pulse text-center py-20">Loading…</div>
+        ) : noDistrictAssigned ? (
+          <div className="text-center py-20 space-y-3">
+            <p className="text-slate-300 text-sm font-medium">No district assigned to your account.</p>
+            <p className="text-slate-500 text-xs">Contact your administrator to get access to a district.</p>
+          </div>
         ) : (
           <AdminDistrictPicker search={search} setSearch={setSearch} />
         )}
