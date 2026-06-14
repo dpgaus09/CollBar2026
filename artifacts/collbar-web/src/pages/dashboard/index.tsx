@@ -25,6 +25,30 @@ function useDistricts() {
   });
 }
 
+// Fetch the logged-in customer's own district directly. The list endpoint is
+// capped at 1000 rows, so the customer's district may not appear there — this
+// guarantees the pinned card always has its data.
+function useMyDistrict(districtId: number | null) {
+  return useQuery<District | null>({
+    queryKey: ["/api/dashboard/districts", "self", districtId],
+    enabled: districtId != null,
+    queryFn: () =>
+      fetch(apiUrl(`/api/dashboard/districts/${districtId}`), { credentials: "include" })
+        .then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        })
+        .then((d) => ({
+          id: d.id,
+          name: d.name,
+          county: d.county ?? null,
+          district_type: d.district_type ?? null,
+          enrollment: d.enrollment ?? null,
+          state: d.state,
+        })),
+  });
+}
+
 function TopBar() {
   const { email, isAdmin } = useAuth();
   const logout = useLogout();
@@ -69,6 +93,54 @@ function TopBar() {
   );
 }
 
+function DistrictRow({
+  d,
+  onClick,
+  pinned = false,
+}: {
+  d: District;
+  onClick: () => void;
+  pinned?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={
+        pinned
+          ? "w-full flex items-center justify-between px-4 py-3 bg-lime-400/5 hover:bg-lime-400/10 transition-colors text-left rounded-lg border-2 border-lime-400"
+          : "w-full flex items-center justify-between px-4 py-3 bg-slate-950 hover:bg-slate-900 transition-colors text-left border-b border-slate-800/50 last:border-0"
+      }
+    >
+      <div>
+        <div className="text-sm text-slate-200 flex items-center gap-2 flex-wrap">
+          {d.name}
+          {pinned && (
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-lime-300 bg-lime-400/15 px-1.5 py-0.5 rounded">
+              Your district
+            </span>
+          )}
+        </div>
+        <div className="text-xs text-slate-500 mt-0.5">
+          {d.county ? `${d.county} County` : ""}
+          {d.district_type ? ` · ${d.district_type}` : ""}
+        </div>
+      </div>
+      <div className="flex items-center gap-2">
+        <span
+          className={`text-xs font-medium px-1.5 py-0.5 rounded ${
+            d.state === "IL" ? "bg-sky-900/40 text-sky-400" : "bg-slate-800 text-slate-500"
+          }`}
+        >
+          {d.state}
+        </span>
+        <span className="text-xs text-slate-600 font-mono">
+          {d.enrollment ? `${d.enrollment.toLocaleString()} students` : ""}
+        </span>
+      </div>
+    </button>
+  );
+}
+
 export default function DashboardIndexPage() {
   const { isAuthenticated, isLoading } = useAuth();
   const [, setLocation] = useLocation();
@@ -105,8 +177,11 @@ function AdminDistrictPicker({
   const [, setLocation] = useLocation();
   const [stateFilter, setStateFilter] = useState<"" | "IL">("");
   const { data, isLoading, isError } = useDistricts();
+  const { districtId } = useAuth();
+  const { data: myDistrict } = useMyDistrict(districtId);
 
   const filtered = (data?.districts ?? []).filter((d) => {
+    if (districtId != null && Number(d.id) === Number(districtId)) return false;
     if (d.state !== "IL" && !stateFilter) return false;
     if (stateFilter && d.state !== stateFilter) return false;
     if (!search) return true;
@@ -149,6 +224,14 @@ function AdminDistrictPicker({
         className="w-full text-sm bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
       />
 
+      {myDistrict && (
+        <DistrictRow
+          d={myDistrict}
+          pinned
+          onClick={() => setLocation(`/dashboard/${myDistrict.id}`)}
+        />
+      )}
+
       {isLoading && (
         <div className="text-slate-500 text-sm animate-pulse py-8 text-center">
           Loading districts…
@@ -162,32 +245,18 @@ function AdminDistrictPicker({
       )}
 
       {!isLoading && filtered.length === 0 && (
-        <div className="text-slate-600 text-sm py-4 text-center">No districts match your search.</div>
+        <div className="text-slate-600 text-sm py-4 text-center">
+          No {myDistrict ? "other " : ""}districts match your search.
+        </div>
       )}
 
       <div className="space-y-1 max-h-[65vh] overflow-y-auto rounded-lg border border-slate-800">
         {filtered.map((d) => (
-          <button
+          <DistrictRow
             key={d.id}
+            d={d}
             onClick={() => setLocation(`/dashboard/${d.id}`)}
-            className="w-full flex items-center justify-between px-4 py-3 bg-slate-950 hover:bg-slate-900 transition-colors text-left border-b border-slate-800/50 last:border-0"
-          >
-            <div>
-              <div className="text-sm text-slate-200">{d.name}</div>
-              <div className="text-xs text-slate-500 mt-0.5">
-                {d.county ? `${d.county} County` : ""}
-                {d.district_type ? ` · ${d.district_type}` : ""}
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${d.state === "IL" ? "bg-sky-900/40 text-sky-400" : "bg-slate-800 text-slate-500"}`}>
-                {d.state}
-              </span>
-              <span className="text-xs text-slate-600 font-mono">
-                {d.enrollment ? `${d.enrollment.toLocaleString()} students` : ""}
-              </span>
-            </div>
-          </button>
+          />
         ))}
       </div>
     </div>

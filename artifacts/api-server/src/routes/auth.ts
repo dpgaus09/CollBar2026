@@ -178,12 +178,9 @@ router.post("/auth/login", async (req: Request, res: Response) => {
         req.session.adminAuthenticated = true;
       }
 
-      const dest =
-        user.role === "admin"
-          ? "/admin"
-          : user.district_id
-          ? `/dashboard/${user.district_id}`
-          : "/dashboard";
+      // Customers land on the district picker (with their own district pinned
+      // at the top); admins go to the admin panel.
+      const dest = user.role === "admin" ? "/admin" : "/dashboard";
 
       res.json({ ok: true, redirect: dest });
     });
