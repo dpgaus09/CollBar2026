@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useHealthCheck } from "@workspace/api-client-react";
 import { useLocation } from "wouter";
+import { useLogout } from "@/hooks/use-auth";
 
 const DB_TABLES = [
   "districts",
@@ -2757,6 +2758,7 @@ export default function AdminPage() {
   const { data: alertsData } = useAlertsPendingCount();
   const pendingAlerts = alertsData?.pendingCount ?? 0;
   const { data: session } = useAdminSession();
+  const logout = useLogout();
 
   const isAuthenticated = session?.authenticated === true;
 
@@ -2772,10 +2774,18 @@ export default function AdminPage() {
         </div>
         <div className="flex items-center gap-3">
           {isAuthenticated ? (
-            <span className="flex items-center gap-1.5 text-xs text-emerald-400">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-              Admin session active
-            </span>
+            <div className="flex items-center gap-3">
+              <span className="flex items-center gap-1.5 text-xs text-emerald-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                Admin session active
+              </span>
+              <button
+                onClick={() => logout.mutate()}
+                className="text-xs px-3 py-1.5 rounded border border-slate-700 text-slate-400 hover:border-red-700 hover:text-red-400 transition-colors"
+              >
+                Sign out
+              </button>
+            </div>
           ) : (
             <button
               onClick={goToLogin}
