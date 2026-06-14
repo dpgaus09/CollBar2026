@@ -70,7 +70,7 @@ function TopBar() {
 }
 
 export default function DashboardIndexPage() {
-  const { isAuthenticated, isLoading, isAdmin, districtId } = useAuth();
+  const { isAuthenticated, isLoading } = useAuth();
   const [, setLocation] = useLocation();
   const [search, setSearch] = useState("");
 
@@ -78,14 +78,8 @@ export default function DashboardIndexPage() {
     if (isLoading) return;
     if (!isAuthenticated) {
       setLocation("/login");
-      return;
     }
-    if (!isAdmin && districtId) {
-      setLocation(`/dashboard/${districtId}`);
-    }
-  }, [isLoading, isAuthenticated, isAdmin, districtId, setLocation]);
-
-  const noDistrictAssigned = !isLoading && !isAdmin && !districtId;
+  }, [isLoading, isAuthenticated, setLocation]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-mono">
@@ -93,11 +87,6 @@ export default function DashboardIndexPage() {
       <main className="max-w-3xl mx-auto px-6 py-10">
         {isLoading ? (
           <div className="text-slate-500 text-sm animate-pulse text-center py-20">Loading…</div>
-        ) : noDistrictAssigned ? (
-          <div className="text-center py-20 space-y-3">
-            <p className="text-slate-300 text-sm font-medium">No district assigned to your account.</p>
-            <p className="text-slate-500 text-xs">Contact your administrator to get access to a district.</p>
-          </div>
         ) : (
           <AdminDistrictPicker search={search} setSearch={setSearch} />
         )}

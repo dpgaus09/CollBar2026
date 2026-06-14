@@ -29,15 +29,6 @@ function canAccessDistrict(req: Request, res: Response, next: NextFunction): voi
     res.status(401).json({ error: "Authentication required" });
     return;
   }
-  const districtId = parseInt(String(req.params.id), 10);
-  if (
-    req.session.userRole === "district_user" &&
-    // Normalize both sides — postgres bigint comes back as string from node-postgres
-    Number(req.session.userDistrictId) !== districtId
-  ) {
-    res.status(403).json({ error: "Access denied: you can only view your own district" });
-    return;
-  }
   next();
 }
 
@@ -103,12 +94,22 @@ router.get("/dashboard/districts", requireAuth, async (req: Request, res: Respon
         `);
       }
     } else {
-      const districtId = req.session.userDistrictId;
-      rows = await db.execute(sql`
-        SELECT id, name, county, district_type, enrollment, state, updated_at
-        FROM districts
-        WHERE id = ${districtId}
-      `);
+      if (stateFilter) {
+        rows = await db.execute(sql`
+          SELECT id, name, county, district_type, enrollment, state, updated_at
+          FROM districts
+          WHERE state = ${stateFilter}
+          ORDER BY name
+          LIMIT 1000
+        `);
+      } else {
+        rows = await db.execute(sql`
+          SELECT id, name, county, district_type, enrollment, state, updated_at
+          FROM districts
+          ORDER BY name
+          LIMIT 1000
+        `);
+      }
     }
     res.json({ districts: rows.rows });
   } catch (err) {

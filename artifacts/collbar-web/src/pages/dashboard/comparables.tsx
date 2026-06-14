@@ -142,7 +142,7 @@ export default function ComparablesPage() {
   const params = useParams<{ id: string }>();
   const id = params.id ?? "";
   const [, setLocation] = useLocation();
-  const { isAuthenticated, isLoading: authLoading, isAdmin, districtId } = useAuth();
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
   const logout = useLogout();
 
   // Read peer_set_id from URL search params
@@ -166,10 +166,7 @@ export default function ComparablesPage() {
   useEffect(() => {
     if (authLoading) return;
     if (!isAuthenticated) { setLocation("/login"); return; }
-    if (!isAdmin && districtId != null && districtId !== parseInt(id)) {
-      setLocation(`/dashboard/${districtId}`);
-    }
-  }, [authLoading, isAuthenticated, isAdmin, districtId, id, setLocation]);
+  }, [authLoading, isAuthenticated, setLocation]);
 
   // Peer sets list
   const { data: peerSetsData } = useQuery<{ peerSets: PeerSet[] }>({
@@ -231,7 +228,6 @@ export default function ComparablesPage() {
   const medians = data?.medians ?? null;
 
   if (authLoading || !isAuthenticated) return null;
-  if (!isAdmin && districtId != null && districtId !== parseInt(id)) return null;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-mono">

@@ -207,10 +207,10 @@ function TopBar({ district, id }: { district: DistrictDetail | undefined; id: st
     <header className="border-b border-slate-800 px-6 py-3 flex items-center justify-between bg-slate-950">
       <div className="flex items-center gap-3 min-w-0">
         <button
-          onClick={() => setLocation(isAdmin ? "/dashboard" : "/")}
+          onClick={() => setLocation("/dashboard")}
           className="text-slate-500 hover:text-slate-300 text-xs transition-colors flex-shrink-0"
         >
-          ← {isAdmin ? "Districts" : "Home"}
+          ← Districts
         </button>
         <span className="text-slate-700">/</span>
         <span className="text-slate-200 text-xs font-medium truncate">
@@ -503,15 +503,12 @@ export default function DistrictDashboardPage() {
   const params = useParams<{ id: string }>();
   const id = params.id ?? "";
   const [, setLocation] = useLocation();
-  const { isAuthenticated, isLoading: authLoading, isAdmin, districtId } = useAuth();
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
 
   useEffect(() => {
     if (authLoading) return;
     if (!isAuthenticated) { setLocation("/login"); return; }
-    if (!isAdmin && districtId != null && districtId !== parseInt(id)) {
-      setLocation(`/dashboard/${districtId}`);
-    }
-  }, [authLoading, isAuthenticated, isAdmin, districtId, id, setLocation]);
+  }, [authLoading, isAuthenticated, setLocation]);
 
   const { data: district, isLoading: distLoading } = useDistrictDetail(id);
   const { data: provsData, isLoading: provsLoading } = useProvisions(id);
@@ -527,7 +524,6 @@ export default function DistrictDashboardPage() {
   const { data: leaveMedians } = useProvisionMedians("leave", county, band, districtState);
 
   if (authLoading || !isAuthenticated) return null;
-  if (!isAdmin && districtId != null && districtId !== parseInt(id)) return null;
 
   const provisions = provsData?.provisions ?? [];
   const settlements = settlementsData?.settlements ?? [];

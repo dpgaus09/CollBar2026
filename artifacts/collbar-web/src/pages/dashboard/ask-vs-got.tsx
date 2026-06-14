@@ -60,7 +60,7 @@ export default function AskVsGotPage() {
   const params = useParams<{ id: string }>();
   const id = params.id ?? "";
   const [, setLocation] = useLocation();
-  const { isAuthenticated, isLoading: authLoading, isAdmin, districtId } = useAuth();
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
   const logout = useLogout();
 
   const { data, isLoading } = useQuery<{ proposals: Proposal[] }>({
@@ -76,13 +76,9 @@ export default function AskVsGotPage() {
   useEffect(() => {
     if (authLoading) return;
     if (!isAuthenticated) { setLocation("/login"); return; }
-    if (!isAdmin && districtId != null && districtId !== parseInt(id)) {
-      setLocation(`/dashboard/${districtId}`);
-    }
-  }, [authLoading, isAuthenticated, isAdmin, districtId, id, setLocation]);
+  }, [authLoading, isAuthenticated, setLocation]);
 
   if (authLoading || !isAuthenticated) return null;
-  if (!isAdmin && districtId != null && districtId !== parseInt(id)) return null;
 
   const proposals = data?.proposals ?? [];
 

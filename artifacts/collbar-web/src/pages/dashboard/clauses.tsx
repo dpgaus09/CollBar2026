@@ -52,7 +52,7 @@ export default function ClausesPage() {
   const params = useParams<{ id: string }>();
   const id = params.id ?? "";
   const [, setLocation] = useLocation();
-  const { isAuthenticated, isLoading: authLoading, isAdmin, districtId } = useAuth();
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
   const logout = useLogout();
 
   const [category, setCategory] = useState("");
@@ -71,13 +71,9 @@ export default function ClausesPage() {
   useEffect(() => {
     if (authLoading) return;
     if (!isAuthenticated) { setLocation("/login"); return; }
-    if (!isAdmin && districtId != null && districtId !== parseInt(id)) {
-      setLocation(`/dashboard/${districtId}`);
-    }
-  }, [authLoading, isAuthenticated, isAdmin, districtId, id, setLocation]);
+  }, [authLoading, isAuthenticated, setLocation]);
 
   if (authLoading || !isAuthenticated) return null;
-  if (!isAdmin && districtId != null && districtId !== parseInt(id)) return null;
 
   const provisions = (data?.provisions ?? []).filter((p) => {
     if (category && p.category !== category) return false;
