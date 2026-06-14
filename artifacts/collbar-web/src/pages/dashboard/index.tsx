@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { useAuth } from "@/hooks/use-auth";
@@ -74,15 +74,16 @@ export default function DashboardIndexPage() {
   const [, setLocation] = useLocation();
   const [search, setSearch] = useState("");
 
-  if (!isLoading && !isAuthenticated) {
-    setLocation("/login");
-    return null;
-  }
-
-  if (!isLoading && !isAdmin && districtId) {
-    setLocation(`/dashboard/${districtId}`);
-    return null;
-  }
+  useEffect(() => {
+    if (isLoading) return;
+    if (!isAuthenticated) {
+      setLocation("/login");
+      return;
+    }
+    if (!isAdmin && districtId) {
+      setLocation(`/dashboard/${districtId}`);
+    }
+  }, [isLoading, isAuthenticated, isAdmin, districtId, setLocation]);
 
   const noDistrictAssigned = !isLoading && !isAdmin && !districtId;
 
