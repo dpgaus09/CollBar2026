@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useParams, useLocation } from "wouter";
 import {
@@ -67,11 +67,37 @@ interface Settlement {
   cost_impact_source: "eis" | "tss" | null;
   eis_observed_change_pct: string | null;
   eis_flag: boolean;
+  bargaining_unit: string;
+}
+
+interface SettlementsResponse {
+  settlements: Settlement[];
+  bargainingUnit: string;
+  availableUnits: { bargaining_unit: string; n: number }[];
 }
 
 interface MedianResult {
   median_base: string | null;
   n: number;
+  district_count?: number;
+}
+
+// Canonical bargaining-unit display labels (mirrors API bargaining-units.ts).
+const BARGAINING_UNIT_LABELS: Record<string, string> = {
+  teachers: "Teachers",
+  paraprofessionals: "Paraprofessionals",
+  custodial_maintenance: "Custodial & Maintenance",
+  transportation: "Transportation",
+  secretarial_clerical: "Secretarial & Clerical",
+  food_service: "Food Service",
+  nurses: "Nurses",
+  administrators: "Administrators",
+  support_staff: "Support Staff",
+  other: "Other",
+};
+
+function unitLabel(u: string): string {
+  return BARGAINING_UNIT_LABELS[u] ?? u;
 }
 
 interface ProvisionMediansResult {
@@ -109,27 +135,30 @@ function useProvisions(id: string) {
   });
 }
 
-function useSettlements(id: string) {
-  return useQuery<{ settlements: Settlement[] }>({
-    queryKey: [`/api/dashboard/districts/${id}/settlements`],
-    queryFn: () =>
-      fetch(apiUrl(`/api/dashboard/districts/${id}/settlements`), { credentials: "include" }).then(
-        (r) => {
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          return r.json();
-        },
-      ),
+function useSettlements(id: string, unit: string) {
+  return useQuery<SettlementsResponse>({
+    queryKey: [`/api/dashboard/districts/${id}/settlements`, unit],
+    queryFn: () => {
+      const params = new URLSearchParams({ bargainingUnit: unit });
+      return fetch(apiUrl(`/api/dashboard/districts/${id}/settlements?${params}`), {
+        credentials: "include",
+      }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      });
+    },
     enabled: !!id,
   });
 }
 
-function useCountyMedians(county: string | null, state: string | null = null) {
+function useCountyMedians(county: string | null, state: string | null = null, unit = "teachers") {
   return useQuery<MedianResult>({
-    queryKey: [`/api/dashboard/medians-county`, county, state],
+    queryKey: [`/api/dashboard/medians-county`, county, state, unit],
     queryFn: () => {
       const params = new URLSearchParams();
       if (county) params.set("county", county);
       if (state) params.set("state", state);
+      params.set("bargainingUnit", unit);
       return fetch(`${apiUrl("/api/dashboard/medians")}?${params}`, {
         credentials: "include",
       }).then((r) => r.json());
@@ -138,13 +167,14 @@ function useCountyMedians(county: string | null, state: string | null = null) {
   });
 }
 
-function useBandMedians(band: string, state: string | null = null) {
+function useBandMedians(band: string, state: string | null = null, unit = "teachers") {
   return useQuery<MedianResult>({
-    queryKey: [`/api/dashboard/medians-band`, band, state],
+    queryKey: [`/api/dashboard/medians-band`, band, state, unit],
     queryFn: () => {
       const params = new URLSearchParams();
       if (band && band !== "unknown") params.set("band", band);
       if (state) params.set("state", state);
+      params.set("bargainingUnit", unit);
       return fetch(`${apiUrl("/api/dashboard/medians")}?${params}`, {
         credentials: "include",
       }).then((r) => r.json());
@@ -396,11 +426,32 @@ function CompensationSparkline({
 // Settlement History table
 // ---------------------------------------------------------------------------
 
-function SettlementTable({ settlements }: { settlements: Settlement[] }) {
+function UnitBadge({ unitName }: { unitName: string }) {
+  return (
+    <span className="inline-flex items-center rounded-full border border-blue-500/40 bg-blue-500/10 px-2 py-0.5 text-[10px] font-medium text-blue-300">
+      {unitName}
+    </span>
+  );
+}
+
+function SettlementTable({
+  settlements,
+  unitName,
+  sparseCoverage,
+  peerDistrictCount,
+}: {
+  settlements: Settlement[];
+  unitName: string;
+  sparseCoverage: boolean;
+  peerDistrictCount: number;
+}) {
   if (settlements.length === 0) {
     return (
-      <div className="text-slate-600 text-xs italic py-4 text-center">
-        No settlements extracted yet
+      <div className="space-y-2">
+        <UnitBadge unitName={unitName} />
+        <div className="text-slate-600 text-xs italic py-4 text-center">
+          No {unitName} settlements extracted yet
+        </div>
       </div>
     );
   }
@@ -409,6 +460,17 @@ function SettlementTable({ settlements }: { settlements: Settlement[] }) {
 
   return (
     <div className="space-y-0">
+      <div className="flex items-center justify-between pb-2">
+        <UnitBadge unitName={unitName} />
+        <span className="text-[10px] text-slate-600">{settlements.length} settlement{settlements.length === 1 ? "" : "s"}</span>
+      </div>
+      {sparseCoverage && (
+        <div className="mb-2 rounded border border-amber-900/40 bg-amber-950/20 px-2 py-1.5 text-[10px] text-amber-400/90">
+          ⚠ Limited {unitName} benchmark coverage — only {peerDistrictCount} peer
+          district{peerDistrictCount === 1 ? "" : "s"} with {unitName} settlements.
+          Comparisons may be unreliable.
+        </div>
+      )}
       <div className="grid grid-cols-5 text-xs text-slate-500 pb-2 border-b border-slate-800">
         <span className="col-span-2">Period</span>
         <span>Yr 1</span>
@@ -510,15 +572,28 @@ export default function DistrictDashboardPage() {
     if (!isAuthenticated) { setLocation("/login"); return; }
   }, [authLoading, isAuthenticated, setLocation]);
 
+  const [unit, setUnit] = useState("teachers");
   const { data: district, isLoading: distLoading } = useDistrictDetail(id);
   const { data: provsData, isLoading: provsLoading } = useProvisions(id);
-  const { data: settlementsData } = useSettlements(id);
+  const { data: settlementsData } = useSettlements(id, unit);
   const county = district?.county ?? null;
   const band = district?.enrollmentBand ?? "unknown";
   const districtState = district?.state ?? null;
 
-  const { data: countyMedians } = useCountyMedians(county, districtState);
-  const { data: bandMedians } = useBandMedians(band, districtState);
+  const availableUnits = settlementsData?.availableUnits ?? [];
+
+  // Default unit is 'teachers'; if this district has no teacher settlements but
+  // has other units, switch to the unit with the most settlements so the page
+  // isn't empty by default.
+  useEffect(() => {
+    if (availableUnits.length === 0) return;
+    if (!availableUnits.some((u) => u.bargaining_unit === unit)) {
+      setUnit(availableUnits[0].bargaining_unit);
+    }
+  }, [availableUnits, unit]);
+
+  const { data: countyMedians } = useCountyMedians(county, districtState, unit);
+  const { data: bandMedians } = useBandMedians(band, districtState, unit);
   const { data: insMedians } = useProvisionMedians("insurance", county, band, districtState);
   const { data: retMedians } = useProvisionMedians("retirement", county, band, districtState);
   const { data: leaveMedians } = useProvisionMedians("leave", county, band, districtState);
@@ -527,6 +602,14 @@ export default function DistrictDashboardPage() {
 
   const provisions = provsData?.provisions ?? [];
   const settlements = settlementsData?.settlements ?? [];
+
+  // Benchmark coverage transparency for the selected unit: how many peer
+  // districts have settlements for this unit (county or enrollment band).
+  const peerDistrictCount = Math.max(
+    countyMedians?.district_count ?? 0,
+    bandMedians?.district_count ?? 0,
+  );
+  const sparseCoverage = settlements.length > 0 && peerDistrictCount < 5;
 
   const provsByCategory = provisions.reduce<Record<string, Provision[]>>((acc, p) => {
     if (!acc[p.category]) acc[p.category] = [];
@@ -666,6 +749,31 @@ export default function DistrictDashboardPage() {
                 <p className="text-amber-400 text-sm">
                   No contract data extracted yet for this district.
                 </p>
+              </section>
+            )}
+
+            {/* Bargaining unit selector — benchmarks never mix units */}
+            {availableUnits.length > 0 && (
+              <section className="flex items-center gap-3 flex-wrap">
+                <span className="text-xs text-slate-500 uppercase tracking-widest font-semibold">
+                  Bargaining Unit
+                </span>
+                <div className="flex gap-1 flex-wrap">
+                  {availableUnits.map((u) => (
+                    <button
+                      key={u.bargaining_unit}
+                      onClick={() => setUnit(u.bargaining_unit)}
+                      className={`px-3 py-1 rounded text-xs font-medium border transition-colors ${
+                        unit === u.bargaining_unit
+                          ? "border-blue-500 bg-blue-500/10 text-blue-300"
+                          : "border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-600"
+                      }`}
+                    >
+                      {unitLabel(u.bargaining_unit)}
+                      <span className="text-slate-600 ml-1">({u.n})</span>
+                    </button>
+                  ))}
+                </div>
               </section>
             )}
 
@@ -852,7 +960,12 @@ export default function DistrictDashboardPage() {
 
               {/* Card 6: Settlement History — full table */}
               <DataCard title="Settlement History">
-                <SettlementTable settlements={settlements} />
+                <SettlementTable
+                  settlements={settlements}
+                  unitName={unitLabel(unit)}
+                  sparseCoverage={sparseCoverage}
+                  peerDistrictCount={peerDistrictCount}
+                />
               </DataCard>
 
             </div>

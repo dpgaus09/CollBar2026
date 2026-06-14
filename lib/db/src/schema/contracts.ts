@@ -7,11 +7,15 @@ import {
   numeric,
   boolean,
   unique,
+  index,
+  check,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { districtsTable } from "./districts";
 import { sourceDocumentsTable } from "./source_documents";
+import { BARGAINING_UNIT_SQL_LIST } from "./bargaining-units";
 
 export const contractsTable = pgTable(
   "contracts",
@@ -23,6 +27,7 @@ export const contractsTable = pgTable(
     unionName: text("union_name"),
     affiliation: text("affiliation"),
     unitScope: text("unit_scope"),
+    bargainingUnit: text("bargaining_unit").notNull().default("teachers"),
     effectiveStart: date("effective_start", { mode: "string" }),
     effectiveEnd: date("effective_end", { mode: "string" }),
     termYears: numeric("term_years", { precision: 3, scale: 1 }),
@@ -32,7 +37,14 @@ export const contractsTable = pgTable(
       () => sourceDocumentsTable.id,
     ),
   },
-  (t) => [unique().on(t.districtId, t.unitScope, t.effectiveStart)],
+  (t) => [
+    unique().on(t.districtId, t.unitScope, t.effectiveStart),
+    index("contracts_district_unit_idx").on(t.districtId, t.bargainingUnit),
+    check(
+      "contracts_bargaining_unit_check",
+      sql.raw(`bargaining_unit IN (${BARGAINING_UNIT_SQL_LIST})`),
+    ),
+  ],
 );
 
 export const insertContractSchema = createInsertSchema(contractsTable).omit({

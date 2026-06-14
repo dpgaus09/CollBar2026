@@ -65,6 +65,25 @@ RETRY_DELAYS         = [2, 4, 8]   # exponential backoff seconds
 def _district_timeout_handler(signum, frame):
     raise TimeoutError("District crawl exceeded time limit")
 
+# Bargaining-unit signal keywords — used to follow/score links toward
+# non-teacher CBAs so multi-unit collection doesn't miss them. Canonical unit
+# assignment is delegated to common.classify_bargaining_unit. Tokens here are
+# matched as case-insensitive substrings, so avoid short ambiguous tokens
+# (e.g. bare "esp" or "rn") that would false-match common words.
+UNIT_KEYWORDS = [
+    # union organizations (strong CBA signal regardless of unit)
+    "seiu", "afscme", "teamster", "iuoe", "operating engineers",
+    # support-staff / ESP umbrella
+    "support staff", "support personnel", "educational support",
+    "education support", "classified staff", "classified employees",
+    "non-certified", "non-certificated", "noncertified",
+    # specific non-certified units
+    "paraprofessional", "para-professional", "teacher aide",
+    "custodial", "custodian", "maintenance", "transportation",
+    "bus driver", "secretary", "secretarial", "clerical",
+    "food service", "cafeteria", "child nutrition", "nurse",
+]
+
 # CBA keyword list (case-insensitive, matched on link text AND href)
 CBA_KEYWORDS = [
     "collective bargaining",
@@ -77,7 +96,7 @@ CBA_KEYWORDS = [
     "iea",
     "ift",
     "board policy",
-]
+] + UNIT_KEYWORDS
 
 # Navigation keywords — broader terms for following links that may lead to CBA pages.
 # These don't directly mention a CBA but commonly lead to pages that do.
@@ -104,6 +123,8 @@ NAV_KEYWORDS = [
     "negotiat",
     "district document",
     "board document",
+    "support staff",
+    "classified",
     "download",
 ]
 
@@ -487,6 +508,18 @@ def _same_domain(base_url: str, link_url: str) -> bool:
     return link_host == base_host or link_host.endswith("." + base_host)
 
 
+def _classify_candidate(url: str, text: str) -> str:
+    """Classify a PDF candidate's bargaining unit from its link text + filename.
+
+    Defaults to 'teachers': a generic "Collective Bargaining Agreement" link
+    with no unit signal is, by IL convention, the certificated/teacher CBA.
+    This is only a crawl-time hint — the extraction LLM overrides it per
+    contract from the document's actual content.
+    """
+    fname = urlparse(url).path.rsplit("/", 1)[-1]
+    return common.classify_bargaining_unit(text, fname, default="teachers")
+
+
 def _looks_like_login(url: str, html: str) -> bool:
     """Heuristic: redirect landed on a login/SSO page."""
     if any(kw in url.lower() for kw in ("login", "signon", "auth", "saml", "oauth")):
@@ -553,10 +586,12 @@ def _extract_pdf_candidates(soup: BeautifulSoup, base_url: str, homepage: str) -
 # Per-district crawl
 # ---------------------------------------------------------------------------
 
-def _crawl_district(session: requests.Session, homepage: str, dry_run: bool) -> Optional[dict]:
+def _crawl_district(session: requests.Session, homepage: str, dry_run: bool) -> list[dict]:
     """
-    Crawl a district homepage to find the best CBA PDF.
-    Returns dict {url, score} of best PDF candidate, or None.
+    Crawl a district homepage to find CBA PDFs across bargaining units.
+    Returns a list of {url, text, score, bargaining_unit} dicts — the
+    best-scoring PDF per classified unit (teachers, support_staff, custodial,
+    etc.) — or an empty list when none are found.
     """
     log.info("  Fetching homepage: %s", homepage)
     r = _fetch(session, homepage)
@@ -666,11 +701,35 @@ def _crawl_district(session: requests.Session, homepage: str, dry_run: bool) -> 
 
     if not pdf_candidates:
         log.info("  No CBA PDF candidates found")
-        return None
+        return []
 
-    best = max(pdf_candidates, key=lambda c: c["score"])
-    log.info("  Best PDF: score=%d  %s", best["score"], best["url"])
-    return best
+    # Dedup by URL, keeping the highest score per URL.
+    by_url: dict[str, dict] = {}
+    for c in pdf_candidates:
+        u = c["url"]
+        if u not in by_url or c["score"] > by_url[u]["score"]:
+            by_url[u] = c
+
+    # Multi-unit collection: classify each PDF and keep the best-scoring PDF
+    # per bargaining unit, so a district that publishes separate teacher,
+    # support-staff, custodial, etc. CBAs yields one source_document per unit
+    # (instead of only the single top-scoring PDF, which was always a teacher
+    # contract and silently dropped the others).
+    best_per_unit: dict[str, dict] = {}
+    for c in by_url.values():
+        unit = _classify_candidate(c["url"], c["text"])
+        cand = {**c, "bargaining_unit": unit}
+        cur_best = best_per_unit.get(unit)
+        if cur_best is None or cand["score"] > cur_best["score"]:
+            best_per_unit[unit] = cand
+
+    results = sorted(best_per_unit.values(), key=lambda c: c["score"], reverse=True)
+    log.info(
+        "  Collected %d PDF(s) across %d unit(s): %s",
+        len(results), len(best_per_unit),
+        ", ".join(f'{c["bargaining_unit"]}({c["score"]})' for c in results),
+    )
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -707,26 +766,35 @@ def _save_crawl_state(state: dict):
 # ---------------------------------------------------------------------------
 
 def _upsert_source_document(cur, district_id: int, source_url: str,
-                            file_hash: str, storage_key: str) -> Optional[int]:
+                            file_hash: str, storage_key: str,
+                            bargaining_unit: str = "teachers") -> Optional[int]:
     cur.execute(
         """
-        INSERT INTO source_documents (district_id, doc_type, source_url, file_hash, storage_key)
-        VALUES (%s, 'cba_pdf', %s, %s, %s)
+        INSERT INTO source_documents
+            (district_id, doc_type, source_url, file_hash, storage_key, bargaining_unit)
+        VALUES (%s, 'cba_pdf', %s, %s, %s, %s)
         ON CONFLICT (source_url, file_hash) DO UPDATE SET
-            district_id = COALESCE(EXCLUDED.district_id, source_documents.district_id),
-            storage_key = COALESCE(EXCLUDED.storage_key, source_documents.storage_key)
+            district_id     = COALESCE(EXCLUDED.district_id, source_documents.district_id),
+            storage_key     = COALESCE(EXCLUDED.storage_key, source_documents.storage_key),
+            bargaining_unit = EXCLUDED.bargaining_unit
         RETURNING id
         """,
-        (district_id, source_url, file_hash, storage_key),
+        (district_id, source_url, file_hash, storage_key, bargaining_unit),
     )
     row = cur.fetchone()
     return row[0] if row else None
 
 
-def _hash_already_stored(cur, file_hash: str) -> bool:
+def _hash_already_stored(cur, district_id: int, file_hash: str) -> bool:
+    """True if THIS district already has a cba_pdf with this file hash.
+
+    Per-district (not global) so two districts may legitimately host the same
+    PDF, while a district's own duplicate downloads are still skipped.
+    """
     cur.execute(
-        "SELECT 1 FROM source_documents WHERE file_hash = %s AND doc_type = 'cba_pdf'",
-        (file_hash,),
+        "SELECT 1 FROM source_documents "
+        "WHERE district_id = %s AND file_hash = %s AND doc_type = 'cba_pdf'",
+        (district_id, file_hash),
     )
     return cur.fetchone() is not None
 
@@ -863,6 +931,73 @@ def _ensure_website_urls(conn):
 
 
 # ---------------------------------------------------------------------------
+# Download + store a single classified PDF candidate
+# ---------------------------------------------------------------------------
+
+def _store_candidate(cur, conn, session, district_id, candidate, homepage, dry_run):
+    """Download, store, and insert one classified PDF candidate.
+
+    Returns (status, info) where status is 'found' | 'failed' | 'skip' and
+    info is a per-unit state dict (always carries 'bargaining_unit' and
+    'status').
+    """
+    pdf_url   = candidate["url"]
+    unit      = candidate.get("bargaining_unit", "teachers")
+    found_via = candidate.get("found_via", "direct_crawl")
+
+    # Final domain guard (defense-in-depth). Search-fallback results may be
+    # off-domain — the search engine already vetted them — but direct-crawl
+    # candidates must stay on the district's own domain.
+    if found_via == "direct_crawl" and homepage and not _same_domain(homepage, pdf_url):
+        log.info("  Rejecting off-domain PDF URL (final check): %s", pdf_url)
+        return "failed", {"status": "failed", "url": pdf_url,
+                          "reason": "off_domain", "bargaining_unit": unit}
+
+    if dry_run:
+        log.info("[DRY-RUN] Would download [%s]: %s  (via %s)", unit, pdf_url, found_via)
+        return "found", {"status": "found", "url": pdf_url, "found_via": found_via,
+                         "bargaining_unit": unit, "dry_run": True}
+
+    log.info("  Downloading PDF [%s]: %s", unit, pdf_url)
+    pdf_resp = _fetch(session, pdf_url, is_pdf=True)
+    if pdf_resp is None or not pdf_resp.ok:
+        log.warning("  PDF download failed for %s", pdf_url)
+        return "failed", {"status": "failed", "url": pdf_url, "bargaining_unit": unit}
+
+    pdf_bytes = pdf_resp.content
+    if len(pdf_bytes) < 1024:
+        log.info("  PDF too small (%d bytes) — likely not a real PDF", len(pdf_bytes))
+        return "failed", {"status": "failed", "url": pdf_url,
+                          "reason": "too_small", "bargaining_unit": unit}
+
+    file_hash   = common.sha256_bytes(pdf_bytes)
+    storage_key = f"il/cba/{file_hash}.pdf"
+
+    # Per-district dedup: skip re-storing the same file for the same district.
+    if _hash_already_stored(cur, district_id, file_hash):
+        log.info("  Duplicate (hash already stored for district) — skipping download")
+        return "skip", {"status": "skip", "url": pdf_url, "file_hash": file_hash,
+                        "reason": "duplicate", "bargaining_unit": unit}
+
+    IL_CBA_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    local_path = IL_CBA_DATA_DIR / f"{file_hash}.pdf"
+    with open(local_path, "wb") as f:
+        f.write(pdf_bytes)
+    log.info("  Saved locally: %s  (%.1f KB)", local_path.name, len(pdf_bytes) / 1024)
+
+    stored_key = common.upload_to_object_storage(local_path, storage_key)
+    log.info("  Stored: %s", stored_key)
+
+    doc_id = _upsert_source_document(cur, district_id, pdf_url, file_hash, stored_key, unit)
+    conn.commit()
+    log.info("  source_documents id=%s  unit=%s", doc_id, unit)
+
+    return "found", {"status": "found", "url": pdf_url, "found_via": found_via,
+                     "bargaining_unit": unit, "storage_key": stored_key,
+                     "file_hash": file_hash, "doc_id": str(doc_id)}
+
+
+# ---------------------------------------------------------------------------
 # Main crawl loop
 # ---------------------------------------------------------------------------
 
@@ -959,13 +1094,13 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
         log.info("[ATTEMPT] %s (%s) → %s", name, rcdts, homepage or "(no URL — search-fallback only)")
         attempted += 1
 
-        best_pdf = None
+        candidates: list[dict] = []
         if homepage:
             # Per-district watchdog: SIGALRM fires if a district hangs > DISTRICT_TIMEOUT secs.
             signal.signal(signal.SIGALRM, _district_timeout_handler)
             signal.alarm(DISTRICT_TIMEOUT)
             try:
-                best_pdf = _crawl_district(session, homepage, dry_run)
+                candidates = _crawl_district(session, homepage, dry_run)
             except TimeoutError:
                 signal.alarm(0)
                 log.warning("  [TIMEOUT] %s exceeded %ds — skipping", name, DISTRICT_TIMEOUT)
@@ -980,12 +1115,15 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
             finally:
                 signal.alarm(0)
 
-        if best_pdf is None and search_fallback:
+        if not candidates and search_fallback:
             log.info("  %s — trying search-engine fallback",
                      "Direct crawl failed" if homepage else "No website URL")
-            best_pdf = _search_fallback(dist, session)
+            sf = _search_fallback(dist, session)
+            if sf:
+                sf["bargaining_unit"] = _classify_candidate(sf["url"], sf.get("text", ""))
+                candidates = [sf]
 
-        if best_pdf is None:
+        if not candidates:
             failed += 1
             # Use "search_failed" when search fallback also ran and found nothing,
             # so subsequent runs with --search-fallback don't repeat the query.
@@ -997,107 +1135,46 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
             _save_crawl_state(state)
             continue
 
-        pdf_url  = best_pdf["url"]
-        found_via = best_pdf.get("found_via", "direct_crawl")
+        # Multi-unit: a district may expose separate CBAs (teachers, support
+        # staff, custodial, etc.). Download/store each, tracking per-unit state.
+        units_state: dict[str, dict] = {}
+        any_found = False
+        any_failed = False
+        for cand in candidates:
+            status, info = _store_candidate(
+                cur, conn, session, dist_id, cand, homepage, dry_run,
+            )
+            info["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            unit = info.get("bargaining_unit", "teachers")
+            # If the same unit appears more than once, prefer a 'found' entry.
+            prev_u = units_state.get(unit)
+            if prev_u is None or (prev_u.get("status") != "found" and status == "found"):
+                units_state[unit] = info
+            if status == "found":
+                any_found = True
+            elif status == "failed":
+                any_failed = True
 
-        if dry_run:
-            log.info("[DRY-RUN] Would download: %s  (via %s)", pdf_url, found_via)
+        if any_found:
             found += 1
-            state["per_district"][rcdts] = {
-                "status":    "found",
-                "url":       pdf_url,
-                "found_via": found_via,
-                "dry_run":   True,
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            }
-            _save_crawl_state(state)
-            continue
-
-        # Final domain guard before download (defense-in-depth).
-        # Search-fallback results are allowed to be off-domain — the search
-        # engine already vetted them, and district PDFs are sometimes hosted
-        # on external platforms (Google Drive, BoardDocs, etc.).
-        if found_via == "direct_crawl" and not _same_domain(homepage, pdf_url):
-            log.info("  Rejecting off-domain PDF URL (final check): %s", pdf_url)
+            overall = "found"
+        elif any_failed:
             failed += 1
-            state["per_district"][rcdts] = {
-                "status":    "failed",
-                "url":       pdf_url,
-                "reason":    "off_domain",
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            }
-            _save_crawl_state(state)
-            continue
-
-        # Download
-        log.info("  Downloading PDF: %s", pdf_url)
-        pdf_resp = _fetch(session, pdf_url, is_pdf=True)
-        if pdf_resp is None or not pdf_resp.ok:
-            log.warning("  PDF download failed for %s", pdf_url)
-            failed += 1
-            state["per_district"][rcdts] = {
-                "status":    "failed",
-                "url":       pdf_url,
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            }
-            _save_crawl_state(state)
-            continue
-
-        pdf_bytes = pdf_resp.content
-        if len(pdf_bytes) < 1024:
-            log.info("  PDF too small (%d bytes) — likely not a real PDF", len(pdf_bytes))
-            failed += 1
-            state["per_district"][rcdts] = {
-                "status":    "failed",
-                "url":       pdf_url,
-                "reason":    "too_small",
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            }
-            _save_crawl_state(state)
-            continue
-
-        file_hash   = common.sha256_bytes(pdf_bytes)
-        storage_key = f"il/cba/{file_hash}.pdf"
-
-        # Dedup check
-        if _hash_already_stored(cur, file_hash):
-            log.info("  Duplicate (hash already in DB) — skipping download")
+            overall = "failed"
+        else:
             skipped += 1
-            state["per_district"][rcdts] = {
-                "status":    "skip",
-                "url":       pdf_url,
-                "file_hash": file_hash,
-                "reason":    "duplicate",
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            }
-            _save_crawl_state(state)
-            continue
+            overall = "skip"
 
-        # Save locally
-        IL_CBA_DATA_DIR.mkdir(parents=True, exist_ok=True)
-        local_path = IL_CBA_DATA_DIR / f"{file_hash}.pdf"
-        with open(local_path, "wb") as f:
-            f.write(pdf_bytes)
-        log.info("  Saved locally: %s  (%.1f KB)", local_path.name, len(pdf_bytes) / 1024)
-
-        # Upload to object storage
-        stored_key = common.upload_to_object_storage(local_path, storage_key)
-        log.info("  Stored: %s", stored_key)
-
-        # Insert source_documents row
-        doc_id = _upsert_source_document(cur, dist_id, pdf_url, file_hash, stored_key)
-        conn.commit()
-        log.info("  source_documents id=%s", doc_id)
-
-        found += 1
+        found_via_overall = next(
+            (u.get("found_via") for u in units_state.values()
+             if u.get("status") == "found"),
+            "direct_crawl",
+        )
         state["per_district"][rcdts] = {
-            "status":      "found",
-            "url":         pdf_url,
-            "found_via":   found_via,
-            "storage_key": stored_key,
-            "file_hash":   file_hash,
-            "doc_id":      str(doc_id),
-            "timestamp":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "status":    overall,
+            "found_via": found_via_overall,
+            "units":     units_state,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         _save_crawl_state(state)
 

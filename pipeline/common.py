@@ -224,3 +224,160 @@ def polite_get(session, url: str, retries: int = 3, timeout: int = 60,
             logging.warning("Request error for %s: %s — retrying", url, e)
             time.sleep(delay * (2 ** attempt))
     return None
+
+
+# ---------------------------------------------------------------------------
+# Bargaining-unit classification (shared by crawler + extraction)
+# ---------------------------------------------------------------------------
+#
+# CollBar benchmarks must never mix bargaining units (a teacher % settlement is
+# not comparable to a custodian % settlement). Every source document, contract,
+# and settlement carries a canonical `bargaining_unit`. This module is the single
+# source of truth for mapping noisy free text (filenames, link text, LLM-extracted
+# unit_scope strings, union names/affiliations) to that controlled vocabulary.
+#
+# Kept in sync with the SQL CHECK constraint (db/migrations/0008_*) and the TS
+# vocabulary in lib/db/src/schema/bargaining-units.ts.
+
+BARGAINING_UNITS = (
+    "teachers",
+    "paraprofessionals",
+    "custodial_maintenance",
+    "transportation",
+    "secretarial_clerical",
+    "food_service",
+    "nurses",
+    "administrators",
+    "support_staff",
+    "other",
+)
+
+# Specific, single-category keyword sets. Keep keywords precise to minimise
+# cross-category false positives (e.g. avoid bare "aide", which appears in both
+# "teacher aide" and "bus aide").
+_BU_CATEGORY_KEYWORDS = {
+    "paraprofessionals": (
+        "paraprofessional", "parapro", "para-professional", "para professional",
+        "teacher aide", "teacher's aide", "teachers aide", "teaching assistant",
+        "instructional aide", "classroom aide", "educational assistant",
+    ),
+    "custodial_maintenance": (
+        "custodial", "custodian", "maintenance", "groundskeeper", "grounds crew",
+        "buildings and grounds", "building and grounds",
+    ),
+    "transportation": (
+        "transportation", "bus driver", "bus drivers", "school bus", "bus aide",
+        "bus monitor", "bus mechanic",
+    ),
+    "secretarial_clerical": (
+        "secretary", "secretaries", "secretarial", "clerical", "clerk",
+        "office personnel", "office staff", "data processing", "bookkeeper",
+        "administrative assistant",
+    ),
+    "food_service": (
+        "food service", "child nutrition", "nutrition services", "cafeteria",
+        "lunchroom", "cook", "cooks", "kitchen staff",
+    ),
+    "nurses": (
+        "school nurse", "school nurses", "registered nurse", "rn/lpn",
+        "health aide", "nurse", "nurses",
+    ),
+}
+
+_BU_ADMIN_KEYWORDS = (
+    "administrator", "administrators", "administrative", "principal",
+    "assistant principal", "superintendent", "supervisor", "dean of students",
+    "central office administrator",
+)
+
+# Teacher / certificated signals. "certificated" is teacher-specific in IL;
+# teacher union affiliations (IEA/IFT/NEA/AFT) also indicate a teacher unit.
+_BU_TEACHER_KEYWORDS = (
+    "teacher", "teachers", "certificated", "teaching staff", "faculty",
+    "instructional staff", "licensed teacher", "education association",
+    "federation of teachers", "iea-nea", "ift-aft", " iea ", " ift ",
+    " nea ", " aft ",
+)
+
+# Broad / mixed non-certified indicators → support_staff (a combined unit).
+# Includes non-teacher union affiliations that, on their own, signal a generic
+# non-certified bargaining unit.
+_BU_SUPPORT_BROAD_KEYWORDS = (
+    "educational support personnel", "education support personnel", " esp ",
+    "(esp)", "support staff", "support personnel", "support employees",
+    "classified", "non-certificated", "noncertificated", "non-certified",
+    "noncertified", "non-teaching", "nonteaching", "non-instructional",
+    "noninstructional", "non-professional", "auxiliary personnel",
+    "seiu", "afscme", "teamster", "operating engineers", "iuoe",
+)
+
+
+def _bu_normalize(text) -> str:
+    """Lowercase + pad with spaces so word-boundary tokens like ' iea ' match."""
+    if not text:
+        return ""
+    import re as _re
+    s = str(text).lower()
+    s = s.replace("_", " ").replace("/", " / ").replace("-", "-")
+    s = _re.sub(r"\s+", " ", s).strip()
+    return f" {s} "
+
+
+def classify_bargaining_unit(*parts, default: str = "other") -> str:
+    """Map free-text signals to a canonical bargaining unit.
+
+    Pass any combination of filename, link text, LLM unit_scope, union name and
+    affiliation. Returns one of ``BARGAINING_UNITS``; returns ``default`` when no
+    signal is found. This is a *hint* at crawl time and is overridden by the
+    extraction LLM when it reads document content with strong evidence.
+
+    Precedence (first satisfied wins):
+      1. Broad/combined non-certified language with 0 or >1 specific categories
+         → ``support_staff``.
+      2. Multiple distinct specific non-cert categories → ``support_staff``.
+      3. Exactly one specific non-cert category → that category (but a teacher
+         CBA that merely mentions aides/nurses in passing stays ``teachers``).
+      4. Administrators-only → ``administrators``.
+      5. Teacher/certificated signal → ``teachers``.
+      6. Otherwise → ``default``.
+    """
+    s = " ".join(_bu_normalize(p) for p in parts if p)
+    if not s.strip():
+        return default
+
+    hits = {
+        unit
+        for unit, kws in _BU_CATEGORY_KEYWORDS.items()
+        if any(kw in s for kw in kws)
+    }
+    teacher = any(kw in s for kw in _BU_TEACHER_KEYWORDS)
+    admin = any(kw in s for kw in _BU_ADMIN_KEYWORDS)
+    broad = any(kw in s for kw in _BU_SUPPORT_BROAD_KEYWORDS)
+
+    noncert = sorted(hits)  # specific non-certified categories (incl. nurses)
+
+    # 1 & 2 — combined / mixed non-certified unit.
+    if broad and len(noncert) != 1:
+        return "support_staff"
+    if len(noncert) > 1:
+        return "support_staff"
+
+    # 3 — exactly one specific non-cert category.
+    if len(noncert) == 1:
+        only = noncert[0]
+        # A teacher CBA may mention nurses/aides; teacher language wins unless
+        # the doc is explicitly a combined non-cert unit (handled above).
+        if teacher and not broad:
+            return "teachers"
+        return only
+
+    # 4 — administrators (only when not a teacher unit).
+    if admin and not teacher:
+        return "administrators"
+
+    # 5 — teacher / certificated.
+    if teacher:
+        return "teachers"
+
+    # 6 — broad with zero categories already returned support_staff above.
+    return default

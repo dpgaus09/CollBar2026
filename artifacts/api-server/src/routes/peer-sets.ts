@@ -8,6 +8,7 @@ import {
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import React from "react";
+import { parseUnit } from "./bargaining-units.js";
 import { renderToBuffer } from "@react-pdf/renderer";
 import { BoardPacketPDF } from "./pdf-template.js";
 import type { BoardPacketProps, SettlementRow, PeerMedians } from "./pdf-template.js";
@@ -386,6 +387,9 @@ router.get(
     const districtId = req.query.district_id
       ? parseInt(String(req.query.district_id), 10)
       : null;
+    // Board packets are scoped to a single bargaining unit so peer medians
+    // never mix (e.g.) teacher % with custodian %. Defaults to 'teachers'.
+    const unit = parseUnit(req.query.bargainingUnit ?? req.query.bargaining_unit);
 
     try {
       const memberIds = (ps.district_ids ?? []).map(Number).filter(Boolean);
@@ -430,11 +434,13 @@ router.get(
         LEFT JOIN LATERAL (
           SELECT c2.source_doc_id FROM contracts c2
           WHERE c2.district_id = s.district_id
+            AND c2.bargaining_unit = s.bargaining_unit
           ORDER BY c2.effective_end DESC NULLS LAST LIMIT 1
         ) lc ON true
-        LEFT JOIN source_documents sd ON lc.source_doc_id = sd.id
+        LEFT JOIN source_documents sd ON COALESCE(s.source_doc_id, lc.source_doc_id) = sd.id
         WHERE s.district_id IN (${idList})
           AND s.base_increase_pct IS NOT NULL
+          AND s.bargaining_unit = '${unit}'
         ORDER BY s.from_year DESC, d.name
       `));
 
@@ -477,6 +483,7 @@ router.get(
         allSettlements,
         medians,
         chartData,
+        bargainingUnit: unit,
       };
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

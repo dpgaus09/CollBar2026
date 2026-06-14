@@ -1,6 +1,7 @@
 import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
 import { db } from "@workspace/db";
 import { sql, type SQL } from "drizzle-orm";
+import { parseUnit } from "./bargaining-units.js";
 
 const router: IRouter = Router();
 
@@ -206,20 +207,24 @@ router.get("/dashboard/districts/:id/provisions", canAccessDistrict, async (req:
 router.get("/dashboard/districts/:id/settlements", canAccessDistrict, async (req: Request, res: Response) => {
   const districtId = parseInt(String(req.params.id), 10);
   if (isNaN(districtId)) { res.status(400).json({ error: "Invalid district id" }); return; }
+  const unit = parseUnit(req.query.bargainingUnit);
   try {
     // Settlements: compute cost impact using EIS real salary (preferred) or TSS midpoint fallback.
     // Also include EIS cross-check (YoY salary change vs. our base_increase_pct).
+    // Cost-impact / EIS columns are teacher-specific (FTE, TSS, EIS salary tables
+    // only model teachers), so they are gated to s.bargaining_unit = 'teachers'.
     const rows = await db.execute(sql`
       SELECT s.id, s.from_year, s.to_year, s.base_increase_pct, s.year2_pct, s.year3_pct,
              s.off_schedule_payment, s.insurance_changed, s.term_years,
              s.method, s.confidence, s.human_verified, s.page_ref, s.notes,
+             s.bargaining_unit,
              sd.source_url, sd.retrieved_at,
              -- Cost impact: EIS real salary preferred; TSS midpoint as fallback
              CASE
-               WHEN d.state = 'IL' AND s.base_increase_pct IS NOT NULL
+               WHEN d.state = 'IL' AND s.bargaining_unit = 'teachers' AND s.base_increase_pct IS NOT NULL
                     AND fte.teacher_fte IS NOT NULL AND eis.avg_teacher_salary IS NOT NULL
                THEN ROUND((s.base_increase_pct / 100.0) * fte.teacher_fte * eis.avg_teacher_salary, 0)
-               WHEN d.state = 'IL' AND s.base_increase_pct IS NOT NULL
+               WHEN d.state = 'IL' AND s.bargaining_unit = 'teachers' AND s.base_increase_pct IS NOT NULL
                     AND fte.teacher_fte IS NOT NULL
                     AND tss.ba_begin IS NOT NULL AND tss.highest_scheduled_salary IS NOT NULL
                THEN ROUND(
@@ -230,15 +235,15 @@ router.get("/dashboard/districts/:id/settlements", canAccessDistrict, async (req
              END AS est_annual_cost_impact,
              -- Salary source label for the footnote
              CASE
-               WHEN d.state = 'IL' AND eis.avg_teacher_salary IS NOT NULL
+               WHEN d.state = 'IL' AND s.bargaining_unit = 'teachers' AND eis.avg_teacher_salary IS NOT NULL
                     AND fte.teacher_fte IS NOT NULL THEN 'eis'
-               WHEN d.state = 'IL' AND tss.ba_begin IS NOT NULL
+               WHEN d.state = 'IL' AND s.bargaining_unit = 'teachers' AND tss.ba_begin IS NOT NULL
                     AND fte.teacher_fte IS NOT NULL THEN 'tss'
                ELSE NULL
              END AS cost_impact_source,
              -- EIS cross-check: YoY change in district avg teacher salary from EIS data
              CASE
-               WHEN d.state = 'IL' AND eis.avg_teacher_salary IS NOT NULL
+               WHEN d.state = 'IL' AND s.bargaining_unit = 'teachers' AND eis.avg_teacher_salary IS NOT NULL
                     AND eis_prev.avg_teacher_salary > 0
                THEN ROUND(
                  ((eis.avg_teacher_salary - eis_prev.avg_teacher_salary)
@@ -248,7 +253,7 @@ router.get("/dashboard/districts/:id/settlements", canAccessDistrict, async (req
              END AS eis_observed_change_pct,
              -- Flag when settlement pct and EIS-observed change differ by > 2pp
              CASE
-               WHEN d.state = 'IL' AND s.base_increase_pct IS NOT NULL
+               WHEN d.state = 'IL' AND s.bargaining_unit = 'teachers' AND s.base_increase_pct IS NOT NULL
                     AND eis.avg_teacher_salary IS NOT NULL
                     AND eis_prev.avg_teacher_salary > 0
                     AND ABS(
@@ -265,10 +270,11 @@ router.get("/dashboard/districts/:id/settlements", canAccessDistrict, async (req
         SELECT c2.source_doc_id
         FROM contracts c2
         WHERE c2.district_id = s.district_id
+          AND c2.bargaining_unit = s.bargaining_unit
         ORDER BY c2.effective_end DESC NULLS LAST
         LIMIT 1
       ) lc ON true
-      LEFT JOIN source_documents sd ON lc.source_doc_id = sd.id
+      LEFT JOIN source_documents sd ON COALESCE(s.source_doc_id, lc.source_doc_id) = sd.id
       LEFT JOIN il_district_fte fte
         ON fte.state_district_id = d.state_district_id
         AND fte.school_year = s.from_year
@@ -285,9 +291,25 @@ router.get("/dashboard/districts/:id/settlements", canAccessDistrict, async (req
           || '-' ||
           RIGHT(CAST(LEFT(s.from_year, 4) AS INT)::TEXT, 2)
       WHERE s.district_id = ${districtId}
+        AND s.bargaining_unit = ${unit}
       ORDER BY s.from_year DESC
     `);
-    res.json({ settlements: rows.rows });
+
+    // Which bargaining units does this district actually have settlements for?
+    // Drives the unit selector + coverage transparency in the UI.
+    const unitRows = await db.execute(sql`
+      SELECT bargaining_unit, COUNT(*)::int AS n
+      FROM settlements
+      WHERE district_id = ${districtId}
+      GROUP BY bargaining_unit
+      ORDER BY n DESC
+    `);
+
+    res.json({
+      settlements: rows.rows,
+      bargainingUnit: unit,
+      availableUnits: unitRows.rows,
+    });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -326,9 +348,11 @@ router.get("/dashboard/medians", requireAuth, async (req: Request, res: Response
   const yearFrom = req.query.yearFrom ? String(req.query.yearFrom) : null;
   const yearTo = req.query.yearTo ? String(req.query.yearTo) : null;
   const state = req.query.state ? String(req.query.state).toUpperCase() : null;
+  const unit = parseUnit(req.query.bargainingUnit);
 
   const conds: Array<SQL | null> = [
     sql`s.base_increase_pct IS NOT NULL`,
+    sql`s.bargaining_unit = ${unit}`,
     state ? sql`d.state = ${state}` : null,
     county ? sql`d.county = ${county}` : null,
     yearFrom ? sql`s.from_year >= ${yearFrom}` : null,
@@ -344,12 +368,27 @@ router.get("/dashboard/medians", requireAuth, async (req: Request, res: Response
         percentile_cont(0.5) WITHIN GROUP (ORDER BY s.year2_pct) AS median_year2,
         percentile_cont(0.5) WITHIN GROUP (ORDER BY s.year3_pct) AS median_year3,
         AVG(s.base_increase_pct) AS avg_base,
-        COUNT(*)::int AS n
+        COUNT(*)::int AS n,
+        COUNT(DISTINCT s.district_id)::int AS district_count
       FROM settlements s
       JOIN districts d ON s.district_id = d.id
       WHERE ${where}
     `);
-    res.json(rows.rows[0] ?? { median_base: null, avg_base: null, n: 0 });
+    const row = (rows.rows[0] ?? null) as Record<string, unknown> | null;
+    res.json({
+      median_base: row?.median_base ?? null,
+      median_year2: row?.median_year2 ?? null,
+      median_year3: row?.median_year3 ?? null,
+      avg_base: row?.avg_base ?? null,
+      n: Number(row?.n ?? 0),
+      district_count: Number(row?.district_count ?? 0),
+      bargainingUnit: unit,
+      coverage: {
+        unit,
+        settlementCount: Number(row?.n ?? 0),
+        districtCount: Number(row?.district_count ?? 0),
+      },
+    });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -365,6 +404,7 @@ router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Resp
   const yearFrom = req.query.yearFrom ? String(req.query.yearFrom) : null;
   const yearTo = req.query.yearTo ? String(req.query.yearTo) : null;
   const state = req.query.state ? String(req.query.state).toUpperCase() : null;
+  const unit = parseUnit(req.query.bargainingUnit);
   const format = req.query.format ? String(req.query.format) : "json";
   const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10));
   const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10)));
@@ -390,6 +430,7 @@ router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Resp
   // Build WHERE conditions
   const conds: Array<SQL | null> = [
     sql`s.base_increase_pct IS NOT NULL`,
+    sql`s.bargaining_unit = ${unit}`,
     state ? sql`d.state = ${state}` : null,
     county ? sql`d.county = ${county}` : null,
     districtType ? sql`d.district_type = ${districtType}` : null,
@@ -418,6 +459,7 @@ router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Resp
           s.id, s.from_year, s.to_year, s.base_increase_pct, s.year2_pct, s.year3_pct,
           s.off_schedule_payment, s.insurance_changed, s.term_years,
           s.method, s.confidence, s.human_verified, s.page_ref,
+          s.bargaining_unit,
           d.id AS district_id, d.name AS district_name,
           d.county, d.district_type, d.enrollment,
           sd.source_url, sd.retrieved_at
@@ -427,10 +469,11 @@ router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Resp
           SELECT c2.source_doc_id
           FROM contracts c2
           WHERE c2.district_id = s.district_id
+            AND c2.bargaining_unit = s.bargaining_unit
           ORDER BY c2.effective_end DESC NULLS LAST
           LIMIT 1
         ) lc ON true
-        LEFT JOIN source_documents sd ON lc.source_doc_id = sd.id
+        LEFT JOIN source_documents sd ON COALESCE(s.source_doc_id, lc.source_doc_id) = sd.id
         WHERE ${where}
         ORDER BY s.from_year DESC, d.name
         LIMIT ${limit} OFFSET ${offset}
@@ -464,6 +507,7 @@ router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Resp
       const rows = dataRows.rows as Record<string, unknown>[];
       const headers = [
         "district_name", "county", "district_type", "enrollment",
+        "bargaining_unit",
         "from_year", "to_year", "base_increase_pct", "year2_pct", "year3_pct",
         "off_schedule_payment", "insurance_changed", "term_years", "method",
       ];
@@ -484,6 +528,7 @@ router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Resp
       return;
     }
 
+    const med = medians as Record<string, unknown> | null;
     res.json({
       items: dataRows.rows,
       total,
@@ -491,6 +536,12 @@ router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Resp
       limit,
       pages: Math.ceil(total / limit),
       medians,
+      bargainingUnit: unit,
+      coverage: {
+        unit,
+        settlementCount: total,
+        districtCount: Number(med?.district_count ?? 0),
+      },
       peer_set_name: peerSetName,
     });
   } catch (err) {

@@ -6,3 +6,4 @@
 - [IL CBA search fallback](il-cba-search-fallback.md) — Serper (primary) → Google CSE → DuckDuckGo; SERPER_API_KEY now set; run --search-fallback after direct crawl finishes.
 - [Cron requires Reserved VM](cron-reserved-vm.md) — node-cron fires only on Reserved VM; deployment type is set in the Replit Publishing UI (serve="vm" is NOT a valid artifact.toml value).
 - [ISBE connectivity from repl](isbe-connectivity.md) — isbe.net is unreachable from the sandbox (ConnectTimeoutError); only testable once deployed on a Reserved VM.
+- [Bargaining-unit scoping](bargaining-unit-scoping.md) — benchmarks never mix units, default teachers; parseUnit whitelist; provenance own-doc→same-unit fallback; cost-impact teachers-only; contracts-unique gap.

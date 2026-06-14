@@ -10,6 +10,7 @@ import {
   StyleSheet,
   Font,
 } from "@react-pdf/renderer";
+import { BARGAINING_UNIT_LABELS } from "./bargaining-units.js";
 
 Font.registerHyphenationCallback((word) => [word]);
 
@@ -235,6 +236,7 @@ export interface ChartPoint {
 export interface BoardPacketProps {
   districtName: string;
   districtState?: string;
+  bargainingUnit?: string;
   peerSetName: string;
   generatedAt: string;
   focalSettlements: SettlementRow[];
@@ -405,6 +407,7 @@ function Cell({
 export function BoardPacketPDF({
   districtName,
   districtState = "OH",
+  bargainingUnit = "teachers",
   peerSetName,
   generatedAt,
   focalSettlements,
@@ -413,6 +416,7 @@ export function BoardPacketPDF({
   chartData,
 }: BoardPacketProps) {
   const focalLatest = focalSettlements[0];
+  const unitLabel = BARGAINING_UNIT_LABELS[bargainingUnit] ?? "Teachers";
 
   return (
     <Document
@@ -427,6 +431,9 @@ export function BoardPacketPDF({
           <Text style={styles.coverTitle}>{districtName}</Text>
           <Text style={styles.coverSubtitle}>
             Board Packet — Settlement Comparables
+          </Text>
+          <Text style={[styles.coverMeta, { marginBottom: 4 }]}>
+            Bargaining Unit: {unitLabel}
           </Text>
           <Text style={[styles.coverMeta, { marginBottom: 4 }]}>
             Peer Set: {peerSetName}
@@ -469,7 +476,7 @@ export function BoardPacketPDF({
               {districtName} — Settlement Summary
             </Text>
             <Text style={{ fontSize: 7.5, color: "rgba(255,255,255,0.6)" }}>
-              Peer Set: {peerSetName}
+              {unitLabel} · Peer Set: {peerSetName}
             </Text>
           </View>
 

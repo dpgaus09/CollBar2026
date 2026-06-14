@@ -22,7 +22,8 @@ Illinois CBAs are governed by the Illinois Educational Labor Relations Act (IELR
     {
       "union_name": "string — name of the union/association (e.g., 'Naperville Education Association', 'IEA')",
       "affiliation": "string — parent federation, e.g., 'IEA/NEA', 'IFT/AFT', or null if unknown",
-      "unit_scope": "string — bargaining unit description, e.g., 'certificated teaching staff', 'classified non-teaching', 'educational support personnel'",
+      "unit_scope": "string — verbatim bargaining unit description, e.g., 'certificated teaching staff', 'classified non-teaching', 'educational support personnel'",
+      "bargaining_unit": "string — canonical category, MUST be exactly one of: teachers, paraprofessionals, custodial_maintenance, transportation, secretarial_clerical, food_service, nurses, administrators, support_staff, other. Use 'teachers' for certificated/licensed teaching staff. Use 'support_staff' for a combined/mixed non-certified unit (e.g. ESP covering custodians + secretaries + aides together).",
       "effective_start": "YYYY-MM-DD — first day the contract is in effect, or null",
       "effective_end": "YYYY-MM-DD — last day the contract is in effect, or null",
       "term_years": number_or_null,
@@ -105,3 +106,4 @@ Grievance:
 6. Salary schedule amounts should be the BASE values (Lane BA, Step 1) unless the key specifies max.
 7. Illinois salary schedules may be appended as exhibits or attachments — extract BA Step 1 as ba_min_salary.
 8. For TRS pickup: if the district pays 9.4% (or any portion) on behalf of the employee, capture that percentage as retirement_pickup_pct.
+9. bargaining_unit MUST be exactly one of the canonical values listed in the schema. Map the unit to its single best category. If one agreement combines several distinct non-certified groups, use 'support_staff'. If it is a teacher/certificated agreement, use 'teachers'. When the PDF contains multiple agreements (rule 4), each contract object gets its own bargaining_unit.

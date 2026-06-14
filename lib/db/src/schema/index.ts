@@ -1,3 +1,4 @@
+export * from "./bargaining-units";
 export * from "./districts";
 export * from "./source_documents";
 export * from "./contracts";

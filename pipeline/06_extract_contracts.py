@@ -94,6 +94,7 @@ if PYDANTIC_OK:
         union_name: Optional[str] = None
         affiliation: Optional[str] = None
         unit_scope: Optional[str] = None
+        bargaining_unit: Optional[str] = None
         effective_start: Optional[str] = None
         effective_end: Optional[str] = None
         term_years: Optional[float] = None
@@ -304,13 +305,13 @@ def get_failed_docs(conn):
     Return source_document rows whose most recent extraction run has status='failed'
     and that have no successful run.  Used by --retry-failed.
 
-    Returns tuples: (id, source_url, storage_key, district_id, school_year, district_state)
+    Returns tuples: (id, source_url, storage_key, district_id, school_year, district_state, bargaining_unit)
     """
     cur = conn.cursor()
     cur.execute(
         """
         SELECT sd.id, sd.source_url, sd.storage_key, sd.district_id, sd.school_year,
-               COALESCE(d.state, 'OH') AS district_state
+               COALESCE(d.state, 'OH') AS district_state, sd.bargaining_unit
         FROM source_documents sd
         LEFT JOIN districts d ON d.id = sd.district_id
         WHERE sd.doc_type = 'cba_pdf'
@@ -339,7 +340,7 @@ def get_unprocessed_docs(conn, doc_id: Optional[int] = None, priority: bool = Fa
     2026-2027) are processed first.
     When state is given (e.g. 'IL'), only return docs for districts in that state.
 
-    Returns tuples: (id, source_url, storage_key, district_id, school_year, district_state)
+    Returns tuples: (id, source_url, storage_key, district_id, school_year, district_state, bargaining_unit)
     """
     cur = conn.cursor()
     state_filter = "AND d.state = %s" if state else ""
@@ -349,7 +350,7 @@ def get_unprocessed_docs(conn, doc_id: Optional[int] = None, priority: bool = Fa
         cur.execute(
             """
             SELECT sd.id, sd.source_url, sd.storage_key, sd.district_id, sd.school_year,
-                   COALESCE(d.state, 'OH') AS district_state
+                   COALESCE(d.state, 'OH') AS district_state, sd.bargaining_unit
             FROM source_documents sd
             LEFT JOIN districts d ON d.id = sd.district_id
             WHERE sd.id = %s AND sd.doc_type = 'cba_pdf'
@@ -366,7 +367,7 @@ def get_unprocessed_docs(conn, doc_id: Optional[int] = None, priority: bool = Fa
         cur.execute(
             f"""
             SELECT sd.id, sd.source_url, sd.storage_key, sd.district_id, sd.school_year,
-                   COALESCE(d.state, 'OH') AS district_state
+                   COALESCE(d.state, 'OH') AS district_state, sd.bargaining_unit
             FROM source_documents sd
             LEFT JOIN districts d ON d.id = sd.district_id
             WHERE sd.doc_type = 'cba_pdf'
@@ -407,19 +408,46 @@ def update_extraction_run(cur, run_id: int, status: str, error: Optional[str] = 
     )
 
 
-def upsert_contract(cur, district_id, c: "ContractData", source_doc_id: int) -> Optional[int]:
+def resolve_bargaining_unit(c: "ContractData", default_unit: str = "teachers") -> str:
+    """Resolve a contract's canonical bargaining_unit from the LLM result.
+
+    Precedence: an explicit canonical LLM ``bargaining_unit`` value →
+    classifier over the text signals (bargaining_unit text, unit_scope, union
+    name, affiliation) → the source document's unit hint (``default_unit``).
+    """
+    llm = _s(c, "bargaining_unit")
+    if llm and llm.strip().lower() in common.BARGAINING_UNITS:
+        return llm.strip().lower()
+    guess = common.classify_bargaining_unit(
+        llm,
+        _s(c, "unit_scope"),
+        _s(c, "union_name"),
+        _s(c, "affiliation"),
+        default="other",
+    )
+    if guess != "other":
+        return guess
+    return default_unit or "teachers"
+
+
+def upsert_contract(
+    cur, district_id, c: "ContractData", source_doc_id: int,
+    default_unit: str = "teachers",
+) -> Optional[int]:
     """Insert a contract row. Returns the contract id."""
+    bargaining_unit = resolve_bargaining_unit(c, default_unit)
     try:
         cur.execute(
             """
             INSERT INTO contracts
-                (district_id, union_name, affiliation, unit_scope,
+                (district_id, union_name, affiliation, unit_scope, bargaining_unit,
                  effective_start, effective_end, term_years,
                  has_reopener, reopener_terms, source_doc_id)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (district_id, unit_scope, effective_start) DO UPDATE SET
                 union_name        = COALESCE(EXCLUDED.union_name, contracts.union_name),
                 affiliation       = COALESCE(EXCLUDED.affiliation, contracts.affiliation),
+                bargaining_unit   = EXCLUDED.bargaining_unit,
                 effective_end     = COALESCE(EXCLUDED.effective_end, contracts.effective_end),
                 term_years        = COALESCE(EXCLUDED.term_years, contracts.term_years),
                 has_reopener      = COALESCE(EXCLUDED.has_reopener, contracts.has_reopener),
@@ -431,6 +459,7 @@ def upsert_contract(cur, district_id, c: "ContractData", source_doc_id: int) -> 
                 _s(c, "union_name"),
                 _s(c, "affiliation"),
                 _s(c, "unit_scope") or "certificated",
+                bargaining_unit,
                 _s(c, "effective_start"),
                 _s(c, "effective_end"),
                 _n(c, "term_years"),
@@ -546,60 +575,6 @@ def _b(obj, key: str) -> Optional[bool]:
 # Settlement derivation — helpers
 # ---------------------------------------------------------------------------
 
-# Canonical unit-scope groups used to normalize raw LLM strings before
-# consecutive-contract pairing in the ba_min_delta path.
-_SCOPE_TEACHERS = frozenset({
-    "teacher", "teachers", "teaching", "teaching staff",
-    "certificated", "certificated staff", "certificated employees",
-    "certificated teaching staff", "certificated teaching",
-    "certified", "certified staff", "certified teaching staff",
-    "instructional", "instructional staff", "instructional employees",
-    "professional staff", "professional employees",
-    "certificated",
-})
-_SCOPE_CLASSIFIED = frozenset({
-    "classified", "classified staff", "classified employees",
-    "support", "support staff", "support employees",
-    "paraprofessional", "paraprofessionals", "para",
-    "custodial", "custodians", "custodian",
-    "secretary", "secretaries", "clerical", "maintenance",
-    "bus driver", "bus drivers", "food service",
-    "aide", "aides",
-})
-_SCOPE_ADMIN = frozenset({
-    "administrative", "administrators", "administrator",
-    "admin", "administration", "principals", "principal",
-    "supervisors", "supervisor", "director", "directors",
-    "management",
-})
-
-
-def _canonical_scope(scope: Optional[str]) -> str:
-    """
-    Normalize a raw LLM-extracted unit_scope string to a canonical group
-    ('teachers', 'classified', 'administrators', or the lowercased raw value).
-    Used for consecutive-contract pairing so that 'certificated teaching staff'
-    and 'certified staff' don't create separate non-pairable groups.
-    """
-    if not scope:
-        return "teachers"
-    s = scope.lower().strip()
-    if s in _SCOPE_TEACHERS:
-        return "teachers"
-    if s in _SCOPE_CLASSIFIED:
-        return "classified"
-    if s in _SCOPE_ADMIN:
-        return "administrators"
-    # Partial-match fallbacks
-    if any(k in s for k in ("teacher", "certificat", "certif", "instructional")):
-        return "teachers"
-    if any(k in s for k in ("classified", "support staff", "parapro", "custodial",
-                             "secretary", "aide", "clerical", "food service")):
-        return "classified"
-    if any(k in s for k in ("admin", "principal", "supervisor", "director")):
-        return "administrators"
-    return s  # unknown scope — keep as-is for grouping
-
 
 def _get_contract_provisions(cur, contract_id: int) -> dict:
     """Return compensation provisions for a contract keyed by provision_key."""
@@ -644,6 +619,34 @@ def _school_year(date_str, *, is_end: bool = False) -> Optional[str]:
         return None
 
 
+def backfill_contract_units(conn) -> int:
+    """Re-derive each contract's bargaining_unit from its unit_scope / union /
+    affiliation using the shared classifier.
+
+    Corrects migration 0008's blanket 'teachers' default for non-teacher
+    contracts. Idempotent and conservative: only overrides when the classifier
+    finds a real signal (i.e. a non-'other' result that differs from the
+    current value), so it never clobbers a more specific value with 'other'.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, unit_scope, union_name, affiliation, bargaining_unit FROM contracts"
+    )
+    rows = cur.fetchall()
+    updated = 0
+    for cid, scope, uname, affil, current in rows:
+        guess = common.classify_bargaining_unit(scope, uname, affil, default="other")
+        if guess == "other" or guess == current:
+            continue
+        cur.execute(
+            "UPDATE contracts SET bargaining_unit = %s WHERE id = %s", (guess, cid)
+        )
+        updated += 1
+    conn.commit()
+    cur.close()
+    return updated
+
+
 def derive_settlements(conn):
     """
     Derives settlements via two independent paths:
@@ -660,7 +663,21 @@ def derive_settlements(conn):
     from collections import defaultdict
     from datetime import date as _date
 
+    # Ensure every contract carries a canonical bargaining_unit before grouping.
+    n_unit = backfill_contract_units(conn)
+    if n_unit:
+        log.info("Backfilled bargaining_unit on %d contract(s) from unit_scope", n_unit)
+
     cur = conn.cursor()
+
+    # 'stated' and 'ba_min_delta' settlements are fully re-derivable from
+    # contracts. Delete and re-derive so unit re-classification cannot leave
+    # stale, mis-tagged rows. 'tss_diff' settlements (loaded separately) are
+    # never touched.
+    cur.execute("DELETE FROM settlements WHERE method IN ('stated','ba_min_delta')")
+    if cur.rowcount:
+        log.info("Cleared %d derivable settlement(s) for re-derivation", cur.rowcount)
+    conn.commit()
 
     # skip_reasons[reason] = count — accumulated across both passes
     skip_reasons: dict[str, int] = {}
@@ -678,7 +695,8 @@ def derive_settlements(conn):
     # -------------------------------------------------------------------------
     cur.execute(
         """
-        SELECT id, district_id, unit_scope, effective_start, effective_end, term_years
+        SELECT id, district_id, unit_scope, effective_start, effective_end, term_years,
+               bargaining_unit, source_doc_id
         FROM contracts
         ORDER BY district_id NULLS LAST, effective_start NULLS LAST, id
         """
@@ -686,7 +704,8 @@ def derive_settlements(conn):
     all_contracts = cur.fetchall()
     contracts_evaluated = len(all_contracts)
 
-    for contract_id, district_id, unit_scope, eff_start, eff_end, term_years in all_contracts:
+    for (contract_id, district_id, unit_scope, eff_start, eff_end, term_years,
+         bargaining_unit, source_doc_id) in all_contracts:
         if district_id is None:
             log.debug("Contract %d skipped [stated]: no district_id", contract_id)
             _skip("no_district_id")
@@ -731,14 +750,15 @@ def derive_settlements(conn):
             cur.execute(
                 """
                 INSERT INTO settlements
-                    (district_id, from_year, to_year, base_increase_pct,
+                    (district_id, bargaining_unit, from_year, to_year, base_increase_pct,
                      year2_pct, year3_pct, off_schedule_payment,
-                     term_years, method, confidence)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (district_id, from_year, to_year) DO NOTHING
+                     term_years, method, confidence, contract_id, source_doc_id)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (district_id, bargaining_unit, from_year, to_year) DO NOTHING
                 """,
                 (
                     district_id,
+                    bargaining_unit,
                     from_year,
                     to_year or from_year,
                     base_pct,
@@ -748,6 +768,8 @@ def derive_settlements(conn):
                     term_years,
                     "stated",
                     confidence,
+                    contract_id,
+                    source_doc_id,
                 ),
             )
             if cur.rowcount > 0:
@@ -779,31 +801,30 @@ def derive_settlements(conn):
     # PASS 2 — 'ba_min_delta' path
     # Consecutive pairs (same district + canonical unit_scope, ≤ 730-day gap)
     # where no stated % exists but BA-min values are present.
-    # unit_scope is normalized via _canonical_scope() before grouping so that
-    # e.g. "certificated teaching staff" and "teachers" share a group.
+    # Contracts are grouped by canonical bargaining_unit (set at extraction time
+    # and backfilled above) so that e.g. "certificated teaching staff" and
+    # "teachers" share a group while a custodial unit stays separate.
     # -------------------------------------------------------------------------
 
-    # Build (district_id, canonical_scope) → [raw unit_scopes]
-    canon_groups: dict[tuple, list] = defaultdict(list)
-    for _, district_id, unit_scope, *_ in all_contracts:
-        if district_id is None:
+    # Build the set of (district_id, bargaining_unit) groups present.
+    canon_groups: dict[tuple, bool] = {}
+    for row_c in all_contracts:
+        c_district_id = row_c[1]
+        c_unit = row_c[6]
+        if c_district_id is None:
             continue
-        canon = _canonical_scope(unit_scope)
-        raw_scopes = canon_groups[(district_id, canon)]
-        if unit_scope not in raw_scopes:
-            raw_scopes.append(unit_scope)
+        canon_groups[(c_district_id, c_unit)] = True
 
-    for (district_id, canon_scope), raw_scopes in canon_groups.items():
-        # Fetch all contracts across all raw unit_scopes that share this canonical scope
-        placeholders = ", ".join(["%s"] * len(raw_scopes))
+    for (district_id, bargaining_unit) in canon_groups:
+        # Fetch all contracts in this district + bargaining unit, in time order.
         cur.execute(
-            f"""
-            SELECT id, effective_start, effective_end, term_years, unit_scope
+            """
+            SELECT id, effective_start, effective_end, term_years, unit_scope, source_doc_id
             FROM contracts
-            WHERE district_id = %s AND unit_scope IN ({placeholders})
+            WHERE district_id = %s AND bargaining_unit = %s
             ORDER BY effective_start NULLS LAST, id
             """,
-            [district_id] + raw_scopes,
+            (district_id, bargaining_unit),
         )
         group_contracts = cur.fetchall()
 
@@ -811,7 +832,7 @@ def derive_settlements(conn):
         prev_ba_conf: float = 0.5
         prev_eff_end: Optional[str] = None
 
-        for i, (contract_id, eff_start, eff_end, term_years, unit_scope) in enumerate(group_contracts):
+        for i, (contract_id, eff_start, eff_end, term_years, unit_scope, source_doc_id) in enumerate(group_contracts):
             prov = _get_contract_provisions(cur, contract_id)
             ba_min   = prov.get("ba_min_salary", {}).get("val")
             yr1      = prov.get("base_salary_increase_yr1", {})
@@ -927,14 +948,15 @@ def derive_settlements(conn):
                 cur.execute(
                     """
                     INSERT INTO settlements
-                        (district_id, from_year, to_year, base_increase_pct,
+                        (district_id, bargaining_unit, from_year, to_year, base_increase_pct,
                          year2_pct, year3_pct, off_schedule_payment,
-                         term_years, method, confidence)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (district_id, from_year, to_year) DO NOTHING
+                         term_years, method, confidence, contract_id, source_doc_id)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (district_id, bargaining_unit, from_year, to_year) DO NOTHING
                     """,
                     (
                         district_id,
+                        bargaining_unit,
                         from_year,
                         to_year or from_year,
                         base_pct,
@@ -944,6 +966,8 @@ def derive_settlements(conn):
                         term_years,
                         "ba_min_delta",
                         confidence,
+                        contract_id,
+                        source_doc_id,
                     ),
                 )
                 if cur.rowcount > 0:
@@ -1078,6 +1102,7 @@ def main():
         # Rows now carry a 6th column: district_state.  Tolerate old 5-col rows.
         source_doc_id, source_url, storage_key, district_id, school_year = row[:5]
         district_state: str = row[5] if len(row) > 5 else "OH"
+        doc_unit: str = row[6] if len(row) > 6 else "teachers"
 
         # Pick the state-appropriate system prompt.
         is_il = district_state == "IL"
@@ -1213,7 +1238,7 @@ def main():
         doc_provisions = 0
         doc_audit_samples = 0
         for c in contracts_list:
-            contract_id = upsert_contract(cur, district_id, c, source_doc_id)
+            contract_id = upsert_contract(cur, district_id, c, source_doc_id, doc_unit)
             if contract_id is None:
                 continue
             conn.commit()
