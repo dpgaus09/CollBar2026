@@ -78,7 +78,7 @@ async function getTableCounts(): Promise<Record<string, number>> {
 // ---------------------------------------------------------------------------
 // Admin session middleware
 // Checks that the request carries a valid admin session (set via
-// GET /api/auth/replit/callback after Replit OIDC authentication).
+// POST /api/auth/login with admin credentials).
 // ---------------------------------------------------------------------------
 function requireAdminToken(req: Request, res: Response, next: NextFunction): void {
   if (req.session.adminAuthenticated) {
@@ -1213,24 +1213,26 @@ router.get("/admin/directory-refresh-status", requireAdminToken, async (_req, re
 });
 
 // ---------------------------------------------------------------------------
-// Customer management endpoints (approved_customers table)
+// Customer management endpoints (users table, role = 'district_user')
 // ---------------------------------------------------------------------------
 
-// GET /admin/customers — list all customers
+// GET /admin/customers — list all district_user accounts
 router.get("/admin/customers", requireAdminToken, async (_req, res) => {
   try {
-    const rows = await db.execute(
-      sql`SELECT id, name, email, active, district_id, created_at, last_sign_in_at
-          FROM approved_customers
-          ORDER BY created_at DESC`,
-    );
+    const rows = await db.execute(sql`
+      SELECT id, name, email, active, district_id, created_at, last_sign_in_at,
+             (password_hash IS NOT NULL) AS has_password
+      FROM users
+      WHERE role = 'district_user'
+      ORDER BY created_at DESC
+    `);
     res.json({ customers: rows.rows });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
 });
 
-// POST /admin/customers — add a new approved customer
+// POST /admin/customers — create a new district user account
 router.post("/admin/customers", requireAdminToken, async (req, res) => {
   const { name, email, district_id } = req.body as {
     name?: string;
@@ -1243,11 +1245,11 @@ router.post("/admin/customers", requireAdminToken, async (req, res) => {
   }
   const normalEmail = email.toLowerCase().trim();
   try {
-    const rows = await db.execute(
-      sql`INSERT INTO approved_customers (name, email, district_id)
-          VALUES (${name.trim()}, ${normalEmail}, ${district_id ?? null})
-          RETURNING id, name, email, active, district_id, created_at, last_sign_in_at`,
-    );
+    const rows = await db.execute(sql`
+      INSERT INTO users (name, email, role, plan, active, district_id)
+      VALUES (${name.trim()}, ${normalEmail}, 'district_user', 'free', true, ${district_id ?? null})
+      RETURNING id, name, email, active, district_id, created_at, last_sign_in_at
+    `);
     res.json({ customer: rows.rows[0] });
   } catch (err) {
     const msg = String(err);
@@ -1274,24 +1276,19 @@ router.patch("/admin/customers/:id", requireAdminToken, async (req, res) => {
 
   try {
     if (active !== undefined) {
-      await db.execute(
-        sql`UPDATE approved_customers SET active = ${active} WHERE id = ${id}`,
-      );
+      await db.execute(sql`UPDATE users SET active = ${active} WHERE id = ${id} AND role = 'district_user'`);
     }
     if (name !== undefined) {
-      await db.execute(
-        sql`UPDATE approved_customers SET name = ${name.trim()} WHERE id = ${id}`,
-      );
+      await db.execute(sql`UPDATE users SET name = ${name.trim()} WHERE id = ${id} AND role = 'district_user'`);
     }
     if (district_id !== undefined) {
-      await db.execute(
-        sql`UPDATE approved_customers SET district_id = ${district_id ?? null} WHERE id = ${id}`,
-      );
+      await db.execute(sql`UPDATE users SET district_id = ${district_id ?? null} WHERE id = ${id} AND role = 'district_user'`);
     }
-    const updated = await db.execute(
-      sql`SELECT id, name, email, active, district_id, created_at, last_sign_in_at
-          FROM approved_customers WHERE id = ${id}`,
-    );
+    const updated = await db.execute(sql`
+      SELECT id, name, email, active, district_id, created_at, last_sign_in_at,
+             (password_hash IS NOT NULL) AS has_password
+      FROM users WHERE id = ${id} AND role = 'district_user'
+    `);
     if (updated.rows.length === 0) {
       res.status(404).json({ error: "Customer not found" });
       return;
@@ -1302,7 +1299,38 @@ router.patch("/admin/customers/:id", requireAdminToken, async (req, res) => {
   }
 });
 
-// DELETE /admin/customers/:id — remove a customer
+// PATCH /admin/customers/:id/password — set or reset a customer's password
+router.patch("/admin/customers/:id/password", requireAdminToken, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) {
+    res.status(400).json({ error: "Valid numeric id required" });
+    return;
+  }
+  const { password } = req.body as { password?: string };
+  if (!password || password.length < 8) {
+    res.status(400).json({ error: "Password must be at least 8 characters" });
+    return;
+  }
+  try {
+    const bcrypt = await import("bcrypt");
+    const hash = await bcrypt.hash(password, 12);
+    const result = await db.execute(sql`
+      UPDATE users
+      SET password_hash = ${hash}, failed_login_count = 0, lockout_until = NULL
+      WHERE id = ${id} AND role = 'district_user'
+    `);
+    const affected = (result as unknown as { rowCount?: number }).rowCount ?? 0;
+    if (affected === 0) {
+      res.status(404).json({ error: "Customer not found" });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// DELETE /admin/customers/:id — remove a customer account
 router.delete("/admin/customers/:id", requireAdminToken, async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) {
@@ -1310,7 +1338,7 @@ router.delete("/admin/customers/:id", requireAdminToken, async (req, res) => {
     return;
   }
   try {
-    await db.execute(sql`DELETE FROM approved_customers WHERE id = ${id}`);
+    await db.execute(sql`DELETE FROM users WHERE id = ${id} AND role = 'district_user'`);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: String(err) });

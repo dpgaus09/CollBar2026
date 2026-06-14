@@ -2,7 +2,7 @@ import express, { type Express } from "express";
 import cors from "cors";
 import session from "express-session";
 import pinoHttp from "pino-http";
-import passport from "passport";
+import bcrypt from "bcrypt";
 import router from "./routes";
 import publicHtmlRouter from "./routes/public-html";
 import { logger } from "./lib/logger";
@@ -57,11 +57,6 @@ app.use(
   }),
 );
 
-// Passport initialization — required for Google OAuth strategy.
-// We do NOT use passport.session() — session management is handled
-// directly via express-session in the auth route callbacks.
-app.use(passport.initialize());
-
 // ---------------------------------------------------------------------------
 // Security headers — applied to every response
 // ---------------------------------------------------------------------------
@@ -83,7 +78,7 @@ app.use((_req, res, next) => {
       "img-src 'self' data: blob:",
       "font-src 'self' data:",
       "connect-src 'self'",
-      "frame-ancestors 'none'",
+      isProd ? "frame-ancestors 'none'" : "frame-ancestors 'self'",
       "base-uri 'self'",
       "form-action 'self'",
     ].join("; "),
@@ -104,10 +99,21 @@ app.use("/api", router);
 
 // ---------------------------------------------------------------------------
 // Startup migrations — idempotent DDL changes applied on every restart.
-// Delay slightly so the DB connection pool is fully ready.
 // ---------------------------------------------------------------------------
 async function runMigrations(): Promise<void> {
   try {
+    // Extend users table with auth columns
+    await db.execute(sql`
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS name             TEXT,
+        ADD COLUMN IF NOT EXISTS password_hash    TEXT,
+        ADD COLUMN IF NOT EXISTS active           BOOLEAN NOT NULL DEFAULT true,
+        ADD COLUMN IF NOT EXISTS failed_login_count INT NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS lockout_until    TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS last_sign_in_at  TIMESTAMPTZ
+    `);
+
+    // Keep approved_customers for historical data — just ensure it exists
     await db.execute(sql`
       CREATE TABLE IF NOT EXISTS approved_customers (
         id BIGSERIAL PRIMARY KEY,
@@ -120,9 +126,74 @@ async function runMigrations(): Promise<void> {
         CONSTRAINT approved_customers_email_unique UNIQUE (email)
       )
     `);
-    logger.info("Migration OK: approved_customers table ensured");
+
+    logger.info("Migration OK: users auth columns ensured");
   } catch (err) {
     logger.warn({ err }, "Migration failed — will retry on next restart");
+    return;
+  }
+
+  // Seed admin user after migrations succeed
+  await seedAdmin();
+}
+
+// ---------------------------------------------------------------------------
+// Admin seeding — creates/updates the admin user from env vars on every boot.
+// Set ADMIN_EMAIL (default dpgaus@outlook.com) and ADMIN_PASSWORD in secrets.
+// ---------------------------------------------------------------------------
+async function seedAdmin(): Promise<void> {
+  const adminEmail = (process.env.ADMIN_EMAIL ?? "dpgaus@outlook.com").toLowerCase().trim();
+  const adminPassword = process.env.ADMIN_PASSWORD;
+
+  if (!adminPassword) {
+    logger.warn(
+      "ADMIN_PASSWORD is not set — admin account cannot be created or updated. " +
+      "Set ADMIN_PASSWORD in Replit Secrets to enable admin login.",
+    );
+    return;
+  }
+
+  try {
+    const existing = await db.execute(sql`
+      SELECT id, password_hash FROM users WHERE email = ${adminEmail}
+    `);
+
+    const row = existing.rows[0] as { id: number; password_hash: string | null } | undefined;
+
+    if (!row) {
+      // Create admin user
+      const hash = await bcrypt.hash(adminPassword, 12);
+      await db.execute(sql`
+        INSERT INTO users (email, role, plan, active, name, password_hash)
+        VALUES (${adminEmail}, 'admin', 'free', true, 'Admin', ${hash})
+        ON CONFLICT (email) DO NOTHING
+      `);
+      logger.info({ email: adminEmail }, "Admin user created");
+    } else if (!row.password_hash) {
+      // User exists but has no password — set it
+      const hash = await bcrypt.hash(adminPassword, 12);
+      await db.execute(sql`
+        UPDATE users SET password_hash = ${hash}, role = 'admin', active = true
+        WHERE id = ${row.id}
+      `);
+      logger.info({ email: adminEmail }, "Admin password initialised");
+    } else {
+      // User exists with a password — re-hash only if ADMIN_PASSWORD changed.
+      // We compare against the stored hash to avoid unnecessary bcrypt work.
+      const matches = await bcrypt.compare(adminPassword, row.password_hash);
+      if (!matches) {
+        const hash = await bcrypt.hash(adminPassword, 12);
+        await db.execute(sql`
+          UPDATE users SET password_hash = ${hash}, role = 'admin', active = true
+          WHERE id = ${row.id}
+        `);
+        logger.info({ email: adminEmail }, "Admin password updated");
+      } else {
+        logger.info({ email: adminEmail }, "Admin user OK");
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, "Admin seeding failed");
   }
 }
 

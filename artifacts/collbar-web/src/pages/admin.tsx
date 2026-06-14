@@ -336,26 +336,11 @@ function useReviewQueue(page: number, category: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Admin login modal
+// Admin login redirect helper
 // ---------------------------------------------------------------------------
 
-function AdminLoginModal({ onSuccess: _onSuccess }: { onSuccess: () => void }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm">
-      <div className="w-full max-w-sm rounded-xl border border-slate-700 bg-slate-900 p-6 shadow-2xl space-y-4">
-        <h2 className="text-sm font-semibold text-slate-200">Admin Sign-in</h2>
-        <p className="text-xs text-slate-500 leading-relaxed">
-          Sign in with your Replit account to unlock the admin panel.
-        </p>
-        <a
-          href={`${import.meta.env.BASE_URL}api/auth/replit`}
-          className="block w-full text-center text-xs px-3 py-2 rounded bg-blue-700 hover:bg-blue-600 text-white transition-colors"
-        >
-          Sign in with Replit →
-        </a>
-      </div>
-    </div>
-  );
+function goToLogin() {
+  window.location.href = `${import.meta.env.BASE_URL}login`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2431,12 +2416,13 @@ function AlertsTab() {
 
 interface Customer {
   id: number;
-  name: string;
+  name: string | null;
   email: string;
   active: boolean;
   district_id: number | null;
   created_at: string | null;
   last_sign_in_at: string | null;
+  has_password: boolean;
 }
 
 function CustomersTab() {
@@ -2458,6 +2444,38 @@ function CustomersTab() {
   const [newEmail, setNewEmail] = useState("");
   const [addError, setAddError] = useState("");
   const [adding, setAdding] = useState(false);
+
+  const [pwModal, setPwModal] = useState<{ id: number; email: string } | null>(null);
+  const [newPw, setNewPw] = useState("");
+  const [pwError, setPwError] = useState("");
+  const [pwSaving, setPwSaving] = useState(false);
+
+  const handleSetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pwModal) return;
+    setPwError("");
+    setPwSaving(true);
+    try {
+      const r = await fetch(apiUrl(`/api/admin/customers/${pwModal.id}/password`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ password: newPw }),
+      });
+      const body = (await r.json()) as { ok?: boolean; error?: string };
+      if (!r.ok) {
+        setPwError(body.error ?? "Failed to set password");
+      } else {
+        setPwModal(null);
+        setNewPw("");
+        qc.invalidateQueries({ queryKey: ["/api/admin/customers"] });
+      }
+    } catch {
+      setPwError("Network error");
+    } finally {
+      setPwSaving(false);
+    }
+  };
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2509,12 +2527,12 @@ function CustomersTab() {
     return (
       <div className="rounded-xl border border-amber-800/50 bg-amber-950/10 p-6 text-center space-y-3">
         <p className="text-amber-300 text-sm">Sign in to manage customers.</p>
-        <a
-          href={`${import.meta.env.BASE_URL}api/auth/replit`}
+        <button
+          onClick={goToLogin}
           className="inline-block text-xs px-4 py-2 rounded bg-blue-700 hover:bg-blue-600 text-white transition-colors"
         >
-          Sign in with Replit →
-        </a>
+          Sign in →
+        </button>
       </div>
     );
   }
@@ -2525,7 +2543,7 @@ function CustomersTab() {
         <div>
           <h2 className="text-sm font-semibold text-slate-200">Approved Customers</h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Only listed emails can sign in via Google OAuth.
+            Manage customer accounts. Use "Set Password" to enable login for each user.
           </p>
         </div>
         <button
@@ -2591,6 +2609,7 @@ function CustomersTab() {
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Name</th>
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Email</th>
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Status</th>
+                <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Password</th>
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Last sign-in</th>
                 <th className="px-4 py-2.5" />
               </tr>
@@ -2601,7 +2620,7 @@ function CustomersTab() {
                   key={c.id}
                   className={`border-b border-slate-800/50 ${i % 2 === 0 ? "bg-slate-950" : "bg-slate-900/30"}`}
                 >
-                  <td className="px-4 py-2.5 text-slate-200">{c.name}</td>
+                  <td className="px-4 py-2.5 text-slate-200">{c.name ?? "—"}</td>
                   <td className="px-4 py-2.5 text-slate-400 font-mono">{c.email}</td>
                   <td className="px-4 py-2.5">
                     <button
@@ -2613,6 +2632,18 @@ function CustomersTab() {
                       }`}
                     >
                       {c.active ? "Active" : "Inactive"}
+                    </button>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <button
+                      onClick={() => { setPwModal({ id: c.id, email: c.email }); setNewPw(""); setPwError(""); }}
+                      className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                        c.has_password
+                          ? "bg-slate-800 text-slate-400 hover:bg-blue-900/50 hover:text-blue-300"
+                          : "bg-amber-900/50 text-amber-400 hover:bg-blue-900/50 hover:text-blue-300"
+                      }`}
+                    >
+                      {c.has_password ? "Change" : "Set password"}
                     </button>
                   </td>
                   <td className="px-4 py-2.5 text-slate-500">
@@ -2632,6 +2663,46 @@ function CustomersTab() {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {pwModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-sm rounded-xl border border-slate-700 bg-slate-900 p-6 shadow-2xl space-y-4">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-200">Set Password</h2>
+              <p className="text-xs text-slate-500 mt-0.5 font-mono">{pwModal.email}</p>
+            </div>
+            <form onSubmit={handleSetPassword} className="space-y-3">
+              <input
+                type="password"
+                autoFocus
+                placeholder="New password (min 8 characters)"
+                value={newPw}
+                onChange={(e) => setNewPw(e.target.value)}
+                required
+                minLength={8}
+                className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+              />
+              {pwError && <p className="text-xs text-red-400">{pwError}</p>}
+              <div className="flex gap-2">
+                <button
+                  type="submit"
+                  disabled={pwSaving}
+                  className="flex-1 text-xs px-3 py-2 rounded bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-50 transition-colors"
+                >
+                  {pwSaving ? "Saving…" : "Save password"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPwModal(null)}
+                  className="text-xs px-3 py-2 rounded border border-slate-700 text-slate-400 hover:text-slate-200 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
     </div>
@@ -2681,11 +2752,7 @@ export default function AdminPage() {
   const tab = activeTab(location);
   const { data: alertsData } = useAlertsPendingCount();
   const pendingAlerts = alertsData?.pendingCount ?? 0;
-  const { data: session, refetch: refetchSession } = useAdminSession();
-  const [showLoginBanner, setShowLoginBanner] = useState(false);
-
-  // refetchSession kept for compatibility with child tabs that call it
-  void refetchSession;
+  const { data: session } = useAdminSession();
 
   const isAuthenticated = session?.authenticated === true;
 
@@ -2706,12 +2773,12 @@ export default function AdminPage() {
               Admin session active
             </span>
           ) : (
-            <a
-              href={`${import.meta.env.BASE_URL}api/auth/replit`}
+            <button
+              onClick={goToLogin}
               className="text-xs px-3 py-1.5 rounded border border-slate-700 text-slate-300 hover:border-blue-600 hover:text-blue-300 transition-colors"
             >
               Log in
-            </a>
+            </button>
           )}
         </div>
       </header>
@@ -2719,23 +2786,15 @@ export default function AdminPage() {
       {!isAuthenticated && (
         <div className="border-b border-amber-800/60 bg-amber-950/20 px-6 py-3 flex items-center justify-between">
           <span className="text-xs text-amber-300">
-            Sign in with your Replit account to see live pipeline data and table counts.
+            Sign in to see live pipeline data and table counts.
           </span>
-          <a
-            href={`${import.meta.env.BASE_URL}api/auth/replit`}
+          <button
+            onClick={goToLogin}
             className="text-xs px-3 py-1 rounded bg-amber-800 hover:bg-amber-700 text-amber-100 transition-colors"
           >
             Log in
-          </a>
+          </button>
         </div>
-      )}
-
-      {showLoginBanner && (
-        <AdminLoginModal
-          onSuccess={() => {
-            setShowLoginBanner(false);
-          }}
-        />
       )}
 
       <div className="border-b border-slate-800 px-6">

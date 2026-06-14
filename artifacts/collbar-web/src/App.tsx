@@ -38,16 +38,10 @@ function Home() {
         <p className="text-slate-500 text-xs mt-6">Phase 4 — District Dashboard</p>
         <div className="mt-4 flex items-center justify-center gap-3">
           <a
-            href={`${import.meta.env.BASE_URL}api/auth/google`}
+            href={`${import.meta.env.BASE_URL}login`}
             className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-blue-800 text-slate-100 text-sm hover:bg-blue-700 transition-colors border border-blue-700"
           >
             Sign In →
-          </a>
-          <a
-            href={`${import.meta.env.BASE_URL}api/auth/replit`}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-slate-800 text-slate-300 text-sm hover:bg-slate-700 transition-colors border border-slate-700"
-          >
-            Admin →
           </a>
         </div>
       </div>
