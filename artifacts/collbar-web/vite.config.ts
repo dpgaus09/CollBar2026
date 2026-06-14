@@ -52,6 +52,7 @@ export default defineConfig({
       strict: true,
     },
     proxy: {
+      "/api": { target: "http://localhost:8080", changeOrigin: true, xfwd: true },
       "/tracker": { target: "http://localhost:8080", changeOrigin: true },
       "/oh": { target: "http://localhost:8080", changeOrigin: true },
       "/sitemap.xml": { target: "http://localhost:8080", changeOrigin: true },

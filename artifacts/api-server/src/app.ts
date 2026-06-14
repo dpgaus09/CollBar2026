@@ -66,7 +66,8 @@ app.use(passport.initialize());
 // Security headers — applied to every response
 // ---------------------------------------------------------------------------
 app.use((_req, res, next) => {
-  res.setHeader("X-Frame-Options", "DENY");
+  // DENY in production; allow same-origin frames in dev (Replit preview pane)
+  res.setHeader("X-Frame-Options", isProd ? "DENY" : "SAMEORIGIN");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
   res.setHeader(

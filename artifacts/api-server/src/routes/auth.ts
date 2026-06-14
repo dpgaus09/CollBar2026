@@ -30,7 +30,17 @@ const router: IRouter = Router();
 // Helpers
 // ============================================================================
 
-function getOrigin(req: Request): string {
+/**
+ * Stable origin for OAuth callbacks.
+ * Priority: ORIGIN env var → REPLIT_DEV_DOMAIN:8080 → derived from request.
+ * Using REPLIT_DEV_DOMAIN:8080 ensures the callback always resolves directly
+ * to the API server port, regardless of which frontend port the user came from.
+ */
+function getApiOrigin(req: Request): string {
+  if (process.env.ORIGIN) return process.env.ORIGIN;
+  if (process.env.REPLIT_DEV_DOMAIN) {
+    return `https://${process.env.REPLIT_DEV_DOMAIN}:8080`;
+  }
   const proto =
     (req.headers["x-forwarded-proto"] as string | undefined) ?? "https";
   const host =
@@ -39,6 +49,16 @@ function getOrigin(req: Request): string {
     "localhost";
   return `${proto}://${host}`;
 }
+
+// Absolute callback URL — computed once at module load for Google OAuth.
+// Passport registers this with Google, so it must match the Google Cloud Console entry.
+const GOOGLE_CALLBACK_URL = process.env.ORIGIN
+  ? `${process.env.ORIGIN}/api/auth/google/callback`
+  : process.env.REPLIT_DEV_DOMAIN
+    ? `https://${process.env.REPLIT_DEV_DOMAIN}:8080/api/auth/google/callback`
+    : "/api/auth/google/callback";
+
+console.info(`[auth] Google callback URL: ${GOOGLE_CALLBACK_URL}`);
 
 // ============================================================================
 // Google OAuth — customer (district user) sign-in
@@ -52,9 +72,7 @@ passport.use(
       clientID: process.env.GOOGLE_CLIENT_ID ?? "GOOGLE_CLIENT_ID_NOT_SET",
       clientSecret:
         process.env.GOOGLE_CLIENT_SECRET ?? "GOOGLE_CLIENT_SECRET_NOT_SET",
-      // Relative URL — Express trust proxy setting reconstructs the absolute URL
-      callbackURL: "/api/auth/google/callback",
-      proxy: true,
+      callbackURL: GOOGLE_CALLBACK_URL,
       scope: ["email", "profile"],
     },
     (_accessToken, _refreshToken, profile: GoogleProfile, done) => {
@@ -188,7 +206,7 @@ async function getReplitOidcConfig(): Promise<oidc.Configuration> {
 router.get("/auth/replit", async (req: Request, res: Response) => {
   try {
     const config = await getReplitOidcConfig();
-    const callbackUrl = `${getOrigin(req)}/api/auth/replit/callback`;
+    const callbackUrl = `${getApiOrigin(req)}/api/auth/replit/callback`;
 
     const state = oidc.randomState();
     const nonce = oidc.randomNonce();
@@ -238,7 +256,7 @@ router.get("/auth/replit/callback", async (req: Request, res: Response) => {
 
   try {
     const config = await getReplitOidcConfig();
-    const callbackUrl = `${getOrigin(req)}/api/auth/replit/callback`;
+    const callbackUrl = `${getApiOrigin(req)}/api/auth/replit/callback`;
 
     const currentUrl = new URL(
       `${callbackUrl}?${new URL(req.url, `http://${req.headers.host}`).searchParams}`,
