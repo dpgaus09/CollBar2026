@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useHealthCheck } from "@workspace/api-client-react";
 import { useLocation } from "wouter";
@@ -58,6 +58,24 @@ interface ExtractionReport {
   stateRunMap: Record<string, Record<string, number>>;
   failureReasons: { reason: string; count: number }[];
   failedDocCount: number;
+  failedDocs: {
+    id: number;
+    error: string;
+    attempts: number;
+    lastAttemptAt: string | null;
+    schoolYear: string | null;
+    districtName: string;
+    state: string;
+  }[];
+}
+
+interface RetryExtractionStatus {
+  running: boolean;
+  pid: number | null;
+  tail: string[];
+  docId: number | null;
+  lastRunAt: string | null;
+  lastStatus: "running" | "success" | "error" | null;
 }
 
 interface CronJobStatus {
@@ -322,6 +340,19 @@ function useExtractionCronStatus() {
     queryKey: ["/api/admin/extraction-cron-status"],
     queryFn: () =>
       fetch(apiUrl("/api/admin/extraction-cron-status"), { credentials: "include" }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    refetchInterval: (query) => (query.state.data?.running ? 3_000 : 30_000),
+    retry: false,
+  });
+}
+
+function useRetryExtractionStatus() {
+  return useQuery<RetryExtractionStatus>({
+    queryKey: ["/api/admin/retry-extraction-status"],
+    queryFn: () =>
+      fetch(apiUrl("/api/admin/retry-extraction-status"), { credentials: "include" }).then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       }),
@@ -1422,6 +1453,215 @@ function CrawlReportTab() {
 // Extraction Report Tab
 // ---------------------------------------------------------------------------
 
+function ExtractionFailuresSection({
+  data,
+  onRefetch,
+}: {
+  data: ExtractionReport;
+  onRefetch: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const { data: retryStatus } = useRetryExtractionStatus();
+  const running = retryStatus?.running ?? false;
+
+  const retry = useMutation({
+    mutationFn: (docId?: number) =>
+      fetch(apiUrl("/api/admin/retry-extraction"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(docId != null ? { docId } : {}),
+      }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/retry-extraction-status"] });
+    },
+  });
+
+  // When a retry finishes (running transitions true -> false), refetch the
+  // extraction report so the failing count and per-doc list visibly update.
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    if (wasRunning.current && !running) {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/extraction-report"] });
+    }
+    wasRunning.current = running;
+  }, [running, queryClient]);
+
+  const pendingDocId =
+    retry.isPending && typeof retry.variables === "number" ? retry.variables : null;
+
+  const statusColor =
+    running ? "text-amber-400"
+    : retryStatus?.lastStatus === "success" ? "text-emerald-400"
+    : retryStatus?.lastStatus === "error" ? "text-red-400"
+    : "text-slate-500";
+  const statusLabel =
+    running ? "running…"
+    : retryStatus?.lastStatus === "success" ? "last retry: success"
+    : retryStatus?.lastStatus === "error" ? "last retry: error"
+    : "idle";
+
+  const lastTail = retryStatus?.tail?.[retryStatus.tail.length - 1] ?? null;
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
+          Extraction Failures
+        </h2>
+        <span
+          className={`text-xs font-mono font-bold ${
+            data.failedDocCount > 0 ? "text-red-400" : "text-emerald-400"
+          }`}
+        >
+          {data.failedDocCount.toLocaleString()} document{data.failedDocCount === 1 ? "" : "s"} failing
+        </span>
+      </div>
+
+      {data.failedDocCount === 0 ? (
+        <div className="rounded-lg border border-slate-800 bg-slate-950 p-5 text-xs text-emerald-400/80">
+          No documents are currently failing extraction — every CBA PDF either succeeded on its
+          latest attempt or is still pending.
+        </div>
+      ) : (
+        <>
+          {/* Retry-all control with live status */}
+          <div className="rounded-lg border border-slate-800 bg-slate-950 p-4 space-y-2">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  {running && (
+                    <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                  )}
+                  <span className="text-sm font-mono font-medium text-slate-200">
+                    Re-run extraction
+                  </span>
+                </div>
+                <div className="flex items-center gap-3 text-xs">
+                  <span className={statusColor}>{statusLabel}</span>
+                  {retryStatus?.lastRunAt && (
+                    <span className="text-slate-500">
+                      Last run: {new Date(retryStatus.lastRunAt).toLocaleString()}
+                    </span>
+                  )}
+                </div>
+                {running && lastTail && (
+                  <div
+                    className="text-xs text-slate-600 font-mono truncate max-w-md"
+                    title={lastTail}
+                  >
+                    {lastTail.slice(0, 120)}
+                  </div>
+                )}
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <button
+                  onClick={() => onRefetch()}
+                  className="text-xs px-3 py-1.5 rounded border border-slate-700 hover:border-slate-500 text-slate-400 hover:text-slate-200 transition-colors"
+                >
+                  ↻ Refresh
+                </button>
+                <button
+                  onClick={() => retry.mutate(undefined)}
+                  disabled={running || retry.isPending}
+                  className="text-xs px-3 py-1.5 rounded border border-slate-700 hover:border-sky-600 text-slate-400 hover:text-sky-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {running
+                    ? "Running…"
+                    : retry.isPending && pendingDocId == null
+                    ? "Starting…"
+                    : `Retry all ${data.failedDocCount}`}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <p className="text-xs text-slate-500">
+            Each document counted once, by the reason its <em>latest</em> extraction attempt
+            failed. Documents that later succeeded on retry are excluded.
+          </p>
+
+          {/* Failure reasons summary */}
+          <div className="rounded-lg border border-slate-800 overflow-hidden">
+            <table className="w-full">
+              <thead className="bg-slate-900 border-b border-slate-800">
+                <tr>
+                  <th className="text-left px-4 py-2 text-xs text-slate-400 font-medium">Failure reason</th>
+                  <th className="text-right px-4 py-2 text-xs text-slate-400 font-medium">Documents</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/50">
+                {data.failureReasons.map((row) => (
+                  <tr key={row.reason} className="bg-slate-950 hover:bg-slate-900/50">
+                    <td className="px-4 py-3 text-xs font-mono text-red-300">{row.reason}</td>
+                    <td className="px-4 py-3 text-right text-xs font-mono text-slate-300">
+                      {row.count.toLocaleString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Per-document failing list with per-doc Retry */}
+          {data.failedDocs.length > 0 && (
+            <div className="rounded-lg border border-slate-800 overflow-hidden">
+              <table className="w-full">
+                <thead className="bg-slate-900 border-b border-slate-800">
+                  <tr>
+                    <th className="text-left px-4 py-2 text-xs text-slate-400 font-medium">Doc</th>
+                    <th className="text-left px-4 py-2 text-xs text-slate-400 font-medium">District</th>
+                    <th className="text-left px-4 py-2 text-xs text-slate-400 font-medium">Latest error</th>
+                    <th className="text-right px-4 py-2 text-xs text-slate-400 font-medium">Attempts</th>
+                    <th className="text-right px-4 py-2 text-xs text-slate-400 font-medium"></th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/50">
+                  {data.failedDocs.map((doc) => {
+                    const thisPending = pendingDocId === doc.id;
+                    return (
+                      <tr key={doc.id} className="bg-slate-950 hover:bg-slate-900/50">
+                        <td className="px-4 py-3 text-xs font-mono text-slate-400">
+                          #{doc.id}
+                          {doc.schoolYear ? (
+                            <span className="text-slate-600"> · {doc.schoolYear}</span>
+                          ) : null}
+                        </td>
+                        <td className="px-4 py-3 text-xs text-slate-300">
+                          {doc.districtName}
+                          <span className="text-slate-600"> ({doc.state})</span>
+                        </td>
+                        <td className="px-4 py-3 text-xs font-mono text-red-300 max-w-xs truncate" title={doc.error}>
+                          {doc.error}
+                        </td>
+                        <td className="px-4 py-3 text-right text-xs font-mono text-slate-400">
+                          {doc.attempts}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            onClick={() => retry.mutate(doc.id)}
+                            disabled={running || retry.isPending}
+                            className="text-xs px-2.5 py-1 rounded border border-slate-700 hover:border-sky-600 text-slate-400 hover:text-sky-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            {thisPending ? "Starting…" : "Retry"}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 function ExtractionReportTab() {
   const { data: session } = useAdminSession();
   const { data, isLoading, isError, refetch } = useExtractionReport();
@@ -1586,53 +1826,7 @@ function ExtractionReportTab() {
       </section>
 
       {/* Extraction Failures */}
-      <section className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
-            Extraction Failures
-          </h2>
-          <span
-            className={`text-xs font-mono font-bold ${
-              data.failedDocCount > 0 ? "text-red-400" : "text-emerald-400"
-            }`}
-          >
-            {data.failedDocCount.toLocaleString()} document{data.failedDocCount === 1 ? "" : "s"} failing
-          </span>
-        </div>
-        {data.failedDocCount === 0 ? (
-          <div className="rounded-lg border border-slate-800 bg-slate-950 p-5 text-xs text-emerald-400/80">
-            No documents are currently failing extraction — every CBA PDF either succeeded on its
-            latest attempt or is still pending.
-          </div>
-        ) : (
-          <>
-            <p className="text-xs text-slate-500">
-              Each document counted once, by the reason its <em>latest</em> extraction attempt
-              failed. Documents that later succeeded on retry are excluded.
-            </p>
-            <div className="rounded-lg border border-slate-800 overflow-hidden">
-              <table className="w-full">
-                <thead className="bg-slate-900 border-b border-slate-800">
-                  <tr>
-                    <th className="text-left px-4 py-2 text-xs text-slate-400 font-medium">Failure reason</th>
-                    <th className="text-right px-4 py-2 text-xs text-slate-400 font-medium">Documents</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/50">
-                  {data.failureReasons.map((row) => (
-                    <tr key={row.reason} className="bg-slate-950 hover:bg-slate-900/50">
-                      <td className="px-4 py-3 text-xs font-mono text-red-300">{row.reason}</td>
-                      <td className="px-4 py-3 text-right text-xs font-mono text-slate-300">
-                        {row.count.toLocaleString()}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
-      </section>
+      <ExtractionFailuresSection data={data} onRefetch={refetch} />
 
       {/* Per-state extraction breakdown */}
       {(data.stateDocMap && Object.keys(data.stateDocMap).length > 0) && (

@@ -627,6 +627,48 @@ router.get("/admin/extraction-report", requireAdminToken, async (_req, res) => {
     );
     const failedDocCount = failureReasons.reduce((s, r) => s + r.count, 0);
 
+    // Per-document list of currently-failing docs (latest run failed, no success
+    // run exists). Powers the per-document Retry controls in the admin panel.
+    const failedDocsRows = await db.execute(sql.raw(`
+      WITH latest AS (
+        SELECT DISTINCT ON (source_doc_id) source_doc_id, status, error, run_at
+        FROM extraction_runs
+        ORDER BY source_doc_id, run_at DESC, id DESC
+      ),
+      attempts AS (
+        SELECT source_doc_id, COUNT(*)::int AS n
+        FROM extraction_runs
+        GROUP BY source_doc_id
+      )
+      SELECT
+        l.source_doc_id                                       AS id,
+        COALESCE(NULLIF(TRIM(l.error), ''), 'unknown')        AS error,
+        a.n                                                   AS attempts,
+        l.run_at                                              AS last_attempt_at,
+        sd.school_year                                        AS school_year,
+        COALESCE(d.name, '(unmatched)')                       AS district_name,
+        COALESCE(d.state, 'OH')                               AS state
+      FROM latest l
+      JOIN source_documents sd ON sd.id = l.source_doc_id
+      LEFT JOIN districts d ON d.id = sd.district_id
+      JOIN attempts a ON a.source_doc_id = l.source_doc_id
+      WHERE l.status = 'failed'
+      ORDER BY a.n DESC, l.source_doc_id
+      LIMIT 500
+    `));
+    const failedDocs = (failedDocsRows.rows as {
+      id: number; error: string; attempts: number; last_attempt_at: string | null;
+      school_year: string | null; district_name: string; state: string;
+    }[]).map((r) => ({
+      id: r.id,
+      error: r.error,
+      attempts: r.attempts,
+      lastAttemptAt: r.last_attempt_at,
+      schoolYear: r.school_year,
+      districtName: r.district_name,
+      state: r.state,
+    }));
+
     res.json({
       runCounts,
       totalContracts,
@@ -644,6 +686,7 @@ router.get("/admin/extraction-report", requireAdminToken, async (_req, res) => {
       stateRunMap,
       failureReasons,
       failedDocCount,
+      failedDocs,
     });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -1171,6 +1214,99 @@ router.get("/admin/extraction-cron-status", requireAdminToken, (_req, res) => {
     tail: tailLines,
     lastRunAt: _extractionCronLastRunAt?.toISOString() ?? null,
     lastStatus: running ? "running" : (_extractionCronLastStatus ?? null),
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Extraction Retry — re-run extraction for a single failing doc (--doc-id) or
+// all currently-failing docs (--retry-failed). Lets admins clear extraction
+// failures from the panel without shell access.
+// ---------------------------------------------------------------------------
+
+const EXTRACTION_RETRY_LOG = join(PIPELINE_DIR, "logs", "extraction_retry.log");
+
+let _retryPid: number | null = null;
+let _retryLastRunAt: Date | null = null;
+let _retryLastStatus: "running" | "success" | "error" | null = null;
+let _retryLastDocId: number | null = null;
+
+export function spawnExtractionRetry(
+  docId?: number,
+): { status: string; pid: number | null } {
+  if (_retryPid !== null) {
+    try {
+      process.kill(_retryPid, 0);
+      return { status: "already_running", pid: _retryPid };
+    } catch {
+      _retryPid = null;
+    }
+  }
+
+  mkdirSync(join(PIPELINE_DIR, "logs"), { recursive: true });
+  const logFd = openSync(EXTRACTION_RETRY_LOG, "a");
+
+  const scriptArgs = ["-u", join(PIPELINE_DIR, "06_extract_contracts.py")];
+  if (docId != null) {
+    scriptArgs.push("--doc-id", String(docId));
+  } else {
+    scriptArgs.push("--retry-failed");
+  }
+
+  const child = spawn("python3", scriptArgs, {
+    cwd: PIPELINE_DIR,
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+    env: { ...process.env, PYTHONPATH: PIPELINE_DIR },
+  });
+  _retryLastRunAt = new Date();
+  _retryLastStatus = "running";
+  _retryLastDocId = docId ?? null;
+  child.on("exit", (code) => {
+    _retryLastStatus = code === 0 ? "success" : "error";
+    _retryPid = null;
+  });
+  child.unref();
+  _retryPid = child.pid ?? null;
+  return { status: "started", pid: _retryPid };
+}
+
+router.post("/admin/retry-extraction", requireAdminToken, (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { docId?: number | string };
+    let docId: number | undefined;
+    if (body.docId !== undefined && body.docId !== null && body.docId !== "") {
+      const parsed = parseInt(String(body.docId), 10);
+      if (isNaN(parsed) || parsed < 1) {
+        res.status(400).json({ error: "docId must be a positive integer" });
+        return;
+      }
+      docId = parsed;
+    }
+    const result = spawnExtractionRetry(docId);
+    res.json({ ...result, log: EXTRACTION_RETRY_LOG, docId: docId ?? null });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+router.get("/admin/retry-extraction-status", requireAdminToken, (_req, res) => {
+  let running = false;
+  if (_retryPid !== null) {
+    try { process.kill(_retryPid, 0); running = true; } catch { _retryPid = null; }
+  }
+  if (!running && _retryLastStatus === "running") _retryLastStatus = null;
+  let tailLines: string[] = [];
+  try {
+    const content = readFileSync(EXTRACTION_RETRY_LOG, "utf8");
+    tailLines = content.split("\n").filter(Boolean).slice(-30);
+  } catch { /* log may not exist yet */ }
+  res.json({
+    running,
+    pid: _retryPid,
+    tail: tailLines,
+    docId: _retryLastDocId,
+    lastRunAt: _retryLastRunAt?.toISOString() ?? null,
+    lastStatus: running ? "running" : (_retryLastStatus ?? null),
   });
 });
 

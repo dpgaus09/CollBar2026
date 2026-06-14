@@ -494,27 +494,32 @@ def _classify_json_failure(cleaned: str, stop_reason: Optional[str]) -> str:
 
 def get_failed_docs(conn):
     """
-    Return source_document rows whose most recent extraction run has status='failed'
-    and that have no successful run.  Used by --retry-failed.
+    Return source_document rows that are *currently failing*: their most recent
+    extraction run has status='failed'.  Used by --retry-failed.
+
+    This matches the admin Extraction Failures view, which buckets each doc by
+    its LATEST run status. A doc that succeeded once but whose latest run failed
+    is therefore included here (it is "currently failing"), and a doc that failed
+    earlier but later succeeded is excluded.
 
     Returns tuples: (id, source_url, storage_key, district_id, school_year, district_state, bargaining_unit)
     """
     cur = conn.cursor()
     cur.execute(
         """
+        WITH latest AS (
+            SELECT DISTINCT ON (source_doc_id) source_doc_id, status
+            FROM extraction_runs
+            WHERE source_doc_id IS NOT NULL
+            ORDER BY source_doc_id, run_at DESC, id DESC
+        )
         SELECT sd.id, sd.source_url, sd.storage_key, sd.district_id, sd.school_year,
                COALESCE(d.state, 'OH') AS district_state, sd.bargaining_unit
         FROM source_documents sd
+        JOIN latest l ON l.source_doc_id = sd.id
         LEFT JOIN districts d ON d.id = sd.district_id
         WHERE sd.doc_type = 'cba_pdf'
-          AND sd.id NOT IN (
-              SELECT er.source_doc_id FROM extraction_runs er
-              WHERE er.status = 'success' AND er.source_doc_id IS NOT NULL
-          )
-          AND sd.id IN (
-              SELECT er.source_doc_id FROM extraction_runs er
-              WHERE er.status = 'failed' AND er.source_doc_id IS NOT NULL
-          )
+          AND l.status = 'failed'
         ORDER BY sd.id
         """
     )
