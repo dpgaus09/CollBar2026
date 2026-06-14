@@ -3209,6 +3209,8 @@ function UploadCbaTab() {
     sourceDocId: number | null;
     districtName: string;
     alreadyExists: boolean;
+    reextracted: boolean;
+    alreadyExtracted: boolean;
     extractionStatus: string | null;
   } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -3216,8 +3218,7 @@ function UploadCbaTab() {
 
   // Once an upload kicks off a run, reuse the extraction-retry status surface.
   const { data: extractionStatus } = useRetryExtractionStatus();
-  const watching =
-    result !== null && !result.alreadyExists && result.sourceDocId !== null;
+  const watching = result !== null && result.sourceDocId !== null;
   const statusForThisDoc =
     watching && extractionStatus?.docId === result?.sourceDocId
       ? extractionStatus
@@ -3285,14 +3286,33 @@ function UploadCbaTab() {
         sourceDocId?: number;
         districtName?: string;
         alreadyExists?: boolean;
+        reextracted?: boolean;
+        alreadyExtracted?: boolean;
         extraction?: { status?: string; pid?: number | null };
         error?: string;
       };
-      if (r.status === 409 && body.alreadyExists) {
+      if (body.alreadyExists && body.reextracted) {
+        // Duplicate file, but the existing copy was never extracted — the
+        // server re-started extraction on it instead of dead-ending.
         setResult({
           sourceDocId: body.sourceDocId ?? null,
           districtName: body.districtName ?? "",
           alreadyExists: true,
+          reextracted: true,
+          alreadyExtracted: false,
+          extractionStatus: body.extraction?.status ?? null,
+        });
+        setFile(null);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+      } else if (r.status === 409 && body.alreadyExists) {
+        // Duplicate file that was already extracted — still let the admin
+        // re-run extraction manually from the panel below.
+        setResult({
+          sourceDocId: body.sourceDocId ?? null,
+          districtName: body.districtName ?? "",
+          alreadyExists: true,
+          reextracted: false,
+          alreadyExtracted: true,
           extractionStatus: null,
         });
       } else if (!r.ok || !body.ok) {
@@ -3302,6 +3322,8 @@ function UploadCbaTab() {
           sourceDocId: body.sourceDocId ?? null,
           districtName: body.districtName ?? "",
           alreadyExists: false,
+          reextracted: false,
+          alreadyExtracted: false,
           extractionStatus: body.extraction?.status ?? null,
         });
         setFile(null);
@@ -3439,11 +3461,14 @@ function UploadCbaTab() {
           is already stored for{" "}
           <span className="font-medium">{result.districtName || "this district"}</span>
           {result.sourceDocId ? ` (source document #${result.sourceDocId})` : ""}. No duplicate
-          was created.
+          was created.{" "}
+          {result.reextracted
+            ? "It had never been extracted, so extraction has been re-started for the existing copy below."
+            : "It has already been extracted — use Re-run extraction below to process it again."}
         </div>
       )}
 
-      {result && !result.alreadyExists && (
+      {result && result.sourceDocId != null && (
         <div className="rounded-lg border border-slate-800 bg-slate-900 p-5 space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-semibold text-slate-300">
@@ -3470,6 +3495,10 @@ function UploadCbaTab() {
               at a time, so this one hasn’t started yet. Start it below once the current run
               finishes.
             </p>
+          ) : result.alreadyExtracted && !statusForThisDoc && !result.extractionStatus ? (
+            <p className="text-[11px] text-slate-500 leading-relaxed">
+              This document has already been extracted. Use Re-run extraction to reprocess it.
+            </p>
           ) : (
             <p className="text-[11px] text-slate-500">
               The LLM extraction was kicked off for this document. Parsed contract provisions and
@@ -3486,7 +3515,7 @@ function UploadCbaTab() {
             >
               {startExtraction.isPending
                 ? "Starting…"
-                : statusForThisDoc?.lastStatus
+                : statusForThisDoc?.lastStatus || result.alreadyExtracted
                   ? "Re-run extraction"
                   : "Start extraction"}
             </button>

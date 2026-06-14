@@ -1416,9 +1416,33 @@ async function handleCbaUpload(req: Request, res: Response): Promise<void> {
   `);
   if (existing.rows.length > 0) {
     const existingId = Number((existing.rows[0] as { id: number }).id);
+    // Has this existing copy ever been extracted successfully? If a prior
+    // attempt failed before recording an extraction_run (e.g. the pipeline
+    // path bug), the doc is stranded: dedup blocks re-upload AND nothing shows
+    // up in the Extraction tab to retry. In that case, re-trigger extraction on
+    // the existing doc rather than dead-ending the admin.
+    const succeeded = await db.execute(sql`
+      SELECT 1 FROM extraction_runs
+      WHERE source_doc_id = ${existingId} AND status = 'success'
+      LIMIT 1
+    `);
+    if (succeeded.rows.length === 0) {
+      const extraction = spawnExtractionRetry(existingId);
+      res.json({
+        ok: true,
+        alreadyExists: true,
+        reextracted: true,
+        sourceDocId: existingId,
+        districtName: district.name,
+        bargainingUnit: unit,
+        extraction,
+      });
+      return;
+    }
     res.status(409).json({
-      error: "This exact PDF is already on file for this district and bargaining unit.",
+      error: "This exact PDF is already on file and has already been extracted.",
       alreadyExists: true,
+      alreadyExtracted: true,
       sourceDocId: existingId,
       districtName: district.name,
     });
