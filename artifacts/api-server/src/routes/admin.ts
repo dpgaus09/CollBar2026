@@ -1,7 +1,7 @@
 import { Router, raw, type IRouter, type Request, type Response, type NextFunction } from "express";
 import { readFileSync, existsSync, openSync, writeFileSync } from "fs";
 import { mkdirSync } from "fs";
-import { join } from "path";
+import { join, dirname, resolve } from "path";
 import { spawn } from "child_process";
 import { createHash } from "node:crypto";
 import { db } from "@workspace/db";
@@ -17,32 +17,51 @@ declare module "express-session" {
 
 const router: IRouter = Router();
 
-const CRAWL_STATE_PATH = join(
-  process.cwd(),
-  "..",
-  "..",
-  "pipeline",
-  "state",
-  "crawl_state.json",
-);
+/**
+ * Resolve the repo-root `pipeline/` directory regardless of the process CWD.
+ * In dev, pnpm runs this package from artifacts/api-server, so ../../pipeline
+ * works; in a deployment the CWD is the workspace root, where ../../pipeline
+ * wrongly resolves to /home/pipeline (the reported "can't open file" error).
+ * Walk up from the CWD until we find the dir that actually holds the scripts.
+ */
+function resolvePipelineDir(): string {
+  const override = process.env.COLLBAR_PIPELINE_DIR;
+  if (override) {
+    // Normalize to absolute so it resolves correctly when used as a spawn cwd
+    // or joined for child-script args, regardless of the current CWD.
+    const abs = resolve(override);
+    if (existsSync(join(abs, "06_extract_contracts.py"))) {
+      return abs;
+    }
+  }
+  let dir = process.cwd();
+  for (let i = 0; i < 10; i++) {
+    const candidate = join(dir, "pipeline");
+    if (existsSync(join(candidate, "06_extract_contracts.py"))) {
+      return candidate;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  // Last resort: the original dev-relative guess (preserves prior behavior).
+  // Warn loudly so a deployment without the pipeline/ dir fails visibly
+  // instead of silently re-introducing the /home/pipeline bug.
+  const fallback = join(process.cwd(), "..", "..", "pipeline");
+  console.warn(
+    `[admin] Could not locate pipeline/06_extract_contracts.py by walking up from ${process.cwd()}; ` +
+      `falling back to ${fallback}. Set COLLBAR_PIPELINE_DIR to an absolute path if extraction fails.`,
+  );
+  return fallback;
+}
 
-const IL_CBA_CRAWL_STATE_PATH = join(
-  process.cwd(),
-  "..",
-  "..",
-  "pipeline",
-  "state",
-  "il_cba_crawl.json",
-);
+const PIPELINE_DIR = resolvePipelineDir();
 
-const IL_UNFOUND_CSV_PATH = join(
-  process.cwd(),
-  "..",
-  "..",
-  "pipeline",
-  "data",
-  "il_cba_unfound.csv",
-);
+const CRAWL_STATE_PATH = join(PIPELINE_DIR, "state", "crawl_state.json");
+
+const IL_CBA_CRAWL_STATE_PATH = join(PIPELINE_DIR, "state", "il_cba_crawl.json");
+
+const IL_UNFOUND_CSV_PATH = join(PIPELINE_DIR, "data", "il_cba_unfound.csv");
 
 const TABLES = [
   "districts",
@@ -1073,7 +1092,6 @@ router.get("/admin/il-eis-crosscheck", requireAdminToken, async (req, res) => {
 // IL CBA Crawler — exported spawn helper (used by cron in index.ts) + routes
 // ---------------------------------------------------------------------------
 
-const PIPELINE_DIR = join(process.cwd(), "..", "..", "pipeline");
 const IL_CRAWL_LOG = join(PIPELINE_DIR, "logs", "il_cba_crawl.log");
 const EXTRACTION_CRON_LOG = join(PIPELINE_DIR, "logs", "extraction_cron.log");
 

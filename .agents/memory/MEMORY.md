@@ -6,6 +6,8 @@
 - [IL CBA search fallback](il-cba-search-fallback.md) — Serper (primary) → Google CSE → DuckDuckGo; SERPER_API_KEY now set; run --search-fallback after direct crawl finishes.
 - [Cron requires Reserved VM](cron-reserved-vm.md) — node-cron fires only on Reserved VM; deployment type is set in the Replit Publishing UI (serve="vm" is NOT a valid artifact.toml value).
 - [ISBE connectivity from repl](isbe-connectivity.md) — isbe.net is unreachable from the sandbox (ConnectTimeoutError); only testable once deployed on a Reserved VM.
+- [Deployment CWD vs dev CWD](deployment-cwd-paths.md) — prod runs API server from workspace root, so process.cwd()+"../../pipeline" breaks ("/home/pipeline"); resolve repo-root paths by walking up.
+- [Dev schema apply + prod publish](drizzle-push-prod-schema.md) — never DDL prod; apply additive cols to dev DB then re-publish. `db push` wants to TRUNCATE contracts — use surgical ALTER instead.
 - [CollBar district id types](collbar-district-id-types.md) — dashboard API returns district id as STRING (coerce when matching numeric auth districtId); list endpoint capped at LIMIT 1000, fetch a specific district via /:id.
 - [extraction_runs is append-per-attempt](il-extraction-runs-latest-per-doc.md) — one row per attempt; use latest-per-doc (DISTINCT ON source_doc_id) for status, never raw COUNT by status.
 - [IL CBA crawl precision](il-crawl-precision.md) — denylist aggregator/gov domains in name-search; require %PDF bytes before storing (HTML-as-PDF falsely marks districts found).
