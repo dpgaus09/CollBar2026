@@ -56,6 +56,8 @@ interface ExtractionReport {
   auditAgreementRate: number | null;
   stateDocMap: Record<string, { total: number; processed: number }>;
   stateRunMap: Record<string, Record<string, number>>;
+  failureReasons: { reason: string; count: number }[];
+  failedDocCount: number;
 }
 
 interface CronJobStatus {
@@ -75,6 +77,7 @@ interface IlCbaCoverage {
   noUrl: number;
   coveragePct: number | null;
   lastUpdated: string | null;
+  byBargainingUnit: { unit: string; districts: number; contracts: number }[];
 }
 
 interface IlCbaDistrictLogItem {
@@ -199,6 +202,14 @@ function LoginRequiredCard({ onLogin }: { onLogin: () => void }) {
 function pdfPageUrl(sourceUrl: string | null, pageRef: number | null): string | null {
   if (!sourceUrl) return null;
   return pageRef != null ? `${sourceUrl}#page=${pageRef}` : sourceUrl;
+}
+
+/** Turn a snake_case bargaining-unit key into a readable label. */
+function formatUnit(unit: string): string {
+  return unit
+    .split("_")
+    .map((w) => (w ? w.charAt(0).toUpperCase() + w.slice(1) : w))
+    .join(" ");
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,23 +1016,13 @@ function ScheduledAutomationsCard() {
 }
 
 function CrawlReportTab() {
-  const [showLogin, setShowLogin] = useState(false);
-  const { data: session, refetch: refetchSession } = useAdminSession();
+  const { data: session } = useAdminSession();
   const { data, isLoading, isError, refetch } = useCrawlReport();
   const { data: ilCba } = useIlCbaCoverage();
   const [showDistrictLog, setShowDistrictLog] = useState(false);
 
   if (!session?.authenticated) {
-    return (
-      <>
-        {showLogin && (
-          <AdminLoginModal
-            onSuccess={() => { setShowLogin(false); refetchSession(); refetch(); }}
-          />
-        )}
-        <LoginRequiredCard onLogin={() => setShowLogin(true)} />
-      </>
-    );
+    return <LoginRequiredCard onLogin={goToLogin} />;
   }
 
   if (isLoading) {
@@ -1288,6 +1289,36 @@ function CrawlReportTab() {
               </div>
             )}
 
+            {ilCba.byBargainingUnit && ilCba.byBargainingUnit.length > 0 && (
+              <div>
+                <div className="text-xs text-slate-400 mb-1">CBA contracts by bargaining unit</div>
+                <div className="rounded-lg border border-slate-800 overflow-hidden">
+                  <table className="w-full">
+                    <thead className="bg-slate-900 border-b border-slate-800">
+                      <tr>
+                        <th className="text-left px-4 py-2 text-xs text-slate-400 font-medium">Bargaining unit</th>
+                        <th className="text-right px-4 py-2 text-xs text-slate-400 font-medium">Districts</th>
+                        <th className="text-right px-4 py-2 text-xs text-slate-400 font-medium">Contracts</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/50">
+                      {ilCba.byBargainingUnit.map((row) => (
+                        <tr key={row.unit} className="bg-slate-950 hover:bg-slate-900/50">
+                          <td className="px-4 py-3 text-xs text-slate-200">{formatUnit(row.unit)}</td>
+                          <td className="px-4 py-3 text-right text-xs font-mono text-slate-300">
+                            {row.districts.toLocaleString()}
+                          </td>
+                          <td className="px-4 py-3 text-right text-xs font-mono text-slate-300">
+                            {row.contracts.toLocaleString()}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
             <div className="flex items-center justify-between">
               <span className="text-xs text-slate-500">
                 {ilCba.lastUpdated
@@ -1331,10 +1362,33 @@ function CrawlReportTab() {
           Scheduled Automations
         </h2>
         <p className="text-xs text-slate-500">
-          These jobs run automatically on the API server. IL CBA Crawl re-crawls all district
-          websites on the 1st and 15th of each month at 2 AM Central. Extraction Cron processes
-          any unextracted CBA PDFs nightly at 3 AM Central. Both skip if already running.
+          Three jobs keep the dataset current automatically. All times are America/Chicago
+          (Central), and each job skips its run if a previous one is still in progress:
         </p>
+        <ul className="text-xs text-slate-400 space-y-1.5 list-none">
+          <li className="flex gap-2">
+            <span className="font-mono text-sky-400 whitespace-nowrap">7:00 AM daily</span>
+            <span>ISBE Directory Refresh — re-pulls the public district list so new/closed districts and changed websites are reflected before crawling.</span>
+          </li>
+          <li className="flex gap-2">
+            <span className="font-mono text-sky-400 whitespace-nowrap">3:00 AM nightly</span>
+            <span>Extraction Cron — extracts contract terms from any CBA PDFs that have not yet been processed.</span>
+          </li>
+          <li className="flex gap-2">
+            <span className="font-mono text-sky-400 whitespace-nowrap">2:00 AM 1st &amp; 15th</span>
+            <span>IL CBA Crawl — re-crawls every district website twice a month to discover newly posted contracts.</span>
+          </li>
+        </ul>
+        <div className="rounded-lg border border-amber-800 bg-amber-950/20 p-4 space-y-1">
+          <div className="text-xs font-semibold text-amber-300">⚠ Requires a Reserved VM deployment</div>
+          <p className="text-xs text-amber-400/90">
+            These schedules only fire when the API server runs continuously. Autoscale
+            deployments sleep when idle and will silently skip every job. Publish this app as a{" "}
+            <span className="font-semibold">Reserved VM</span> (set in the Replit Publishing UI)
+            to keep the pipeline running for years. The manual “Run now” triggers below work in any
+            environment.
+          </p>
+        </div>
         <ScheduledAutomationsCard />
       </section>
 
@@ -1369,21 +1423,11 @@ function CrawlReportTab() {
 // ---------------------------------------------------------------------------
 
 function ExtractionReportTab() {
-  const [showLogin, setShowLogin] = useState(false);
-  const { data: session, refetch: refetchSession } = useAdminSession();
+  const { data: session } = useAdminSession();
   const { data, isLoading, isError, refetch } = useExtractionReport();
 
   if (!session?.authenticated) {
-    return (
-      <>
-        {showLogin && (
-          <AdminLoginModal
-            onSuccess={() => { setShowLogin(false); refetchSession(); refetch(); }}
-          />
-        )}
-        <LoginRequiredCard onLogin={() => setShowLogin(true)} />
-      </>
-    );
+    return <LoginRequiredCard onLogin={goToLogin} />;
   }
 
   if (isLoading) {
@@ -1539,6 +1583,55 @@ function ExtractionReportTab() {
             </tbody>
           </table>
         </div>
+      </section>
+
+      {/* Extraction Failures */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
+            Extraction Failures
+          </h2>
+          <span
+            className={`text-xs font-mono font-bold ${
+              data.failedDocCount > 0 ? "text-red-400" : "text-emerald-400"
+            }`}
+          >
+            {data.failedDocCount.toLocaleString()} document{data.failedDocCount === 1 ? "" : "s"} failing
+          </span>
+        </div>
+        {data.failedDocCount === 0 ? (
+          <div className="rounded-lg border border-slate-800 bg-slate-950 p-5 text-xs text-emerald-400/80">
+            No documents are currently failing extraction — every CBA PDF either succeeded on its
+            latest attempt or is still pending.
+          </div>
+        ) : (
+          <>
+            <p className="text-xs text-slate-500">
+              Each document counted once, by the reason its <em>latest</em> extraction attempt
+              failed. Documents that later succeeded on retry are excluded.
+            </p>
+            <div className="rounded-lg border border-slate-800 overflow-hidden">
+              <table className="w-full">
+                <thead className="bg-slate-900 border-b border-slate-800">
+                  <tr>
+                    <th className="text-left px-4 py-2 text-xs text-slate-400 font-medium">Failure reason</th>
+                    <th className="text-right px-4 py-2 text-xs text-slate-400 font-medium">Documents</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/50">
+                  {data.failureReasons.map((row) => (
+                    <tr key={row.reason} className="bg-slate-950 hover:bg-slate-900/50">
+                      <td className="px-4 py-3 text-xs font-mono text-red-300">{row.reason}</td>
+                      <td className="px-4 py-3 text-right text-xs font-mono text-slate-300">
+                        {row.count.toLocaleString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
       </section>
 
       {/* Per-state extraction breakdown */}
@@ -1702,9 +1795,8 @@ function ReviewQueueTab() {
   const [actionId, setActionId] = useState<number | null>(null);
   const [correcting, setCorrecting] = useState<{ id: number; current: string } | null>(null);
   const [correctedValue, setCorrectedValue] = useState("");
-  const [showLogin, setShowLogin] = useState(false);
 
-  const { data: session, refetch: refetchSession } = useAdminSession();
+  const { data: session } = useAdminSession();
   const { data, isLoading, isError } = useReviewQueue(page, category);
 
   const mutation = useMutation({
@@ -1724,7 +1816,7 @@ function ReviewQueueTab() {
         body: JSON.stringify({ action, correctedValue }),
       });
       if (r.status === 401) {
-        setShowLogin(true);
+        goToLogin();
         throw new Error("401");
       }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -1741,7 +1833,7 @@ function ReviewQueueTab() {
 
   const act = (id: number, action: "approve" | "reject") => {
     if (!session?.authenticated) {
-      setShowLogin(true);
+      goToLogin();
       return;
     }
     setActionId(id);
@@ -1750,7 +1842,7 @@ function ReviewQueueTab() {
 
   const submitCorrection = (id: number) => {
     if (!session?.authenticated) {
-      setShowLogin(true);
+      goToLogin();
       return;
     }
     mutation.mutate({ id, action: "correct", correctedValue });
@@ -1758,15 +1850,6 @@ function ReviewQueueTab() {
 
   return (
     <div className="space-y-6">
-      {showLogin && (
-        <AdminLoginModal
-          onSuccess={() => {
-            setShowLogin(false);
-            refetchSession();
-          }}
-        />
-      )}
-
       {/* Auth banner */}
       {!session?.authenticated && (
         <div className="flex items-center justify-between rounded-lg border border-amber-800 bg-amber-950/20 px-4 py-3">
@@ -1774,7 +1857,7 @@ function ReviewQueueTab() {
             Admin session required to approve / correct / reject items.
           </span>
           <button
-            onClick={() => setShowLogin(true)}
+            onClick={goToLogin}
             className="text-xs px-3 py-1 rounded bg-amber-800 hover:bg-amber-700 text-amber-100 transition-colors"
           >
             Log in
@@ -1925,7 +2008,7 @@ function ReviewQueueTab() {
                     </button>
                     <button
                       onClick={() => {
-                        if (!session?.authenticated) { setShowLogin(true); return; }
+                        if (!session?.authenticated) { goToLogin(); return; }
                         setCorrecting({ id: item.id, current: item.value_text ?? String(item.value_numeric ?? "") });
                         setCorrectedValue(item.value_text ?? String(item.value_numeric ?? ""));
                       }}
@@ -2229,10 +2312,9 @@ function AlertsTab() {
   const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState("pending");
-  const [showLogin, setShowLogin] = useState(false);
   const [ackId, setAckId] = useState<number | null>(null);
 
-  const { data: session, refetch: refetchSession } = useAdminSession();
+  const { data: session } = useAdminSession();
   const { data, isLoading, isError, refetch } = useAlerts(page, statusFilter);
 
   const ackMutation = useMutation({
@@ -2243,7 +2325,7 @@ function AlertsTab() {
         credentials: "include",
         body: JSON.stringify({}),
       });
-      if (r.status === 401) { setShowLogin(true); throw new Error("401"); }
+      if (r.status === 401) { goToLogin(); throw new Error("401"); }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return r.json();
     },
@@ -2254,19 +2336,13 @@ function AlertsTab() {
   });
 
   const acknowledge = (id: number) => {
-    if (!session?.authenticated) { setShowLogin(true); return; }
+    if (!session?.authenticated) { goToLogin(); return; }
     setAckId(id);
     ackMutation.mutate(id);
   };
 
   return (
     <div className="space-y-6">
-      {showLogin && (
-        <AdminLoginModal
-          onSuccess={() => { setShowLogin(false); refetchSession(); }}
-        />
-      )}
-
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <label className="text-xs text-slate-400">Status</label>
@@ -2298,7 +2374,7 @@ function AlertsTab() {
             Admin session required to acknowledge alerts.
           </span>
           <button
-            onClick={() => setShowLogin(true)}
+            onClick={goToLogin}
             className="text-xs px-3 py-1 rounded bg-amber-800 hover:bg-amber-700 text-amber-100 transition-colors"
           >
             Log in

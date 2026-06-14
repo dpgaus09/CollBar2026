@@ -201,6 +201,23 @@ router.get("/admin/il-cba-coverage", requireAdminToken, async (_req, res) => {
   );
   const noUrl = (noUrlRows.rows[0] as { n: number })?.n ?? 0;
 
+  // CBA coverage broken down by bargaining unit (distinct districts + contract count)
+  const buRows = await db.execute(
+    sql.raw(`
+      SELECT c.bargaining_unit AS unit,
+             COUNT(DISTINCT c.district_id)::int AS districts,
+             COUNT(*)::int AS contracts
+      FROM contracts c
+      JOIN districts d ON d.id = c.district_id
+      WHERE d.state = 'IL'
+      GROUP BY c.bargaining_unit
+      ORDER BY contracts DESC, c.bargaining_unit
+    `),
+  );
+  const byBargainingUnit = (buRows.rows as { unit: string; districts: number; contracts: number }[]).map(
+    (r) => ({ unit: r.unit, districts: r.districts, contracts: r.contracts }),
+  );
+
   const attempted   = (crawlState["il_attempted"]  as number) ?? 0;
   const found       = dbFound;
   const failed      = (crawlState["il_failed"]     as number) ?? 0;
@@ -219,6 +236,7 @@ router.get("/admin/il-cba-coverage", requireAdminToken, async (_req, res) => {
     noUrl,
     coveragePct,
     lastUpdated,
+    byBargainingUnit,
   });
 });
 
@@ -587,6 +605,28 @@ router.get("/admin/extraction-report", requireAdminToken, async (_req, res) => {
       stateRunMap[r.state][r.status] = r.n;
     }
 
+    // Failure reasons — bucketed by the error prefix of each document's *latest*
+    // extraction run that ended in 'failed'. Latest-per-doc avoids double-counting
+    // earlier failed attempts that later succeeded on retry.
+    const failRows = await db.execute(sql.raw(`
+      WITH latest AS (
+        SELECT DISTINCT ON (source_doc_id) source_doc_id, status, error
+        FROM extraction_runs
+        ORDER BY source_doc_id, run_at DESC, id DESC
+      )
+      SELECT
+        COALESCE(NULLIF(TRIM(split_part(error, ':', 1)), ''), 'unknown') AS reason,
+        COUNT(*)::int AS n
+      FROM latest
+      WHERE status = 'failed'
+      GROUP BY reason
+      ORDER BY n DESC, reason
+    `));
+    const failureReasons = (failRows.rows as { reason: string; n: number }[]).map(
+      (r) => ({ reason: r.reason, count: r.n }),
+    );
+    const failedDocCount = failureReasons.reduce((s, r) => s + r.count, 0);
+
     res.json({
       runCounts,
       totalContracts,
@@ -602,6 +642,8 @@ router.get("/admin/extraction-report", requireAdminToken, async (_req, res) => {
       auditAgreementRate,
       stateDocMap,
       stateRunMap,
+      failureReasons,
+      failedDocCount,
     });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -1272,7 +1314,7 @@ router.post("/admin/customers", requireAdminToken, async (req, res) => {
 
 // PATCH /admin/customers/:id — update name, district, or active status
 router.patch("/admin/customers/:id", requireAdminToken, async (req, res) => {
-  const id = parseInt(req.params.id, 10);
+  const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) {
     res.status(400).json({ error: "Valid numeric id required" });
     return;
@@ -1310,7 +1352,7 @@ router.patch("/admin/customers/:id", requireAdminToken, async (req, res) => {
 
 // PATCH /admin/customers/:id/password — set or reset a customer's password
 router.patch("/admin/customers/:id/password", requireAdminToken, async (req, res) => {
-  const id = parseInt(req.params.id, 10);
+  const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) {
     res.status(400).json({ error: "Valid numeric id required" });
     return;
@@ -1341,7 +1383,7 @@ router.patch("/admin/customers/:id/password", requireAdminToken, async (req, res
 
 // DELETE /admin/customers/:id — remove a customer account
 router.delete("/admin/customers/:id", requireAdminToken, async (req, res) => {
-  const id = parseInt(req.params.id, 10);
+  const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) {
     res.status(400).json({ error: "Valid numeric id required" });
     return;
