@@ -1220,11 +1220,13 @@ router.get("/admin/directory-refresh-status", requireAdminToken, async (_req, re
 router.get("/admin/customers", requireAdminToken, async (_req, res) => {
   try {
     const rows = await db.execute(sql`
-      SELECT id, name, email, active, district_id, created_at, last_sign_in_at,
-             (password_hash IS NOT NULL) AS has_password
-      FROM users
-      WHERE role = 'district_user'
-      ORDER BY created_at DESC
+      SELECT u.id, u.name, u.email, u.active, u.district_id, d.name AS district_name,
+             u.created_at, u.last_sign_in_at,
+             (u.password_hash IS NOT NULL) AS has_password
+      FROM users u
+      LEFT JOIN districts d ON d.id = u.district_id
+      WHERE u.role = 'district_user'
+      ORDER BY u.created_at DESC
     `);
     res.json({ customers: rows.rows });
   } catch (err) {

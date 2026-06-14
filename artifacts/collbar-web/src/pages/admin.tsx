@@ -2421,9 +2421,17 @@ interface Customer {
   email: string;
   active: boolean;
   district_id: number | null;
+  district_name: string | null;
   created_at: string | null;
   last_sign_in_at: string | null;
   has_password: boolean;
+}
+
+interface District {
+  id: number;
+  name: string;
+  state: string | null;
+  county: string | null;
 }
 
 function CustomersTab() {
@@ -2444,10 +2452,26 @@ function CustomersTab() {
     retry: false,
   });
 
+  const { data: districtsData } = useQuery<{ districts: District[] }>({
+    queryKey: ["/api/dashboard/districts"],
+    queryFn: () =>
+      fetch(apiUrl("/api/dashboard/districts"), { credentials: "include" }).then(
+        (r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        },
+      ),
+    enabled: isAuthenticated,
+    retry: false,
+  });
+  const districts = districtsData?.districts ?? [];
+
   const [showAdd, setShowAdd] = useState(false);
   const [newName, setNewName] = useState("");
   const [newEmail, setNewEmail] = useState("");
   const [newPassword, setNewPassword] = useState("");
+  const [newDistrictId, setNewDistrictId] = useState<string>("");
+  const [addDistrictSearch, setAddDistrictSearch] = useState("");
   const [addError, setAddError] = useState("");
   const [adding, setAdding] = useState(false);
 
@@ -2455,6 +2479,12 @@ function CustomersTab() {
   const [newPw, setNewPw] = useState("");
   const [pwError, setPwError] = useState("");
   const [pwSaving, setPwSaving] = useState(false);
+
+  const [districtModal, setDistrictModal] = useState<{ id: number; email: string; currentDistrictId: number | null } | null>(null);
+  const [editDistrictId, setEditDistrictId] = useState<string>("");
+  const [editDistrictSearch, setEditDistrictSearch] = useState("");
+  const [districtSaving, setDistrictSaving] = useState(false);
+  const [districtError, setDistrictError] = useState("");
 
   const handleSetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2492,7 +2522,12 @@ function CustomersTab() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ name: newName.trim(), email: newEmail.trim(), password: newPassword }),
+        body: JSON.stringify({
+          name: newName.trim(),
+          email: newEmail.trim(),
+          password: newPassword,
+          district_id: newDistrictId ? Number(newDistrictId) : null,
+        }),
       });
       const body = (await r.json()) as { customer?: Customer; error?: string };
       if (!r.ok) {
@@ -2501,6 +2536,8 @@ function CustomersTab() {
         setNewName("");
         setNewEmail("");
         setNewPassword("");
+        setNewDistrictId("");
+        setAddDistrictSearch("");
         setShowAdd(false);
         qc.invalidateQueries({ queryKey: ["/api/admin/customers"] });
       }
@@ -2508,6 +2545,34 @@ function CustomersTab() {
       setAddError("Network error");
     } finally {
       setAdding(false);
+    }
+  };
+
+  const handleSaveDistrict = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!districtModal) return;
+    setDistrictError("");
+    setDistrictSaving(true);
+    try {
+      const r = await fetch(apiUrl(`/api/admin/customers/${districtModal.id}`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ district_id: editDistrictId ? Number(editDistrictId) : null }),
+      });
+      const body = (await r.json()) as { customer?: Customer; error?: string };
+      if (!r.ok) {
+        setDistrictError(body.error ?? "Failed to update district");
+      } else {
+        setDistrictModal(null);
+        setEditDistrictId("");
+        setEditDistrictSearch("");
+        qc.invalidateQueries({ queryKey: ["/api/admin/customers"] });
+      }
+    } catch {
+      setDistrictError("Network error");
+    } finally {
+      setDistrictSaving(false);
     }
   };
 
@@ -2585,6 +2650,33 @@ function CustomersTab() {
             />
           </div>
           <div className="flex gap-3">
+            <div className="flex-1 flex flex-col gap-1">
+              <input
+                type="text"
+                placeholder="Filter districts…"
+                value={addDistrictSearch}
+                onChange={(e) => { setAddDistrictSearch(e.target.value); setNewDistrictId(""); }}
+                className="text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+              />
+              <select
+                value={newDistrictId}
+                onChange={(e) => setNewDistrictId(e.target.value)}
+                className="text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 focus:outline-none focus:border-blue-500"
+              >
+                <option value="">— No district —</option>
+                {districts
+                  .filter((d) =>
+                    !addDistrictSearch ||
+                    d.name.toLowerCase().includes(addDistrictSearch.toLowerCase()) ||
+                    (d.county ?? "").toLowerCase().includes(addDistrictSearch.toLowerCase())
+                  )
+                  .map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name}{d.state ? ` (${d.state})` : ""}
+                    </option>
+                  ))}
+              </select>
+            </div>
             <input
               type="password"
               placeholder="Initial password (min 8 chars)"
@@ -2597,7 +2689,7 @@ function CustomersTab() {
             <button
               type="submit"
               disabled={adding}
-              className="text-xs px-4 py-2 rounded bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-50 transition-colors whitespace-nowrap"
+              className="text-xs px-4 py-2 rounded bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-50 transition-colors whitespace-nowrap self-end"
             >
               {adding ? "Adding…" : "Add customer"}
             </button>
@@ -2626,6 +2718,7 @@ function CustomersTab() {
               <tr className="border-b border-slate-800 bg-slate-900">
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Name</th>
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Email</th>
+                <th className="text-left px-4 py-2.5 text-slate-400 font-medium">District</th>
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Status</th>
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Password</th>
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Last sign-in</th>
@@ -2640,6 +2733,23 @@ function CustomersTab() {
                 >
                   <td className="px-4 py-2.5 text-slate-200">{c.name ?? "—"}</td>
                   <td className="px-4 py-2.5 text-slate-400 font-mono">{c.email}</td>
+                  <td className="px-4 py-2.5">
+                    <button
+                      onClick={() => {
+                        setDistrictModal({ id: c.id, email: c.email, currentDistrictId: c.district_id });
+                        setEditDistrictId(c.district_id ? String(c.district_id) : "");
+                        setEditDistrictSearch("");
+                        setDistrictError("");
+                      }}
+                      className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                        c.district_name
+                          ? "bg-slate-800 text-slate-300 hover:bg-blue-900/50 hover:text-blue-300"
+                          : "bg-amber-900/50 text-amber-400 hover:bg-blue-900/50 hover:text-blue-300"
+                      }`}
+                    >
+                      {c.district_name ?? "Assign district"}
+                    </button>
+                  </td>
                   <td className="px-4 py-2.5">
                     <button
                       onClick={() => toggleActive(c.id, !c.active)}
@@ -2714,6 +2824,63 @@ function CustomersTab() {
                 <button
                   type="button"
                   onClick={() => setPwModal(null)}
+                  className="text-xs px-3 py-2 rounded border border-slate-700 text-slate-400 hover:text-slate-200 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {districtModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-sm rounded-xl border border-slate-700 bg-slate-900 p-6 shadow-2xl space-y-4">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-200">Assign District</h2>
+              <p className="text-xs text-slate-500 mt-0.5 font-mono">{districtModal.email}</p>
+            </div>
+            <form onSubmit={handleSaveDistrict} className="space-y-3">
+              <input
+                type="text"
+                autoFocus
+                placeholder="Filter districts…"
+                value={editDistrictSearch}
+                onChange={(e) => { setEditDistrictSearch(e.target.value); setEditDistrictId(""); }}
+                className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+              />
+              <select
+                value={editDistrictId}
+                onChange={(e) => setEditDistrictId(e.target.value)}
+                size={6}
+                className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-1 text-slate-200 focus:outline-none focus:border-blue-500"
+              >
+                <option value="">— No district —</option>
+                {districts
+                  .filter((d) =>
+                    !editDistrictSearch ||
+                    d.name.toLowerCase().includes(editDistrictSearch.toLowerCase()) ||
+                    (d.county ?? "").toLowerCase().includes(editDistrictSearch.toLowerCase())
+                  )
+                  .map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name}{d.state ? ` (${d.state})` : ""}
+                    </option>
+                  ))}
+              </select>
+              {districtError && <p className="text-xs text-red-400">{districtError}</p>}
+              <div className="flex gap-2">
+                <button
+                  type="submit"
+                  disabled={districtSaving}
+                  className="flex-1 text-xs px-3 py-2 rounded bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-50 transition-colors"
+                >
+                  {districtSaving ? "Saving…" : "Save district"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDistrictModal(null)}
                   className="text-xs px-3 py-2 rounded border border-slate-700 text-slate-400 hover:text-slate-200 transition-colors"
                 >
                   Cancel
