@@ -1,0 +1,77 @@
+I'll fix all the issues. Let me read the relevant files first.
+
+Now let me look at the admin.ts SQL and spawn sections, and check auth.ts:
+
+Now I have a full picture. The auth endpoint is actually already well-hardened (per-IP rate limit, per-account lockout, generic errors, session regeneration). Let me apply the fixes, starting with CORS:
+
+Now peer-sets.ts. Let me rewrite the helpers and raw queries to use parameterized SQL:
+
+Now the preview endpoint:
+
+Now the two state-mixing `IN (...)` queries (POST and PUT):
+
+Now the PDF export query (filterSql + idList):
+
+Now let me genericize the remaining error leaks in peer-sets.ts:
+
+Now public.ts. Let me parameterize computeTrackerStats and the district/slug queries:
+
+Now the district/:slug queries:
+
+Now genericize the public.ts error leaks and convert the remaining no-interpolation raw query:
+
+Now admin.ts — table counts via `sql.identifier` and spawn arg validation:
+
+Now the auth.ts session.destroy fix:
+
+Now .gitignore — add env/secrets exclusions:
+
+Now let me genericize the admin.ts error leaks (token-protected but flagged) and verify no tracked env files:
+
+No remaining interpolation in admin.ts. Let me fix the admin logout callback and check other route files for similar patterns:
+
+The review missed `public-html.ts` — it has the same injection pattern in unauthenticated server-rendered pages. Let me examine and fix:
+
+Let me fix the OH block (slug, the three district_id/county queries):
+
+Now the IL block (lines ~660-715):
+
+dashboard.ts already uses parameterized SQL properly. Now let me typecheck:
+
+Dependencies aren't installed — these errors are all missing modules. Let me install and typecheck properly:
+
+Let me check those errors — are they from my changes?
+
+These 3 errors are pre-existing (present before my changes, just shifted line numbers). My changes introduce no new type errors. They're legitimate bugs though — let me look and fix them since they block a clean build:
+
+api-server now passes. The collbar-web `AdminLoginModal` error is in the frontend, unrelated to my changes. Let me confirm it's pre-existing:
+
+api-server typechecks clean now. The `AdminLoginModal` error is a pre-existing frontend bug (out of scope). Let me revert the unrelated lockfile change to keep the commit focused, then commit:
+
+Direct git push is denied in this environment. Let me push via the GitHub MCP tools:
+
+I'll read each changed file's content and push them via MCP in one commit:
+
+Files are large. Let me check whether there's a working credential/remote before manually re-uploading 130KB of content:
+
+Git proxy is read-only here; the GitHub App token (via MCP) is the write path. I'll push the files through MCP. Let me read each changed file's exact content, then push them in one commit. Starting with the medium files:
+
+Before manually re-uploading ~130KB of large files (error-prone), let me confirm the git proxy truly blocks writes versus a branch/ref issue:
+
+Write access through the git proxy is denied (read-only credential); MCP is the write path. Let me confirm MCP write identity, then push the files:
+
+I need exact file contents for MCP push. Let me read the remaining files fully, starting with app.ts tail and the two large files:
+
+This manual re-upload is the only write path, but the two large route files (admin.ts ~1340 lines, public-html.ts ~900 lines) can't be hand-reproduced reliably. Let me verify MCP can read the repo state and check the remote branch first:
+
+Only `main` exists remotely (sha `bcfc0f8`). Let me check how my local base relates to remote main, so I know exactly which files differ from what's already on GitHub:
+
+Important: the real GitHub `main` (`bcfc0f8`) is **ahead** of my local clone's base (`1851e74`) — GitHub advanced after my container was created. I must base my branch on current remote main and avoid clobbering newer work. Let me see what changed on remote main since my base:
+
+Key finding: the only commit on remote `main` I'm missing (`bcfc0f8`, "sign-out button") touches **only** the frontend `admin.tsx` — **none** of my 7 changed backend files. So I can safely branch from current main and push my files without clobbering anything.
+
+Let me create the branch and push. First, create the branch from main:
+
+Both write paths are denied: the git proxy returns 403, and the GitHub App integration also returns 403 ("Resource not accessible by integration") — meaning this session has **read-only** access to the repo. I cannot push.
+
+Let me confirm my work is intact and produce a patch you can apply directly:

@@ -2447,6 +2447,7 @@ function CustomersTab() {
   const [showAdd, setShowAdd] = useState(false);
   const [newName, setNewName] = useState("");
   const [newEmail, setNewEmail] = useState("");
+  const [newPassword, setNewPassword] = useState("");
   const [addError, setAddError] = useState("");
   const [adding, setAdding] = useState(false);
 
@@ -2491,7 +2492,7 @@ function CustomersTab() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ name: newName.trim(), email: newEmail.trim() }),
+        body: JSON.stringify({ name: newName.trim(), email: newEmail.trim(), password: newPassword }),
       });
       const body = (await r.json()) as { customer?: Customer; error?: string };
       if (!r.ok) {
@@ -2499,6 +2500,7 @@ function CustomersTab() {
       } else {
         setNewName("");
         setNewEmail("");
+        setNewPassword("");
         setShowAdd(false);
         qc.invalidateQueries({ queryKey: ["/api/admin/customers"] });
       }
@@ -2548,7 +2550,7 @@ function CustomersTab() {
         <div>
           <h2 className="text-sm font-semibold text-slate-200">Approved Customers</h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Manage customer accounts. Use "Set Password" to enable login for each user.
+            Manage customer accounts. Set a password when adding, or use "Change" to reset later.
           </p>
         </div>
         <button
@@ -2581,12 +2583,23 @@ function CustomersTab() {
               required
               className="flex-1 text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
             />
+          </div>
+          <div className="flex gap-3">
+            <input
+              type="password"
+              placeholder="Initial password (min 8 chars)"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              required
+              minLength={8}
+              className="flex-1 text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+            />
             <button
               type="submit"
               disabled={adding}
               className="text-xs px-4 py-2 rounded bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-50 transition-colors whitespace-nowrap"
             >
-              {adding ? "Adding…" : "Add"}
+              {adding ? "Adding…" : "Add customer"}
             </button>
           </div>
           {addError && <p className="text-xs text-red-400">{addError}</p>}

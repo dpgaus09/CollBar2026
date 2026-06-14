@@ -1,0 +1,34 @@
+I reviewed the repo (Express/Node API server, React frontend, Drizzle/Postgres DB, Python pipeline). Here are the most significant issues found, with file:line references.
+
+## Critical/High — SQL injection risk via `sql.raw()`
+Several routes build SQL with string interpolation instead of parameterized queries. The current code escapes single quotes (`replace(/'/g, "''")`), which blocks the most common injection vectors, but it's a fragile, error-prone pattern — any filter that's added later without the same escaping becomes exploitable, and edge cases (encoding tricks, non-string types) can slip through.
+
+- `artifacts/api-server/src/routes/peer-sets.ts:50-69` (`buildDistrictFilters`) — `county`, `district_type` interpolated into WHERE clauses, used by multiple endpoints including the PDF report builder (lines ~398-422).
+- `artifacts/api-server/src/routes/peer-sets.ts:113-116` — `state`/`county` query params interpolated similarly.
+- `artifacts/api-server/src/routes/peer-sets.ts:226-228` — `idList` built via `Number()`+filter then spliced into `IN (...)` via `sql.raw`.
+- `artifacts/api-server/src/routes/public.ts:71` and `:223-225, ~260-262` — `state`/`slug`/`county` interpolated into raw SQL for the public tracker.
+- `artifacts/api-server/src/routes/admin.ts:68` — table name from a hardcoded array spliced into `sql.raw`, lower risk since not user-controlled but still bad pattern.
+
+**Recommendation**: replace `sql.raw(\`...${x}...\`)` with Drizzle's tagged `sql\`...${x}...\`` template (auto-parameterizes), or use `sql.placeholder`/query builder methods (`.where(eq(...))`).
+
+## High — Permissive CORS with credentials
+`artifacts/api-server/src/app.ts:42`
+```js
+app.use(cors({ origin: true, credentials: true }));
+```
+`origin: true` reflects any request origin while allowing credentials (cookies/sessions). This means any website can make authenticated cross-site requests against the API on behalf of a logged-in user — a CSRF-style vector. Should be an explicit allowlist of known frontend origins.
+
+## Medium
+- `artifacts/api-server/src/app.ts:48` — session secret falls back to `"collbar-dev-only-not-for-production"` if `SESSION_SECRET` is unset. Production is guarded by a startup throw (line 16), so this is mostly fine, but worth double-checking it can't be bypassed (e.g., `NODE_ENV` misconfigured in deploy).
+- `artifacts/api-server/src/routes/admin.ts` (multiple, e.g. 607, 705, 759, 797, 878) — `res.status(500).json({ error: String(err) })` leaks raw error messages/stack info to clients.
+- `artifacts/api-server/src/routes/auth.ts:39-45` — login only checks truthiness of email/password; no per-account brute-force protection (only IP-based rate limiting elsewhere, worth confirming it covers `/auth/login`).
+- `artifacts/api-server/src/routes/admin.ts:1035-1041` — pipeline `spawnIlCrawl` args built from request body with light validation; admin-only, so impact is limited, but still worth tightening.
+
+## Low
+- `.gitignore` doesn't explicitly exclude `.env*`/secrets files (none currently tracked, but it's a latent risk).
+- `artifacts/api-server/src/routes/auth.ts:177` — `req.session.destroy(() => {})` silently swallows errors.
+
+## Overall
+Dependency versions (express 5, bcrypt 6, express-session 1.19, express-rate-limit 8) look current — no obvious outdated-critical-dep issue.
+
+The two I'd prioritize fixing first are the **CORS `origin: true` + credentials** combo and converting the **`sql.raw()` interpolation patterns** to Drizzle's parameterized `sql` templates — both are straightforward fixes with high impact. Want me to implement either of these?

@@ -1234,20 +1234,27 @@ router.get("/admin/customers", requireAdminToken, async (_req, res) => {
 
 // POST /admin/customers — create a new district user account
 router.post("/admin/customers", requireAdminToken, async (req, res) => {
-  const { name, email, district_id } = req.body as {
+  const { name, email, district_id, password } = req.body as {
     name?: string;
     email?: string;
     district_id?: number | null;
+    password?: string;
   };
   if (!name?.trim() || !email?.includes("@")) {
     res.status(400).json({ error: "Name and valid email are required" });
     return;
   }
+  if (!password || password.length < 8) {
+    res.status(400).json({ error: "Password must be at least 8 characters" });
+    return;
+  }
   const normalEmail = email.toLowerCase().trim();
+  const bcrypt = await import("bcrypt");
+  const hash = await bcrypt.hash(password, 12);
   try {
     const rows = await db.execute(sql`
-      INSERT INTO users (name, email, role, plan, active, district_id)
-      VALUES (${name.trim()}, ${normalEmail}, 'district_user', 'free', true, ${district_id ?? null})
+      INSERT INTO users (name, email, role, plan, active, district_id, password_hash)
+      VALUES (${name.trim()}, ${normalEmail}, 'district_user', 'free', true, ${district_id ?? null}, ${hash})
       RETURNING id, name, email, active, district_id, created_at, last_sign_in_at
     `);
     res.json({ customer: rows.rows[0] });

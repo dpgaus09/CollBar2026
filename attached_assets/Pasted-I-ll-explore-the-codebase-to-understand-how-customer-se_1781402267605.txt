@@ -1,0 +1,69 @@
+I'll explore the codebase to understand how customer setup works in the Admin page.
+
+Let me look at the users schema, auth system, and the admin page.
+
+The login system already exists with `password_hash`. Now let me find where customers are created in the admin route and page.
+
+Much of this already exists. Let me read the current "Add customer" form and the create endpoint in detail to see what's missing.
+
+Now let me read the frontend CustomersTab component to see the Add form.
+
+I now have the full picture. The system already has customer management with a **separate** two-step flow: first add name+email, then click "Set password". The user wants to set the password **at the same time** as creating the customer. I'll add a password field directly to the "Add customer" form.
+
+Let me make the backend accept a password on creation:
+
+Now the frontend — add a password field to the Add customer form and send it:
+
+Now update the Add form to include a password input. I'll restructure into a two-row layout for clarity:
+
+Let me update the now-outdated helper text in the section header:
+
+Now let me typecheck to verify the changes compile:
+
+Dependencies aren't installed (node_modules missing). Let me install and re-run the typecheck:
+
+Errors at lines 1278/1316/1347 look like they may be pre-existing. Let me check whether they existed before my change:
+
+The 3 errors are pre-existing (same `parseInt(req.params.id)` pattern, unrelated to my change). My edits introduce no new type errors. Let me revert the incidental `pnpm-lock.yaml` change so I only commit my intended edits:
+
+Both intended files changed. Let me commit and push:
+
+Push returned 403. Per the retry guidance, let me retry with backoff in case it's transient:
+
+The commit is saved locally, but the push is being **denied with a 403 permission error** (`Permission to dpgaus09/CollBar2026.git denied to dpgaus09`) — that's an authorization issue with the environment's git credentials, not a transient network failure, so retries won't help.
+
+Done — the change is implemented and committed locally on `claude/tender-noether-zsfsy4`. The push is blocked by a credentials/permissions problem in the environment, which I'll flag below.
+
+## What I found
+
+Your app already had most of the customer login plumbing:
+- A `users` table with a bcrypt `password_hash` column
+- A working `POST /api/auth/login` (email + password, with lockout/rate-limiting)
+- A **Customers** tab in the Admin page that created a customer with **name + email**, then required a *separate* "Set password" click before they could log in
+
+So the only gap was your exact ask: setting the password **at the same time** you set up the customer.
+
+## What I changed
+
+**Backend** — `artifacts/api-server/src/routes/admin.ts`
+- `POST /admin/customers` now accepts an optional `password`, validates it (min 8 chars), bcrypt-hashes it, and stores `password_hash` on insert. The standalone "Set password" reset endpoint is untouched.
+
+**Frontend** — `artifacts/collbar-web/src/pages/admin.tsx`
+- Added a **Password** field to the "Add customer" form (required, min 8 chars), so a new customer can log in immediately with their email + password. The per-row "Change" button still works for later resets.
+
+I ran the typecheck: my edits add **no new errors**. There are 3 pre-existing `req.params.id` type errors in `admin.ts` (lines unrelated to this change — they exist on the original `main` code too), which I left alone.
+
+## ⚠️ Push blocked
+
+```
+remote: Permission to dpgaus09/CollBar2026.git denied to dpgaus09.
+fatal: ... error: 403
+```
+
+This is a **permissions/authorization** error, not a network blip, so retrying with backoff didn't help. The commit (`8d5f3b4`) is safely on your local branch. To get it pushed, the session's git credentials need write access to `dpgaus09/CollBar2026` — once that's sorted I can push, or you can re-run the push yourself.
+
+Want me to do anything else, like also surfacing the assigned **district** in the Add form (the backend already supports `district_id`)?
+
+I fixed the commit authorship — the tip commit (`98c92f8`) is now authored by `Claude <noreply@anthropic.com>`, so it won't show as Unverified.
+
+The push is still blocked by the same **403 permission error** (`Permission to dpgaus09/CollBar2026.git denied to dpgaus09`). This is an authorization problem with the session's git credentials, not something I can resolve from here — the credentials need write access to `dpgaus09/CollBar2026`. The commit is ready locally; once access is granted, the push will go through.
