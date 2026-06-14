@@ -75,43 +75,24 @@ function buildWhere(conditions: Array<SQL | null | undefined>): SQL {
 // ---------------------------------------------------------------------------
 router.get("/dashboard/districts", requireAuth, async (req: Request, res: Response) => {
   const stateFilter = req.query.state ? String(req.query.state).toUpperCase() : null;
+  const q = req.query.q ? String(req.query.q).trim() : "";
   try {
-    let rows;
-    if (req.session.userRole === "admin") {
-      if (stateFilter) {
-        rows = await db.execute(sql`
-          SELECT id, name, county, district_type, enrollment, state, updated_at
-          FROM districts
-          WHERE state = ${stateFilter}
-          ORDER BY name
-          LIMIT 1000
-        `);
-      } else {
-        rows = await db.execute(sql`
-          SELECT id, name, county, district_type, enrollment, state, updated_at
-          FROM districts
-          ORDER BY name
-          LIMIT 1000
-        `);
-      }
-    } else {
-      if (stateFilter) {
-        rows = await db.execute(sql`
-          SELECT id, name, county, district_type, enrollment, state, updated_at
-          FROM districts
-          WHERE state = ${stateFilter}
-          ORDER BY name
-          LIMIT 1000
-        `);
-      } else {
-        rows = await db.execute(sql`
-          SELECT id, name, county, district_type, enrollment, state, updated_at
-          FROM districts
-          ORDER BY name
-          LIMIT 1000
-        `);
-      }
+    const conditions: Array<SQL | null> = [];
+    if (stateFilter) {
+      conditions.push(sql`state = ${stateFilter}`);
     }
+    if (q) {
+      const pattern = `%${q}%`;
+      conditions.push(sql`(name ILIKE ${pattern} OR county ILIKE ${pattern})`);
+    }
+    const where = buildWhere(conditions);
+    const rows = await db.execute(sql`
+      SELECT id, name, county, district_type, enrollment, state, updated_at
+      FROM districts
+      WHERE ${where}
+      ORDER BY name
+      LIMIT 5000
+    `);
     res.json({ districts: rows.rows });
   } catch (err) {
     res.status(500).json({ error: String(err) });

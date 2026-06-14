@@ -14,20 +14,36 @@ interface District {
   state: string;
 }
 
-function useDistricts() {
+function useDistricts(search: string, stateFilter: "" | "IL") {
   return useQuery<{ districts: District[] }>({
-    queryKey: ["/api/dashboard/districts"],
-    queryFn: () =>
-      fetch(apiUrl("/api/dashboard/districts"), { credentials: "include" }).then((r) => {
+    queryKey: ["/api/dashboard/districts", { search, stateFilter }],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (search) params.set("q", search);
+      if (stateFilter) params.set("state", stateFilter);
+      const qs = params.toString();
+      return fetch(apiUrl(`/api/dashboard/districts${qs ? `?${qs}` : ""}`), {
+        credentials: "include",
+      }).then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
-      }),
+      });
+    },
   });
 }
 
-// Fetch the logged-in customer's own district directly. The list endpoint is
-// capped at 1000 rows, so the customer's district may not appear there — this
-// guarantees the pinned card always has its data.
+function useDebounced<T>(value: T, delay = 250): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return debounced;
+}
+
+// Fetch the logged-in customer's own district directly. This guarantees the
+// pinned card always has its data even before the list query resolves or when
+// a search/state filter would otherwise exclude the customer's district.
 function useMyDistrict(districtId: number | null) {
   return useQuery<District | null>({
     queryKey: ["/api/dashboard/districts", "self", districtId],
@@ -176,19 +192,14 @@ function AdminDistrictPicker({
 }) {
   const [, setLocation] = useLocation();
   const [stateFilter, setStateFilter] = useState<"" | "IL">("");
-  const { data, isLoading, isError } = useDistricts();
+  const debouncedSearch = useDebounced(search);
+  const { data, isLoading, isError } = useDistricts(debouncedSearch, stateFilter);
   const { districtId } = useAuth();
   const { data: myDistrict } = useMyDistrict(districtId);
 
   const filtered = (data?.districts ?? []).filter((d) => {
     if (districtId != null && Number(d.id) === Number(districtId)) return false;
-    if (d.state !== "IL" && !stateFilter) return false;
-    if (stateFilter && d.state !== stateFilter) return false;
-    if (!search) return true;
-    return (
-      d.name.toLowerCase().includes(search.toLowerCase()) ||
-      (d.county ?? "").toLowerCase().includes(search.toLowerCase())
-    );
+    return true;
   });
 
   return (
@@ -196,7 +207,11 @@ function AdminDistrictPicker({
       <div>
         <h1 className="text-xl font-bold text-slate-100">Select a District</h1>
         <p className="text-xs text-slate-500 mt-1">
-          {data?.districts.length.toLocaleString() ?? "—"} districts in the database
+          {debouncedSearch
+            ? `${filtered.length.toLocaleString()} ${
+                filtered.length === 1 ? "match" : "matches"
+              } for “${debouncedSearch}”`
+            : `${data?.districts.length.toLocaleString() ?? "—"} districts in the database`}
         </p>
       </div>
 
