@@ -35,7 +35,7 @@ function Home() {
         <p className="text-slate-400 text-sm font-mono">
           Collective Bargaining Database
         </p>
-        <p className="text-slate-500 text-xs mt-6">Phase 4 — District Dashboard</p>
+        <p className="text-slate-500 text-xs mt-6">District Dashboard</p>
         <div className="mt-4 flex items-center justify-center gap-3">
           <a
             href={`${import.meta.env.BASE_URL}login`}
