@@ -230,6 +230,20 @@ function formatUnit(unit: string): string {
     .join(" ");
 }
 
+/** Canonical bargaining units for the upload picker (mirrors the API list). */
+const BARGAINING_UNIT_OPTIONS: { value: string; label: string }[] = [
+  { value: "teachers", label: "Teachers" },
+  { value: "paraprofessionals", label: "Paraprofessionals" },
+  { value: "custodial_maintenance", label: "Custodial & Maintenance" },
+  { value: "transportation", label: "Transportation" },
+  { value: "secretarial_clerical", label: "Secretarial & Clerical" },
+  { value: "food_service", label: "Food Service" },
+  { value: "nurses", label: "Nurses" },
+  { value: "administrators", label: "Administrators" },
+  { value: "support_staff", label: "Support Staff (combined)" },
+  { value: "other", label: "Other" },
+];
+
 // ---------------------------------------------------------------------------
 // Admin session hook — checks whether the browser has an active admin session
 // ---------------------------------------------------------------------------
@@ -3165,10 +3179,342 @@ function CustomersTab() {
 }
 
 // ---------------------------------------------------------------------------
+// Upload CBA Tab — manually attach a PDF, assign district + unit, run extraction
+// ---------------------------------------------------------------------------
+
+function UploadCbaTab() {
+  const { data: session } = useAdminSession();
+  const isAuthenticated = session?.authenticated === true;
+
+  const { data: districtsData } = useQuery<{ districts: District[] }>({
+    queryKey: ["/api/dashboard/districts"],
+    queryFn: () =>
+      fetch(apiUrl("/api/dashboard/districts"), { credentials: "include" }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    enabled: isAuthenticated,
+    retry: false,
+  });
+  const districts = districtsData?.districts ?? [];
+
+  const [file, setFile] = useState<File | null>(null);
+  const [districtId, setDistrictId] = useState<string>("");
+  const [districtSearch, setDistrictSearch] = useState("");
+  const [unit, setUnit] = useState("teachers");
+  const [schoolYear, setSchoolYear] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<{
+    sourceDocId: number | null;
+    districtName: string;
+    alreadyExists: boolean;
+    extractionStatus: string | null;
+  } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const queryClient = useQueryClient();
+
+  // Once an upload kicks off a run, reuse the extraction-retry status surface.
+  const { data: extractionStatus } = useRetryExtractionStatus();
+  const watching =
+    result !== null && !result.alreadyExists && result.sourceDocId !== null;
+  const statusForThisDoc =
+    watching && extractionStatus?.docId === result?.sourceDocId
+      ? extractionStatus
+      : null;
+  // The extraction runner is global (one at a time). If a different doc is
+  // mid-run, an upload's auto-start is skipped — surface that and let the admin
+  // start it once the runner is free.
+  const anotherRunActive =
+    !!extractionStatus?.running &&
+    result?.sourceDocId != null &&
+    extractionStatus.docId !== result.sourceDocId;
+
+  const startExtraction = useMutation({
+    mutationFn: (docId: number) =>
+      fetch(apiUrl("/api/admin/retry-extraction"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ docId }),
+      }).then(async (r) => {
+        const j = (await r.json()) as { status?: string; error?: string };
+        if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
+        return j;
+      }),
+    onSuccess: (j) => {
+      setResult((prev) =>
+        prev ? { ...prev, extractionStatus: j.status ?? prev.extractionStatus } : prev,
+      );
+      queryClient.invalidateQueries({
+        queryKey: ["/api/admin/retry-extraction-status"],
+      });
+    },
+  });
+
+  const selectedDistrict = districts.find((d) => String(d.id) === districtId);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    setResult(null);
+    if (!file) {
+      setError("Choose a PDF file to upload.");
+      return;
+    }
+    if (!districtId) {
+      setError("Select the district this contract belongs to.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const params = new URLSearchParams({
+        district_id: districtId,
+        bargaining_unit: unit,
+        filename: file.name,
+      });
+      if (schoolYear.trim()) params.set("school_year", schoolYear.trim());
+      const r = await fetch(apiUrl(`/api/admin/upload-cba?${params}`), {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/pdf" },
+        body: file,
+      });
+      const body = (await r.json()) as {
+        ok?: boolean;
+        sourceDocId?: number;
+        districtName?: string;
+        alreadyExists?: boolean;
+        extraction?: { status?: string; pid?: number | null };
+        error?: string;
+      };
+      if (r.status === 409 && body.alreadyExists) {
+        setResult({
+          sourceDocId: body.sourceDocId ?? null,
+          districtName: body.districtName ?? "",
+          alreadyExists: true,
+          extractionStatus: null,
+        });
+      } else if (!r.ok || !body.ok) {
+        setError(body.error ?? `Upload failed (HTTP ${r.status})`);
+      } else {
+        setResult({
+          sourceDocId: body.sourceDocId ?? null,
+          districtName: body.districtName ?? "",
+          alreadyExists: false,
+          extractionStatus: body.extraction?.status ?? null,
+        });
+        setFile(null);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+      }
+    } catch {
+      setError("Network error during upload.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (!isAuthenticated) {
+    return <LoginRequiredCard onLogin={goToLogin} />;
+  }
+
+  return (
+    <div className="space-y-6">
+      <section className="space-y-2">
+        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
+          Upload a CBA
+        </h2>
+        <p className="text-xs text-slate-500 leading-relaxed">
+          Found a contract the crawler missed? Attach the PDF, assign it to a district and
+          bargaining unit, and CollBar will store it and run the LLM extraction on just that
+          document — no need to wait for the next crawl.
+        </p>
+      </section>
+
+      <form
+        onSubmit={handleSubmit}
+        className="rounded-lg border border-slate-800 bg-slate-900 p-5 space-y-4"
+      >
+        {/* File picker */}
+        <div className="space-y-1.5">
+          <label className="text-xs text-slate-400">PDF file</label>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/pdf,.pdf"
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            className="block w-full text-xs text-slate-300 file:mr-3 file:py-2 file:px-4 file:rounded file:border-0 file:text-xs file:font-medium file:bg-blue-800 file:text-blue-100 hover:file:bg-blue-700 file:cursor-pointer"
+          />
+          {file && (
+            <p className="text-[11px] text-slate-500">
+              {file.name} · {(file.size / 1024 / 1024).toFixed(2)} MB
+            </p>
+          )}
+        </div>
+
+        {/* District picker */}
+        <div className="space-y-1.5">
+          <label className="text-xs text-slate-400">District</label>
+          <input
+            type="text"
+            placeholder="Filter districts by name or county…"
+            value={districtSearch}
+            onChange={(e) => {
+              setDistrictSearch(e.target.value);
+              setDistrictId("");
+            }}
+            className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+          />
+          <select
+            value={districtId}
+            onChange={(e) => setDistrictId(e.target.value)}
+            className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 focus:outline-none focus:border-blue-500"
+          >
+            <option value="">— Select a district —</option>
+            {districts
+              .filter(
+                (d) =>
+                  !districtSearch ||
+                  d.name.toLowerCase().includes(districtSearch.toLowerCase()) ||
+                  (d.county ?? "").toLowerCase().includes(districtSearch.toLowerCase()),
+              )
+              .map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                  {d.state ? ` (${d.state})` : ""}
+                </option>
+              ))}
+          </select>
+        </div>
+
+        {/* Bargaining unit + school year */}
+        <div className="flex gap-3">
+          <div className="flex-1 space-y-1.5">
+            <label className="text-xs text-slate-400">Bargaining unit</label>
+            <select
+              value={unit}
+              onChange={(e) => setUnit(e.target.value)}
+              className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 focus:outline-none focus:border-blue-500"
+            >
+              {BARGAINING_UNIT_OPTIONS.map((u) => (
+                <option key={u.value} value={u.value}>
+                  {u.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex-1 space-y-1.5">
+            <label className="text-xs text-slate-400">
+              School year <span className="text-slate-600">(optional)</span>
+            </label>
+            <input
+              type="text"
+              placeholder="2026-27"
+              value={schoolYear}
+              onChange={(e) => setSchoolYear(e.target.value)}
+              className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+            />
+          </div>
+        </div>
+
+        {error && (
+          <div className="rounded border border-red-800 bg-red-950/30 px-3 py-2 text-xs text-red-300">
+            {error}
+          </div>
+        )}
+
+        <button
+          type="submit"
+          disabled={submitting || !file || !districtId}
+          className="text-xs px-4 py-2 rounded bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-50 transition-colors"
+        >
+          {submitting ? "Uploading…" : "Upload & extract"}
+        </button>
+      </form>
+
+      {/* Result + extraction status */}
+      {result?.alreadyExists && (
+        <div className="rounded-lg border border-amber-800/60 bg-amber-950/20 px-4 py-3 text-xs text-amber-300 leading-relaxed">
+          <span className="font-semibold text-amber-200">Already on file.</span> This exact PDF
+          is already stored for{" "}
+          <span className="font-medium">{result.districtName || "this district"}</span>
+          {result.sourceDocId ? ` (source document #${result.sourceDocId})` : ""}. No duplicate
+          was created.
+        </div>
+      )}
+
+      {result && !result.alreadyExists && (
+        <div className="rounded-lg border border-slate-800 bg-slate-900 p-5 space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-semibold text-slate-300">
+              Extraction · {result.districtName}
+              {result.sourceDocId ? ` · doc #${result.sourceDocId}` : ""}
+            </h3>
+            {statusForThisDoc?.running ? (
+              <span className="text-xs text-blue-400 animate-pulse">running…</span>
+            ) : statusForThisDoc?.lastStatus === "success" ? (
+              <span className="text-xs text-emerald-400">success</span>
+            ) : statusForThisDoc?.lastStatus === "error" ? (
+              <span className="text-xs text-red-400">error</span>
+            ) : result.extractionStatus === "started" ? (
+              <span className="text-xs text-slate-500">starting…</span>
+            ) : result.extractionStatus === "already_running" ? (
+              <span className="text-xs text-amber-400">queued</span>
+            ) : (
+              <span className="text-xs text-slate-500">idle</span>
+            )}
+          </div>
+          {result.extractionStatus === "already_running" && !statusForThisDoc?.running ? (
+            <p className="text-[11px] text-amber-400/90 leading-relaxed">
+              The document was saved, but another extraction is currently running — only one runs
+              at a time, so this one hasn’t started yet. Start it below once the current run
+              finishes.
+            </p>
+          ) : (
+            <p className="text-[11px] text-slate-500">
+              The LLM extraction was kicked off for this document. Parsed contract provisions and
+              settlements will appear in the dashboard once it completes.
+            </p>
+          )}
+          {result.sourceDocId != null && !statusForThisDoc?.running && (
+            <button
+              type="button"
+              onClick={() => startExtraction.mutate(result.sourceDocId as number)}
+              disabled={anotherRunActive || startExtraction.isPending}
+              className="text-xs px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 disabled:opacity-50 transition-colors"
+              title={anotherRunActive ? "Another extraction is currently running" : undefined}
+            >
+              {startExtraction.isPending
+                ? "Starting…"
+                : statusForThisDoc?.lastStatus
+                  ? "Re-run extraction"
+                  : "Start extraction"}
+            </button>
+          )}
+          {statusForThisDoc && statusForThisDoc.tail.length > 0 && (
+            <pre className="text-[10px] leading-relaxed text-slate-500 bg-slate-950 border border-slate-800 rounded p-3 max-h-48 overflow-auto whitespace-pre-wrap">
+              {statusForThisDoc.tail.slice(-12).join("\n")}
+            </pre>
+          )}
+        </div>
+      )}
+
+      {selectedDistrict && !result && (
+        <p className="text-[11px] text-slate-600">
+          Will be filed under {selectedDistrict.name}
+          {selectedDistrict.state ? ` (${selectedDistrict.state})` : ""} ·{" "}
+          {BARGAINING_UNIT_OPTIONS.find((u) => u.value === unit)?.label ?? unit}.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page shell with tab routing
 // ---------------------------------------------------------------------------
 
-type TabKey = "overview" | "crawl-report" | "extraction-report" | "review-queue" | "alerts" | "eis-crosscheck" | "customers";
+type TabKey = "overview" | "crawl-report" | "extraction-report" | "review-queue" | "alerts" | "eis-crosscheck" | "customers" | "upload";
 
 function useAlertsPendingCount() {
   return useQuery<{ pendingCount: number }>({
@@ -3186,6 +3532,7 @@ const TABS: { key: TabKey; label: string; path: string }[] = [
   { key: "overview", label: "Overview", path: "/admin" },
   { key: "crawl-report", label: "Crawl Report", path: "/admin/crawl-report" },
   { key: "extraction-report", label: "Extraction", path: "/admin/extraction-report" },
+  { key: "upload", label: "Upload CBA", path: "/admin/upload" },
   { key: "review-queue", label: "Review Queue", path: "/admin/review-queue" },
   { key: "alerts", label: "Alerts", path: "/admin/alerts" },
   { key: "eis-crosscheck", label: "EIS Cross-Check", path: "/admin/eis-crosscheck" },
@@ -3194,6 +3541,7 @@ const TABS: { key: TabKey; label: string; path: string }[] = [
 
 function activeTab(location: string): TabKey {
   if (location.includes("/admin/alerts")) return "alerts";
+  if (location.includes("/admin/upload")) return "upload";
   if (location.includes("review-queue")) return "review-queue";
   if (location.includes("extraction-report")) return "extraction-report";
   if (location.includes("crawl-report")) return "crawl-report";
@@ -3288,6 +3636,7 @@ export default function AdminPage() {
         {tab === "overview" && <OverviewTab />}
         {tab === "crawl-report" && <CrawlReportTab />}
         {tab === "extraction-report" && <ExtractionReportTab />}
+        {tab === "upload" && <UploadCbaTab />}
         {tab === "review-queue" && <ReviewQueueTab />}
         {tab === "alerts" && <AlertsTab />}
         {tab === "eis-crosscheck" && <EisXCheckTab />}

@@ -1,10 +1,12 @@
-import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
-import { readFileSync, existsSync, openSync } from "fs";
+import { Router, raw, type IRouter, type Request, type Response, type NextFunction } from "express";
+import { readFileSync, existsSync, openSync, writeFileSync } from "fs";
 import { mkdirSync } from "fs";
 import { join } from "path";
 import { spawn } from "child_process";
+import { createHash } from "node:crypto";
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
+import { VALID_BARGAINING_UNITS } from "./bargaining-units.js";
 
 declare module "express-session" {
   interface SessionData {
@@ -1307,6 +1309,165 @@ router.get("/admin/retry-extraction-status", requireAdminToken, (_req, res) => {
     docId: _retryLastDocId,
     lastRunAt: _retryLastRunAt?.toISOString() ?? null,
     lastStatus: running ? "running" : (_retryLastStatus ?? null),
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Manual CBA upload — an admin attaches a PDF, assigns its district +
+// bargaining unit (+ optional school year), we store it locally and kick off
+// single-doc LLM extraction (reusing the extraction-retry spawn + status).
+// ---------------------------------------------------------------------------
+
+const IL_CBA_PDF_DIR = join(PIPELINE_DIR, "data", "il_cba");
+const MAX_UPLOAD_BYTES = 64 * 1024 * 1024; // 64 MB
+const uploadPdfBody = raw({ type: () => true, limit: MAX_UPLOAD_BYTES });
+
+/** Normalize a school-year input to the canonical YYYY-YY form (or null). */
+function normalizeSchoolYear(
+  rawValue: unknown,
+): { ok: true; value: string | null } | { ok: false } {
+  if (rawValue == null) return { ok: true, value: null };
+  const s = String(rawValue).trim();
+  if (!s) return { ok: true, value: null };
+  let v = s;
+  const short = /^(\d{2})-(\d{2})$/.exec(s);
+  if (short) v = `20${short[1]}-${short[2]}`;
+  if (!/^\d{4}-\d{2}$/.test(v) || v.length > 7) return { ok: false };
+  return { ok: true, value: v };
+}
+
+/** Reduce an uploaded filename to a safe display marker. */
+function sanitizeFilename(rawValue: unknown): string {
+  const base = String(rawValue ?? "upload.pdf").split(/[\\/]/).pop() || "upload.pdf";
+  return base.replace(/[^\w.\- ]+/g, "_").slice(0, 200) || "upload.pdf";
+}
+
+async function handleCbaUpload(req: Request, res: Response): Promise<void> {
+  const buf = req.body as Buffer;
+  if (!Buffer.isBuffer(buf) || buf.length === 0) {
+    res.status(400).json({ error: "No file received" });
+    return;
+  }
+
+  // Validate it is a real PDF by its magic bytes, not just the extension.
+  if (buf.subarray(0, 1024).indexOf(Buffer.from("%PDF")) === -1) {
+    res.status(400).json({ error: "File is not a valid PDF (missing %PDF header)" });
+    return;
+  }
+
+  const districtId = parseInt(String(req.query.district_id ?? ""), 10);
+  if (isNaN(districtId) || districtId < 1) {
+    res.status(400).json({ error: "district_id is required and must be a positive integer" });
+    return;
+  }
+
+  const unit = req.query.bargaining_unit ? String(req.query.bargaining_unit) : "teachers";
+  if (!VALID_BARGAINING_UNITS.has(unit)) {
+    res.status(400).json({ error: `Invalid bargaining_unit: ${unit}` });
+    return;
+  }
+
+  const sy = normalizeSchoolYear(req.query.school_year);
+  if (!sy.ok) {
+    res.status(400).json({ error: "school_year must look like 2026-27" });
+    return;
+  }
+  const schoolYear = sy.value;
+  const filename = sanitizeFilename(req.query.filename);
+
+  // The district must already exist (no district creation from this screen).
+  const distRows = await db.execute(sql`
+    SELECT id, name, state FROM districts WHERE id = ${districtId}
+  `);
+  const district = distRows.rows[0] as
+    | { id: number; name: string; state: string }
+    | undefined;
+  if (!district) {
+    res.status(404).json({ error: `District ${districtId} not found` });
+    return;
+  }
+
+  // Dedup on (district, bargaining unit, file hash) before writing anything.
+  const fileHash = createHash("sha256").update(buf).digest("hex");
+  const existing = await db.execute(sql`
+    SELECT id FROM source_documents
+    WHERE district_id = ${districtId}
+      AND bargaining_unit = ${unit}
+      AND file_hash = ${fileHash}
+    LIMIT 1
+  `);
+  if (existing.rows.length > 0) {
+    const existingId = Number((existing.rows[0] as { id: number }).id);
+    res.status(409).json({
+      error: "This exact PDF is already on file for this district and bargaining unit.",
+      alreadyExists: true,
+      sourceDocId: existingId,
+      districtName: district.name,
+    });
+    return;
+  }
+
+  // Persist the file locally under the pipeline data dir (resolve_pdf_path
+  // reads the absolute `local:` storage_key first).
+  mkdirSync(IL_CBA_PDF_DIR, { recursive: true });
+  const absPath = join(IL_CBA_PDF_DIR, `${fileHash}.pdf`);
+  writeFileSync(absPath, buf);
+  const storageKey = `local:${absPath}`;
+  const sourceUrl = `upload://district-${districtId}/${unit}/${filename}`;
+
+  let sourceDocId: number;
+  try {
+    const inserted = await db.execute(sql`
+      INSERT INTO source_documents
+        (district_id, doc_type, bargaining_unit, source_url, file_hash, storage_key, school_year)
+      VALUES
+        (${districtId}, 'cba_pdf', ${unit}, ${sourceUrl}, ${fileHash}, ${storageKey}, ${schoolYear})
+      RETURNING id
+    `);
+    sourceDocId = Number((inserted.rows[0] as { id: number }).id);
+  } catch (err) {
+    const msg = String(err);
+    if (msg.includes("unique") || msg.includes("duplicate")) {
+      res.status(409).json({
+        error: "This PDF is already on file (matched on content).",
+        alreadyExists: true,
+        districtName: district.name,
+      });
+      return;
+    }
+    throw err;
+  }
+
+  // Kick off single-doc extraction, reusing the retry spawn + status surface.
+  const extraction = spawnExtractionRetry(sourceDocId);
+
+  res.json({
+    ok: true,
+    sourceDocId,
+    districtName: district.name,
+    bargainingUnit: unit,
+    schoolYear,
+    fileBytes: buf.length,
+    extraction,
+  });
+}
+
+router.post("/admin/upload-cba", requireAdminToken, (req, res) => {
+  uploadPdfBody(req, res, (err?: unknown) => {
+    if (err) {
+      const status =
+        (err as { status?: number }).status ??
+        (err as { statusCode?: number }).statusCode;
+      if (status === 413) {
+        res.status(413).json({ error: "File too large (max 64 MB)" });
+      } else {
+        res.status(400).json({ error: "Failed to read upload body" });
+      }
+      return;
+    }
+    handleCbaUpload(req, res).catch((e) => {
+      res.status(500).json({ error: String(e) });
+    });
   });
 });
 
