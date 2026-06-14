@@ -113,20 +113,6 @@ async function runMigrations(): Promise<void> {
         ADD COLUMN IF NOT EXISTS last_sign_in_at  TIMESTAMPTZ
     `);
 
-    // Keep approved_customers for historical data — just ensure it exists
-    await db.execute(sql`
-      CREATE TABLE IF NOT EXISTS approved_customers (
-        id BIGSERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        email TEXT NOT NULL,
-        active BOOLEAN NOT NULL DEFAULT true,
-        district_id BIGINT REFERENCES districts(id),
-        created_at TIMESTAMPTZ DEFAULT NOW(),
-        last_sign_in_at TIMESTAMPTZ,
-        CONSTRAINT approved_customers_email_unique UNIQUE (email)
-      )
-    `);
-
     logger.info("Migration OK: users auth columns ensured");
   } catch (err) {
     logger.warn({ err }, "Migration failed — will retry on next restart");

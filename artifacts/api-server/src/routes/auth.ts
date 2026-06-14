@@ -1,6 +1,5 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import bcrypt from "bcrypt";
-import rateLimit from "express-rate-limit";
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 
@@ -18,25 +17,60 @@ declare module "express-session" {
   }
 }
 
+// ============================================================================
+// IP-based failure tracking
+// Lock an IP for 15 minutes after 5 consecutive failed login attempts.
+// Resets on a successful login from that IP.
+// ============================================================================
+interface IpRecord {
+  count: number;
+  until?: Date;
+}
+const ipFailures = new Map<string, IpRecord>();
+
+function getIp(req: Request): string {
+  return (
+    (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ??
+    req.socket.remoteAddress ??
+    "unknown"
+  );
+}
+
+function isIpLocked(ip: string): boolean {
+  const rec = ipFailures.get(ip);
+  if (!rec) return false;
+  if (rec.until && rec.until > new Date()) return true;
+  return false;
+}
+
+function recordIpFailure(ip: string): void {
+  const rec = ipFailures.get(ip) ?? { count: 0 };
+  rec.count += 1;
+  if (rec.count >= 5) {
+    rec.until = new Date(Date.now() + 15 * 60 * 1000);
+  }
+  ipFailures.set(ip, rec);
+}
+
+function clearIpFailures(ip: string): void {
+  ipFailures.delete(ip);
+}
+
 const router: IRouter = Router();
 
-// ============================================================================
-// Rate limiting — 10 login attempts per 15 minutes per IP
-// ============================================================================
-const loginRateLimit = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Too many login attempts. Please wait 15 minutes and try again." },
-  skipSuccessfulRequests: true,
-});
+// Generic failure — never reveal whether the email exists, whether the account
+// is locked, or whether the account is deactivated. Log the real reason only
+// server-side.
+function genericFail(res: Response, reason?: string): void {
+  if (reason) console.info(`[auth] login rejected: ${reason}`);
+  res.status(401).json({ error: "Invalid email or password." });
+}
 
 // ============================================================================
 // POST /api/auth/login — email + password sign-in
 // Same endpoint for both admins and customers. Role determines redirect.
 // ============================================================================
-router.post("/auth/login", loginRateLimit, async (req: Request, res: Response) => {
+router.post("/auth/login", async (req: Request, res: Response) => {
   const { email, password } = req.body as { email?: string; password?: string };
 
   if (!email || !password) {
@@ -44,10 +78,17 @@ router.post("/auth/login", loginRateLimit, async (req: Request, res: Response) =
     return;
   }
 
+  const ip = getIp(req);
+
+  // --- IP lockout check (before credential verification) ---
+  if (isIpLocked(ip)) {
+    genericFail(res, `IP ${ip} is locked out`);
+    return;
+  }
+
   const normalizedEmail = email.trim().toLowerCase();
 
   try {
-    // Look up user (both admins and customers live in the users table)
     const rows = await db.execute(sql`
       SELECT id, email, role, plan, district_id, password_hash, active,
              failed_login_count, lockout_until
@@ -67,25 +108,24 @@ router.post("/auth/login", loginRateLimit, async (req: Request, res: Response) =
       lockout_until: string | null;
     } | undefined;
 
-    // Generic failure message — never reveal whether email exists
-    const fail = () => res.status(401).json({ error: "Invalid email or password." });
-
+    // No account or no password set
     if (!user || !user.password_hash) {
-      fail();
+      recordIpFailure(ip);
+      genericFail(res, `no account/hash for ${normalizedEmail}`);
       return;
     }
 
-    // Check account lockout
-    if (user.lockout_until && new Date(user.lockout_until) > new Date()) {
-      res.status(429).json({
-        error: "Account temporarily locked due to too many failed attempts. Please try again in 15 minutes.",
-      });
-      return;
-    }
-
-    // Check active flag (not applicable to admins — always allow admin logins)
+    // Deactivated account (admins are always allowed)
     if (user.role !== "admin" && user.active === false) {
-      res.status(403).json({ error: "Your account has been deactivated. Contact your administrator." });
+      recordIpFailure(ip);
+      genericFail(res, `account deactivated: ${normalizedEmail}`);
+      return;
+    }
+
+    // Per-account lockout (belt-and-suspenders on top of IP lockout)
+    if (user.lockout_until && new Date(user.lockout_until) > new Date()) {
+      recordIpFailure(ip);
+      genericFail(res, `account locked: ${normalizedEmail}`);
       return;
     }
 
@@ -93,7 +133,8 @@ router.post("/auth/login", loginRateLimit, async (req: Request, res: Response) =
     const valid = await bcrypt.compare(password, user.password_hash);
 
     if (!valid) {
-      // Increment failed attempt counter; lock after 5 consecutive failures
+      // Increment both IP and per-account failure counters
+      recordIpFailure(ip);
       const newCount = (user.failed_login_count ?? 0) + 1;
       if (newCount >= 5) {
         await db.execute(sql`
@@ -107,11 +148,12 @@ router.post("/auth/login", loginRateLimit, async (req: Request, res: Response) =
           UPDATE users SET failed_login_count = ${newCount} WHERE id = ${user.id}
         `);
       }
-      fail();
+      genericFail(res, `wrong password for ${normalizedEmail} (attempt ${newCount})`);
       return;
     }
 
-    // Successful — clear lockout state
+    // Successful login — clear all failure state
+    clearIpFailures(ip);
     await db.execute(sql`
       UPDATE users
       SET failed_login_count = 0, lockout_until = NULL, last_sign_in_at = NOW()
@@ -136,7 +178,6 @@ router.post("/auth/login", loginRateLimit, async (req: Request, res: Response) =
         req.session.adminAuthenticated = true;
       }
 
-      // Determine redirect destination
       const dest =
         user.role === "admin"
           ? "/admin"
