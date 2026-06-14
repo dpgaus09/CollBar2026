@@ -10,7 +10,7 @@ name = "API Server"
 paths = ["/api"]
 
 [services.development]
-run = "PORT=8080 pnpm --filter @workspace/api-server run dev"
+run = "pnpm --filter @workspace/api-server run dev"
 
 [services.production]
 
