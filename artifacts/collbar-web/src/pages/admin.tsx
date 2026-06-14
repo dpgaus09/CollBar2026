@@ -2434,9 +2434,13 @@ function CustomersTab() {
     queryKey: ["/api/admin/customers"],
     queryFn: () =>
       fetch(apiUrl("/api/admin/customers"), { credentials: "include" }).then(
-        (r) => r.json(),
+        (r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        },
       ),
     enabled: isAuthenticated,
+    retry: false,
   });
 
   const [showAdd, setShowAdd] = useState(false);
