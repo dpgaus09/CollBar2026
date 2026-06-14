@@ -444,10 +444,9 @@ def upsert_contract(
                  effective_start, effective_end, term_years,
                  has_reopener, reopener_terms, source_doc_id)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            ON CONFLICT (district_id, unit_scope, effective_start) DO UPDATE SET
+            ON CONFLICT (district_id, bargaining_unit, unit_scope, effective_start) DO UPDATE SET
                 union_name        = COALESCE(EXCLUDED.union_name, contracts.union_name),
                 affiliation       = COALESCE(EXCLUDED.affiliation, contracts.affiliation),
-                bargaining_unit   = EXCLUDED.bargaining_unit,
                 effective_end     = COALESCE(EXCLUDED.effective_end, contracts.effective_end),
                 term_years        = COALESCE(EXCLUDED.term_years, contracts.term_years),
                 has_reopener      = COALESCE(EXCLUDED.has_reopener, contracts.has_reopener),

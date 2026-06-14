@@ -38,7 +38,12 @@ export const contractsTable = pgTable(
     ),
   },
   (t) => [
-    unique().on(t.districtId, t.unitScope, t.effectiveStart),
+    unique("contracts_district_bargaining_unit_scope_start_unique").on(
+      t.districtId,
+      t.bargainingUnit,
+      t.unitScope,
+      t.effectiveStart,
+    ),
     index("contracts_district_unit_idx").on(t.districtId, t.bargainingUnit),
     check(
       "contracts_bargaining_unit_check",
