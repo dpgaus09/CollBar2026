@@ -6,6 +6,7 @@
 - [IL CBA search fallback](il-cba-search-fallback.md) — Serper (primary) → Google CSE → DuckDuckGo; SERPER_API_KEY now set; run --search-fallback after direct crawl finishes.
 - [Cron requires Reserved VM](cron-reserved-vm.md) — node-cron fires only on Reserved VM; deployment type is set in the Replit Publishing UI (serve="vm" is NOT a valid artifact.toml value).
 - [ISBE connectivity from repl](isbe-connectivity.md) — isbe.net is unreachable from the sandbox (ConnectTimeoutError); only testable once deployed on a Reserved VM.
+- [CollBar district id types](collbar-district-id-types.md) — dashboard API returns district id as STRING (coerce when matching numeric auth districtId); list endpoint capped at LIMIT 1000, fetch a specific district via /:id.
 - [extraction_runs is append-per-attempt](il-extraction-runs-latest-per-doc.md) — one row per attempt; use latest-per-doc (DISTINCT ON source_doc_id) for status, never raw COUNT by status.
 - [IL CBA crawl precision](il-crawl-precision.md) — denylist aggregator/gov domains in name-search; require %PDF bytes before storing (HTML-as-PDF falsely marks districts found).
 - [Derive vs unit reclassification](il-extraction-derive-savepoint.md) — backfill_contract_units must wrap each UPDATE in a SAVEPOINT or a unique-constraint conflict aborts the whole derive transaction.
