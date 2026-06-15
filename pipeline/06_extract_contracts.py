@@ -433,6 +433,39 @@ def resolve_pdf_path(source_url: str, storage_key: str) -> Optional[Path]:
     return None
 
 
+def resolve_text_path(source_url: str, storage_key: str) -> Optional[Path]:
+    """Resolve the local file path for an html_contract text document.
+
+    html_contract source_documents store the page's extracted text as a .txt
+    file (under il/cba/<hash>.txt), uploaded to object storage and mirrored
+    locally by the crawler. Mirrors resolve_pdf_path but for the text payload,
+    and fetches from object storage when the local mirror is absent (e.g. after
+    a clean checkout or when extraction runs on a different machine).
+    """
+    if storage_key and storage_key.startswith("local:"):
+        p = Path(storage_key[6:])
+        if p.exists():
+            return p
+
+    fname = source_url.split("/")[-1] if source_url else None
+    if fname and fname.endswith(".txt"):
+        for cba_dir in (CBA_PDF_DIR, IL_CBA_PDF_DIR):
+            candidate = cba_dir / fname
+            if candidate.exists():
+                return candidate
+
+    if storage_key and not storage_key.startswith("local:"):
+        candidate = common.DATA_DIR / storage_key
+        if candidate.exists():
+            return candidate
+        # Object-storage keys mirror locally under il_cba/<hash>.txt.
+        local_mirror = IL_CBA_PDF_DIR / Path(storage_key).name
+        if local_mirror.exists():
+            return local_mirror
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Anthropic API call
 # ---------------------------------------------------------------------------
@@ -604,7 +637,7 @@ def get_failed_docs(conn):
             ORDER BY source_doc_id, run_at DESC, id DESC
         )
         SELECT sd.id, sd.source_url, sd.storage_key, sd.district_id, sd.school_year,
-               COALESCE(d.state, 'OH') AS district_state, sd.bargaining_unit
+               COALESCE(d.state, 'OH') AS district_state, sd.bargaining_unit, sd.source_type
         FROM source_documents sd
         JOIN latest l ON l.source_doc_id = sd.id
         LEFT JOIN districts d ON d.id = sd.district_id
@@ -637,7 +670,7 @@ def get_unprocessed_docs(conn, doc_id: Optional[int] = None, priority: bool = Fa
         cur.execute(
             """
             SELECT sd.id, sd.source_url, sd.storage_key, sd.district_id, sd.school_year,
-                   COALESCE(d.state, 'OH') AS district_state, sd.bargaining_unit
+                   COALESCE(d.state, 'OH') AS district_state, sd.bargaining_unit, sd.source_type
             FROM source_documents sd
             LEFT JOIN districts d ON d.id = sd.district_id
             WHERE sd.id = %s AND sd.doc_type = 'cba_pdf'
@@ -654,7 +687,7 @@ def get_unprocessed_docs(conn, doc_id: Optional[int] = None, priority: bool = Fa
         cur.execute(
             f"""
             SELECT sd.id, sd.source_url, sd.storage_key, sd.district_id, sd.school_year,
-                   COALESCE(d.state, 'OH') AS district_state, sd.bargaining_unit
+                   COALESCE(d.state, 'OH') AS district_state, sd.bargaining_unit, sd.source_type
             FROM source_documents sd
             LEFT JOIN districts d ON d.id = sd.district_id
             WHERE sd.doc_type = 'cba_pdf'
@@ -1417,6 +1450,7 @@ def main():
         source_doc_id, source_url, storage_key, district_id, school_year = row[:5]
         district_state: str = row[5] if len(row) > 5 else "OH"
         doc_unit: str = row[6] if len(row) > 6 else "teachers"
+        doc_source_type: str = row[7] if len(row) > 7 else "pdf"
 
         # Pick the state-appropriate system prompt.
         is_il = district_state == "IL"
@@ -1439,28 +1473,54 @@ def main():
             source_url or storage_key or "?"
         )
 
-        # --- Step 1: Resolve PDF ---
-        pdf_path = resolve_pdf_path(source_url or "", storage_key or "")
-        if not pdf_path:
-            log.warning("Cannot find PDF for doc %d — skipping", source_doc_id)
-            if not args.dry_run:
-                cur = conn.cursor()
-                insert_extraction_run(cur, source_doc_id, "failed", "PDF_NOT_FOUND")
-                conn.commit()
-                cur.close()
-            failures += 1
-            continue
+        is_html = doc_source_type == "html_contract"
 
-        # --- Step 2: Extract text ---
-        text, used_ocr, extract_reason, ocr_confidence = extract_pdf_text(pdf_path)
+        # --- Step 1 + 2: Resolve source file and extract text ---
+        if is_html:
+            # HTML-contract docs store the page's already-extracted text as a
+            # .txt file — no PDF parsing or OCR needed.
+            text_path = resolve_text_path(source_url or "", storage_key or "")
+            if not text_path:
+                log.warning("Cannot find HTML-contract text for doc %d — skipping",
+                            source_doc_id)
+                if not args.dry_run:
+                    cur = conn.cursor()
+                    insert_extraction_run(cur, source_doc_id, "failed", "HTML_NOT_FOUND")
+                    conn.commit()
+                    cur.close()
+                failures += 1
+                continue
+            label = text_path.name
+            try:
+                text = text_path.read_text(encoding="utf-8", errors="ignore")
+            except Exception as e:
+                log.warning("Could not read HTML-contract text %s: %s", label, e)
+                text = ""
+            used_ocr = False
+            ocr_confidence = None
+            extract_reason = "" if text.strip() else "HTML_EMPTY"
+        else:
+            pdf_path = resolve_pdf_path(source_url or "", storage_key or "")
+            if not pdf_path:
+                log.warning("Cannot find PDF for doc %d — skipping", source_doc_id)
+                if not args.dry_run:
+                    cur = conn.cursor()
+                    insert_extraction_run(cur, source_doc_id, "failed", "PDF_NOT_FOUND")
+                    conn.commit()
+                    cur.close()
+                failures += 1
+                continue
+            label = pdf_path.name
+            text, used_ocr, extract_reason, ocr_confidence = extract_pdf_text(pdf_path)
+
         # An OCR'd doc is low-quality (flag for human review) when its mean
         # tesseract word confidence falls below the trust threshold.
         ocr_low_quality = (
             used_ocr and ocr_confidence is not None and ocr_confidence < OCR_MIN_CONFIDENCE
         )
         if extract_reason or len(text) < MIN_TEXT_CHARS:
-            reason = extract_reason or "NO_TEXT_AFTER_OCR"
-            log.warning("No usable text from %s (%s)", pdf_path.name, reason)
+            reason = extract_reason or ("HTML_EMPTY" if is_html else "NO_TEXT_AFTER_OCR")
+            log.warning("No usable text from %s (%s)", label, reason)
             if not args.dry_run:
                 cur = conn.cursor()
                 insert_extraction_run(
@@ -1473,13 +1533,13 @@ def main():
             failures += 1
             continue
 
-        log.info("Extracted %d chars from %s%s", len(text), pdf_path.name,
-                 " (OCR)" if used_ocr else "")
+        log.info("Extracted %d chars from %s%s", len(text), label,
+                 " (OCR)" if used_ocr else (" (HTML)" if is_html else ""))
         if used_ocr:
             conf_str = f"{ocr_confidence:.1f}" if ocr_confidence is not None else "n/a"
             log.info(
                 "OCR quality for %s: mean confidence=%s%s",
-                pdf_path.name, conf_str,
+                label, conf_str,
                 " — LOW QUALITY, flagged for review" if ocr_low_quality else "",
             )
         chunked_text = chunk_by_articles(text)

@@ -28,12 +28,14 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import sys
 import time
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urljoin, urlparse
+from xml.etree import ElementTree as ET
 
 import requests
 from bs4 import BeautifulSoup
@@ -60,6 +62,48 @@ MAX_HOPS             = 2    # max link depth from homepage
 MAX_CANDIDATES       = 5    # top-scoring links to follow per page (CBA + nav)
 MAX_RETRIES          = 3    # per request
 RETRY_DELAYS         = [2, 4, 8]   # exponential backoff seconds
+
+# --- Discovery boosts (sitemap / JS-render / on-page docs) -----------------
+IL_MANUAL_REVIEW_CSV  = common.DATA_DIR / "il_cba_manual_review.csv"
+IL_CBA_CRAWL_BASELINE = Path(__file__).parent / "state" / "il_cba_crawl.baseline.json"
+
+# Sitemap discovery
+SITEMAP_PATHS          = ("/sitemap.xml", "/sitemap_index.xml")
+SITEMAP_MAX_CHILD_MAPS = 10   # follow at most N child sitemaps from an index
+SITEMAP_MAX_PAGES      = 20   # seed at most N keyword-matched pages per district
+SITEMAP_KEYWORDS = (
+    "collective-bargaining", "collectivebargaining", "collective_bargaining",
+    "bargaining", "negotiated", "negotiation", "cba", "labor", "union",
+    "agreement", "contract", "human-resources", "humanresources", "/hr/",
+    "board-policy", "boardpolicy", "board-of-education", "personnel",
+    "employment", "master-agreement",
+)
+
+# Broadened on-page document discovery: tokens that suggest a link points to a
+# downloadable document even without a .pdf extension.
+DOC_PATTERN_TOKENS = (
+    "pdf", "document", "fileviewer", "documenttrack", "showdocument",
+    "getfile", "download", "/assets/", "/media/", "/uploads/", "/files/",
+    "/documents/", "/resource", "/cms/lib", "/cdn/",
+)
+DOC_ID_RE = re.compile(r"(?:/|=)(\d{4,})(?:[/?&.#]|$)")
+
+# Embedded-viewer hosts. Some resolve to a direct download; others can't be
+# resolved programmatically and are logged for manual review instead.
+VIEWER_MANUAL_HOSTS = (
+    "app.box.com", "box.com", "issuu.com", "scribd.com",
+    "anyflip.com", "flipsnack.com", "yumpu.com",
+)
+
+# JS rendering (Playwright + Nix chromium)
+RENDER_CAP_PER_DISTRICT = 3      # max Playwright renders per district
+RENDER_NETWORKIDLE_MS   = 5000   # wait_for_load_state('networkidle') budget
+RENDER_GOTO_MS          = 15000  # page.goto timeout
+
+# HTML-contract fallback: capture rendered page text as the "source document"
+# only when the page very likely *is* the agreement (no downloadable doc found).
+HTML_CONTRACT_MIN_CHARS    = 6000
+HTML_CONTRACT_MIN_ARTICLES = 3
 
 
 def _district_timeout_handler(signum, frame):
@@ -157,6 +201,21 @@ _search_query_cache: dict[str, list[str]] = {}
 
 # Set to True once Google CSE returns a quota/auth error
 _google_cse_quota_exhausted: bool = False
+
+# Per-run document-verification cache (URL -> bool) to bound ranged-GET volume.
+_verify_cache: dict[str, bool] = {}
+
+# Domains that required JS rendering (persisted to crawl state so later runs go
+# straight to the browser). Loaded at crawl() start, mutated during crawling.
+_render_domains: set[str] = set()
+
+# Accumulated manual-review items (unresolvable embedded viewers) for CSV output.
+_manual_review: list[dict] = []
+
+# Lazy Playwright singleton — one headless Chromium reused across districts.
+_pw = None
+_browser = None
+_render_disabled = False
 
 
 # ---------------------------------------------------------------------------
@@ -692,6 +751,409 @@ def _extract_pdf_candidates(soup: BeautifulSoup, base_url: str, homepage: str) -
 
 
 # ---------------------------------------------------------------------------
+# Broadened on-page document discovery (Task #72)
+# ---------------------------------------------------------------------------
+
+def _is_pdf_url(abs_url: str, href: str = "") -> bool:
+    """True when a URL/href looks like a PDF (extension before any query)."""
+    return ".pdf" in (abs_url or "").lower().split("?")[0] or ".pdf" in (href or "").lower()
+
+
+def _resolve_viewer(url: str) -> tuple[Optional[str], bool]:
+    """Resolve an embedded-viewer URL to a direct document download.
+
+    Returns (download_url_or_None, is_viewer). When is_viewer is True but the
+    download URL is None, the caller logs it for manual review.
+    """
+    try:
+        parts = urlparse(url)
+    except Exception:
+        return None, False
+    host = parts.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+
+    # Google Drive: /file/d/<id>/..., open?id=<id>, uc?id=<id>
+    if "drive.google.com" in host:
+        m = re.search(r"/file/d/([A-Za-z0-9_-]+)", parts.path)
+        fid = m.group(1) if m else parse_qs(parts.query).get("id", [None])[0]
+        if fid:
+            return f"https://drive.google.com/uc?export=download&id={fid}", True
+        return None, True
+
+    # Google Docs viewer: docs.google.com/viewer?url=<encoded>
+    if "docs.google.com" in host:
+        target = parse_qs(parts.query).get("url", [None])[0]
+        return (target, True) if target else (None, True)
+
+    if any(host == h or host.endswith("." + h) for h in VIEWER_MANUAL_HOSTS):
+        return None, True
+
+    return None, False
+
+
+def _extract_document_candidates(soup, base_url: str, homepage: str) -> list[dict]:
+    """Broadened on-page document discovery.
+
+    Returns candidate dicts with keys: url, text, score, disc, off_domain,
+    needs_verify. ``disc`` is 'pdf_link' for a plain same-domain .pdf link
+    (handled exactly as before — the download-time %PDF check is its
+    verification) or 'onpage' for a broadened match (extensionless / doc-id
+    link, embedded viewer, iframe/embed src, or onclick/data-* attribute).
+    Unresolvable embedded viewers are appended to the module-level
+    ``_manual_review`` list instead of being returned as candidates.
+
+    found_via attribution is assigned by the caller (it depends on whether the
+    page was JS-rendered and how it was reached); this function only sets ``disc``.
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def _add(abs_url, text, disc):
+        if not abs_url or abs_url in seen:
+            return
+        if not abs_url.startswith(("http://", "https://")):
+            return
+        score = _score_pdf_text(f"{text} {abs_url}")
+        if score <= 0:
+            return
+        same = _same_domain(homepage, abs_url) if homepage else False
+        if disc == "pdf_link":
+            if not same:        # plain .pdf links stay on-domain (original rule)
+                return
+            out.append({"url": abs_url, "text": text, "score": score,
+                        "disc": "pdf_link", "off_domain": False, "needs_verify": False})
+        else:
+            out.append({"url": abs_url, "text": text, "score": score,
+                        "disc": "onpage", "off_domain": not same, "needs_verify": True})
+        seen.add(abs_url)
+
+    # 1. Anchor links
+    for a in soup.find_all("a", href=True):
+        href = a.get("href", "").strip()
+        if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+            continue
+        abs_url = urljoin(base_url, href)
+        text = a.get_text(" ", strip=True)
+        if _is_pdf_url(abs_url, href):
+            _add(abs_url, text, "pdf_link")
+            continue
+        resolved, is_viewer = _resolve_viewer(abs_url)
+        if is_viewer:
+            if resolved:
+                _add(resolved, text, "onpage")
+            elif _score_pdf_text(f"{text} {href}") > 0:
+                _manual_review.append({"url": abs_url, "page": base_url,
+                                       "text": text[:120], "reason": "viewer_unresolved"})
+            continue
+        hl = f"{href} {abs_url}".lower()
+        if any(tok in hl for tok in DOC_PATTERN_TOKENS) or DOC_ID_RE.search(urlparse(abs_url).path):
+            _add(abs_url, text, "onpage")
+
+    # 2. iframe / embed src (often a viewer or a direct PDF)
+    for tag in soup.find_all(("iframe", "embed")):
+        src = (tag.get("src") or "").strip()
+        if not src:
+            continue
+        abs_url = urljoin(base_url, src)
+        ctx = tag.get("title") or tag.get("name") or ""
+        resolved, is_viewer = _resolve_viewer(abs_url)
+        if is_viewer and resolved:
+            _add(resolved, ctx, "onpage")
+        elif is_viewer:
+            _manual_review.append({"url": abs_url, "page": base_url,
+                                   "text": str(ctx)[:120], "reason": "viewer_iframe_unresolved"})
+        elif _is_pdf_url(abs_url, src) or any(tok in abs_url.lower() for tok in DOC_PATTERN_TOKENS):
+            _add(abs_url, ctx, "onpage")
+
+    # 3. onclick / data-* attributes (window.open('/files/x.pdf'), data-href, ...)
+    for tag in soup.find_all(True):
+        for attr in ("data-href", "data-url", "data-file", "data-document", "onclick"):
+            val = tag.get(attr)
+            if not val:
+                continue
+            m = re.search(r"https?://[^\s'\"()]+", val)
+            cand = m.group(0) if m else None
+            if not cand:
+                m2 = re.search(r"['\"](/[^\s'\"()]+)['\"]", val)
+                cand = urljoin(base_url, m2.group(1)) if m2 else None
+            if not cand:
+                continue
+            text = tag.get_text(" ", strip=True)[:120]
+            if _is_pdf_url(cand, cand) or any(tok in cand.lower() for tok in DOC_PATTERN_TOKENS):
+                _add(cand, text, "onpage")
+
+    return out
+
+
+def _verify_pdf(session: requests.Session, url: str) -> bool:
+    """Ranged GET (first 1KB) to confirm a candidate is really a PDF.
+
+    Used for broadened/off-domain document candidates before counting them as
+    found. Requires an application/pdf Content-Type OR a %PDF magic header in
+    the first bytes. Results cached per-URL for the run.
+    """
+    if url in _verify_cache:
+        return _verify_cache[url]
+    ok = False
+    try:
+        _polite_wait(url)
+        r = session.get(
+            url,
+            headers={"User-Agent": BROWSER_UA, "Accept": "application/pdf,*/*",
+                     "Range": "bytes=0-1023"},
+            timeout=REQUEST_TIMEOUT, allow_redirects=True, stream=True,
+        )
+        if r.status_code in (200, 206):
+            ctype = r.headers.get("Content-Type", "").lower()
+            head = b""
+            try:
+                for chunk in r.iter_content(chunk_size=1024):
+                    head = chunk or b""
+                    break
+            except Exception:
+                head = b""
+            ok = ("application/pdf" in ctype) or (b"%PDF" in head[:1024])
+        r.close()
+    except Exception as e:
+        log.debug("  verify_pdf error for %s: %s", url, e)
+        ok = False
+    _verify_cache[url] = ok
+    return ok
+
+
+def _discover_sitemap_pages(session: requests.Session, homepage: str) -> list[str]:
+    """Fetch and parse the district's sitemap(s); return keyword-matched pages.
+
+    Tries /sitemap.xml and /sitemap_index.xml, follows a sitemap index one level
+    deep (capped), and returns same-domain URLs whose path matches a CBA/HR
+    keyword. Fails silently (returns []) so it never blocks the crawl.
+    """
+    try:
+        parts = urlparse(homepage)
+        base = f"{parts.scheme}://{parts.netloc}"
+    except Exception:
+        return []
+
+    def _read(url):
+        r = _fetch(session, url)
+        if r is None or not r.ok:
+            return None
+        return r.text
+
+    def _parse(text):
+        try:
+            root = ET.fromstring(text.encode("utf-8", "ignore"))
+        except Exception:
+            return None, []
+        rtag = root.tag.rsplit("}", 1)[-1].lower()
+        locs = [el.text.strip() for el in root.iter()
+                if el.tag.rsplit("}", 1)[-1].lower() == "loc" and el.text]
+        return rtag, locs
+
+    page_locs: list[str] = []
+    children: list[str] = []
+    for sm in (base + p for p in SITEMAP_PATHS):
+        text = _read(sm)
+        if not text:
+            continue
+        rtag, locs = _parse(text)
+        if rtag == "sitemapindex":
+            children.extend(locs)
+        else:
+            page_locs.extend(locs)
+
+    for child in children[:SITEMAP_MAX_CHILD_MAPS]:
+        text = _read(child)
+        if not text:
+            continue
+        _, locs = _parse(text)
+        page_locs.extend(locs)
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for u in page_locs:
+        if u in seen or not u.startswith(("http://", "https://")):
+            continue
+        seen.add(u)
+        if not _same_domain(homepage, u):
+            continue
+        if any(kw in u.lower() for kw in SITEMAP_KEYWORDS):
+            out.append(u)
+        if len(out) >= SITEMAP_MAX_PAGES:
+            break
+    return out
+
+
+# ---------------------------------------------------------------------------
+# JS rendering (Playwright + Nix chromium)
+# ---------------------------------------------------------------------------
+
+def _get_browser():
+    """Lazily launch a single headless Chromium (Nix) and reuse it.
+
+    Returns the browser, or None when Playwright/Chromium is unavailable (in
+    which case JS rendering is disabled for the rest of the run).
+    """
+    global _pw, _browser, _render_disabled
+    if _render_disabled:
+        return None
+    if _browser is not None:
+        return _browser
+    exe = shutil.which("chromium") or shutil.which("chromium-browser")
+    if not exe:
+        log.warning("  JS-render unavailable: no chromium on PATH — skipping renders")
+        _render_disabled = True
+        return None
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:
+        log.warning("  JS-render unavailable: playwright import failed (%s)", e)
+        _render_disabled = True
+        return None
+    try:
+        _pw = sync_playwright().start()
+        _browser = _pw.chromium.launch(
+            executable_path=exe, headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+        )
+        log.info("  JS-render: launched headless Chromium (%s)", exe)
+    except Exception as e:
+        log.warning("  JS-render unavailable: chromium launch failed (%s)", e)
+        _render_disabled = True
+        _browser = None
+        try:
+            if _pw:
+                _pw.stop()
+        except Exception:
+            pass
+        _pw = None
+    return _browser
+
+
+def _render_html(url: str) -> Optional[str]:
+    """Fetch a page with headless Chromium and return rendered HTML (or None)."""
+    browser = _get_browser()
+    if browser is None:
+        return None
+    ctx = None
+    try:
+        _polite_wait(url)
+        ctx = browser.new_context(user_agent=IL_CBA_BOT_UA)
+        page = ctx.new_page()
+        page.set_default_timeout(RENDER_GOTO_MS)
+        page.goto(url, wait_until="domcontentloaded", timeout=RENDER_GOTO_MS)
+        try:
+            page.wait_for_load_state("networkidle", timeout=RENDER_NETWORKIDLE_MS)
+        except Exception:
+            pass  # SPA/long-poll keeps the network busy — use the current DOM
+        return page.content()
+    except Exception as e:
+        log.info("  JS-render failed for %s: %s", url, str(e)[:120])
+        return None
+    finally:
+        if ctx is not None:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+
+
+def _close_browser():
+    global _pw, _browser
+    try:
+        if _browser is not None:
+            _browser.close()
+    except Exception:
+        pass
+    try:
+        if _pw is not None:
+            _pw.stop()
+    except Exception:
+        pass
+    _browser = None
+    _pw = None
+
+
+def _consider_html_fallback(current: Optional[dict], soup, page_url: str,
+                            rendered: bool) -> Optional[dict]:
+    """Return the better of ``current`` and this page as an HTML-contract source.
+
+    Conservative: the page must read like an actual agreement (length, repeated
+    ARTICLE headers, an "agreement" mention, and salary/wage terms), not merely
+    mention bargaining. Returns ``current`` unchanged when this page doesn't
+    qualify or doesn't beat the incumbent.
+    """
+    try:
+        text = soup.get_text(" ", strip=True)
+    except Exception:
+        return current
+    if len(text) < HTML_CONTRACT_MIN_CHARS:
+        return current
+    tl = text.lower()
+    if len(re.findall(r"\barticle\s+[ivxlc\d]", tl)) < HTML_CONTRACT_MIN_ARTICLES:
+        return current
+    if "agreement" not in tl:
+        return current
+    if not any(k in tl for k in ("salary", "wages", "compensation", "schedule", "stipend")):
+        return current
+    score = _score_text(text)
+    if score <= 0:
+        return current
+    if current is not None and current.get("score", 0) >= score:
+        return current
+    return {
+        "url": page_url,
+        "text": text,
+        "score": score,
+        "source_type": "html_contract",
+        "found_via": "html_contract",
+        "source_page": page_url,
+        "disc": "html",
+        "off_domain": False,
+        "needs_verify": False,
+        "verified_pdf": False,
+        "bargaining_unit": _classify_candidate(page_url, text[:2000]),
+    }
+
+
+def _coverage_stats(per_district: dict) -> dict:
+    """Summarise a per_district map into found total + counts by found_via."""
+    by_via: dict[str, int] = {}
+    found = 0
+    for e in per_district.values():
+        if e.get("status") != "found":
+            continue
+        found += 1
+        v = str(e.get("found_via", "direct_crawl"))
+        key = "search" if v.startswith("search_fallback") else v
+        by_via[key] = by_via.get(key, 0) + 1
+    return {"found": found, "by_via": by_via}
+
+
+def _write_manual_review_csv() -> int:
+    """Write accumulated manual-review viewer URLs to CSV. Returns row count."""
+    if not _manual_review:
+        return 0
+    IL_MANUAL_REVIEW_CSV.parent.mkdir(parents=True, exist_ok=True)
+    seen: set = set()
+    rows: list[dict] = []
+    for it in _manual_review:
+        k = (it.get("url"), it.get("page"))
+        if k in seen:
+            continue
+        seen.add(k)
+        rows.append(it)
+    fields = ["url", "page", "text", "reason"]
+    with open(IL_MANUAL_REVIEW_CSV, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        for it in rows:
+            w.writerow({k: it.get(k, "") for k in fields})
+    return len(rows)
+
+
+# ---------------------------------------------------------------------------
 # Per-district crawl
 # ---------------------------------------------------------------------------
 
@@ -702,32 +1164,96 @@ def _crawl_district(session: requests.Session, homepage: str, dry_run: bool) -> 
     best-scoring PDF per classified unit (teachers, support_staff, custodial,
     etc.) — or an empty list when none are found.
     """
+    domain = urlparse(homepage).netloc.lower()
+    if domain.startswith("www."):
+        domain = domain[4:]
+    render_budget = [RENDER_CAP_PER_DISTRICT]
+
+    def _maybe_render(url, static_soup, html_lower):
+        """Return rendered soup when the static page shows zero signal and a
+        render is available/budgeted; else None."""
+        if render_budget[0] <= 0 or _render_disabled:
+            return None
+        if static_soup is not None:
+            links = _extract_links(static_soup, url)
+            scored = any(l["score"] > 0 or l["nav_score"] > 0 for l in links)
+            if scored or ".pdf" in html_lower:
+                return None
+        rendered = _render_html(url)
+        render_budget[0] -= 1
+        if rendered:
+            _render_domains.add(domain)
+            return BeautifulSoup(rendered, "html.parser")
+        return None
+
+    def _collect_docs(soup, page_url, page_via, rendered):
+        """Extract + verify document candidates from a page, tagging provenance.
+
+        found_via precedence: js_render > onpage > sitemap > direct_crawl — we
+        attribute each doc to the most specific capability that rescued it.
+        """
+        kept = []
+        for c in _extract_document_candidates(soup, page_url, homepage):
+            if c.get("needs_verify"):
+                if not _verify_pdf(session, c["url"]):
+                    continue
+                c["verified_pdf"] = True
+            if rendered:
+                c["found_via"] = "js_render"
+            elif c["disc"] == "onpage":
+                c["found_via"] = "onpage"
+            elif page_via == "sitemap":
+                c["found_via"] = "sitemap"
+            else:
+                c["found_via"] = "direct_crawl"
+            c["source_page"] = page_url
+            kept.append(c)
+        return kept
+
+    pdf_candidates: list[dict] = []
+    html_fallback: Optional[dict] = None
+
+    # ----- Homepage (prefer JS render if this domain needed it before) -----
     log.info("  Fetching homepage: %s", homepage)
-    r = _fetch(session, homepage)
-    if r is None or not r.ok:
-        status = r.status_code if r else "timeout"
-        log.info("  Homepage not reachable (%s)", status)
-        return None
+    soup0 = None
+    final_url = homepage
+    rendered0 = False
+    if domain in _render_domains and not _render_disabled and render_budget[0] > 0:
+        rhtml = _render_html(homepage)
+        render_budget[0] -= 1
+        if rhtml:
+            soup0 = BeautifulSoup(rhtml, "html.parser")
+            rendered0 = True
+    if soup0 is None:
+        r = _fetch(session, homepage)
+        if r is None or not r.ok:
+            status = r.status_code if r else "timeout"
+            log.info("  Homepage not reachable (%s)", status)
+            return None
+        content_type = r.headers.get("Content-Type", "")
+        if "text/html" not in content_type and "xhtml" not in content_type:
+            log.info("  Non-HTML content-type (%s) — skipping", content_type)
+            return None
+        html = r.text
+        if _looks_like_login(r.url, html):
+            log.info("  Redirected to login page — skipping")
+            return None
+        final_url = r.url
+        soup0 = BeautifulSoup(html, "html.parser")
+        rsoup = _maybe_render(final_url, soup0, html.lower())
+        if rsoup is not None:
+            log.info("  Homepage had zero signal — re-fetched with JS render")
+            soup0 = rsoup
+            rendered0 = True
 
-    content_type = r.headers.get("Content-Type", "")
-    if "text/html" not in content_type and "xhtml" not in content_type:
-        log.info("  Non-HTML content-type (%s) — skipping", content_type)
-        return None
-
-    html = r.text
-    if _looks_like_login(r.url, html):
-        log.info("  Redirected to login page — skipping")
-        return None
-
-    soup0 = BeautifulSoup(html, "html.parser")
-
-    # Check for PDF candidates directly on the homepage (same-domain enforced inside)
-    pdf_candidates = _extract_pdf_candidates(soup0, r.url, homepage)
+    # Documents directly on the homepage (provenance-tagged)
+    pdf_candidates.extend(_collect_docs(soup0, final_url, "direct_crawl", rendered0))
+    html_fallback = _consider_html_fallback(html_fallback, soup0, final_url, rendered0)
 
     # Collect internal links to follow: strict CBA matches first, then broader
     # navigation links (Board, Human Resources, Staff, Documents, etc.) that may
     # lead to CBA pages even when they don't mention CBA directly.
-    all_links = _extract_links(soup0, r.url)
+    all_links = _extract_links(soup0, final_url)
     same_domain_links = [l for l in all_links if _same_domain(homepage, l["url"])]
 
     cba_links = sorted(
@@ -746,15 +1272,21 @@ def _crawl_district(session: requests.Session, homepage: str, dry_run: bool) -> 
 
     top_links = cba_links + nav_links
 
-    log.info("  Homepage: %d PDF candidates, %d links to follow (%d CBA + %d nav)",
-             len(pdf_candidates), len(top_links), len(cba_links), len(nav_links))
+    # Sitemap-seeded pages (new): keyword-matched CBA/HR pages from the sitemap.
+    sitemap_pages = _discover_sitemap_pages(session, homepage)
 
-    visited = {r.url, homepage}
+    log.info("  Homepage: %d doc candidates, %d links (%d CBA + %d nav), %d sitemap page(s)",
+             len(pdf_candidates), len(top_links), len(cba_links), len(nav_links),
+             len(sitemap_pages))
 
-    # Follow top links (up to MAX_HOPS deep)
-    queue = [(lnk["url"], lnk["text"], 1) for lnk in top_links]
+    visited = {final_url, homepage}
+
+    # Follow top links + sitemap pages (up to MAX_HOPS deep). Each queue item
+    # carries its provenance `via` so docs found there are attributed correctly.
+    queue = [(lnk["url"], lnk["text"], 1, "direct_crawl") for lnk in top_links]
+    queue += [(u, "sitemap", 1, "sitemap") for u in sitemap_pages if u not in visited]
     while queue:
-        link_url, link_text, depth = queue.pop(0)
+        link_url, link_text, depth, via = queue.pop(0)
         if link_url in visited:
             continue
         if depth > MAX_HOPS:
@@ -763,7 +1295,7 @@ def _crawl_district(session: requests.Session, homepage: str, dry_run: bool) -> 
             continue
         visited.add(link_url)
 
-        log.info("  Hop %d: %s  [%s]", depth, link_url, link_text[:60])
+        log.info("  Hop %d [%s]: %s  [%s]", depth, via, link_url, link_text[:50])
         r2 = _fetch(session, link_url)
         if r2 is None or not r2.ok:
             continue
@@ -774,7 +1306,11 @@ def _crawl_district(session: requests.Session, homepage: str, dry_run: bool) -> 
                 # Direct PDF link we followed
                 score = _score_pdf_text(link_url + " " + link_text)
                 if score > 0:
-                    pdf_candidates.append({"url": link_url, "text": link_text, "score": score})
+                    fv = "sitemap" if via == "sitemap" else "direct_crawl"
+                    pdf_candidates.append({"url": link_url, "text": link_text,
+                                           "score": score, "disc": "pdf_link",
+                                           "off_domain": False, "needs_verify": False,
+                                           "found_via": fv, "source_page": link_url})
             continue
 
         html2 = r2.text
@@ -782,9 +1318,17 @@ def _crawl_district(session: requests.Session, homepage: str, dry_run: bool) -> 
             continue
 
         soup2 = BeautifulSoup(html2, "html.parser")
-        new_pdfs = _extract_pdf_candidates(soup2, r2.url, homepage)
+        rendered2 = False
+        rsoup2 = _maybe_render(r2.url, soup2, html2.lower())
+        if rsoup2 is not None:
+            soup2 = rsoup2
+            rendered2 = True
+
+        new_pdfs = _collect_docs(soup2, r2.url, via, rendered2)
         pdf_candidates.extend(new_pdfs)
-        log.info("    Found %d PDF candidates on hop page", len(new_pdfs))
+        html_fallback = _consider_html_fallback(html_fallback, soup2, r2.url, rendered2)
+        log.info("    Found %d doc candidate(s) on hop page%s", len(new_pdfs),
+                 " (rendered)" if rendered2 else "")
 
         # At depth 1, also collect sub-links (for hop 2) — include nav-scored links
         # so pages like "Board of Education" lead us deeper toward the CBA PDF.
@@ -806,9 +1350,13 @@ def _crawl_district(session: requests.Session, homepage: str, dry_run: bool) -> 
                 key=lambda l: l["nav_score"], reverse=True,
             )[:MAX_CANDIDATES]
 
-            queue.extend([(l["url"], l["text"], 2) for l in cba_sub + nav_sub])
+            queue.extend([(l["url"], l["text"], 2, via) for l in cba_sub + nav_sub])
 
     if not pdf_candidates:
+        if html_fallback is not None:
+            log.info("  No downloadable doc — capturing HTML-contract text from %s",
+                     html_fallback["url"])
+            return [html_fallback]
         log.info("  No CBA PDF candidates found")
         return []
 
@@ -876,19 +1424,22 @@ def _save_crawl_state(state: dict):
 
 def _upsert_source_document(cur, district_id: int, source_url: str,
                             file_hash: str, storage_key: str,
-                            bargaining_unit: str = "teachers") -> Optional[int]:
+                            bargaining_unit: str = "teachers",
+                            source_type: str = "pdf") -> Optional[int]:
     cur.execute(
         """
         INSERT INTO source_documents
-            (district_id, doc_type, source_url, file_hash, storage_key, bargaining_unit)
-        VALUES (%s, 'cba_pdf', %s, %s, %s, %s)
+            (district_id, doc_type, source_url, file_hash, storage_key,
+             bargaining_unit, source_type)
+        VALUES (%s, 'cba_pdf', %s, %s, %s, %s, %s)
         ON CONFLICT (source_url, file_hash) DO UPDATE SET
             district_id     = COALESCE(EXCLUDED.district_id, source_documents.district_id),
             storage_key     = COALESCE(EXCLUDED.storage_key, source_documents.storage_key),
-            bargaining_unit = EXCLUDED.bargaining_unit
+            bargaining_unit = EXCLUDED.bargaining_unit,
+            source_type     = EXCLUDED.source_type
         RETURNING id
         """,
-        (district_id, source_url, file_hash, storage_key, bargaining_unit),
+        (district_id, source_url, file_hash, storage_key, bargaining_unit, source_type),
     )
     row = cur.fetchone()
     return row[0] if row else None
@@ -1043,6 +1594,53 @@ def _ensure_website_urls(conn):
 # Download + store a single classified PDF candidate
 # ---------------------------------------------------------------------------
 
+def _store_html_contract(cur, conn, district_id, candidate, dry_run):
+    """Store an HTML-contract page's extracted text as a source_document.
+
+    The full agreement is published as a web page (no downloadable file), so we
+    persist the page text (.txt) to object storage and record it with
+    source_type='html_contract' for the extractor to read directly.
+    """
+    page_url = candidate["url"]
+    unit     = candidate.get("bargaining_unit", "teachers")
+    text     = candidate.get("text", "") or ""
+
+    if dry_run:
+        log.info("[DRY-RUN] Would capture HTML contract [%s]: %s (%d chars)",
+                 unit, page_url, len(text))
+        return "found", {"status": "found", "url": page_url,
+                         "found_via": "html_contract", "bargaining_unit": unit,
+                         "source_type": "html_contract", "dry_run": True}
+
+    payload = text.encode("utf-8", "ignore")
+    file_hash   = common.sha256_bytes(payload)
+    storage_key = f"il/cba/{file_hash}.txt"
+
+    if _hash_already_stored(cur, district_id, file_hash):
+        log.info("  Duplicate HTML contract (hash already stored) — skipping")
+        return "skip", {"status": "skip", "url": page_url, "file_hash": file_hash,
+                        "reason": "duplicate", "bargaining_unit": unit,
+                        "source_type": "html_contract"}
+
+    IL_CBA_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    local_path = IL_CBA_DATA_DIR / f"{file_hash}.txt"
+    with open(local_path, "w", encoding="utf-8") as f:
+        f.write(text)
+    log.info("  Saved HTML-contract text: %s  (%.1f KB)",
+             local_path.name, len(payload) / 1024)
+
+    stored_key = common.upload_to_object_storage(local_path, storage_key)
+    doc_id = _upsert_source_document(cur, district_id, page_url, file_hash,
+                                     stored_key, unit, source_type="html_contract")
+    conn.commit()
+    log.info("  source_documents id=%s  unit=%s  (html_contract)", doc_id, unit)
+
+    return "found", {"status": "found", "url": page_url, "found_via": "html_contract",
+                     "bargaining_unit": unit, "storage_key": stored_key,
+                     "file_hash": file_hash, "doc_id": str(doc_id),
+                     "source_type": "html_contract"}
+
+
 def _store_candidate(cur, conn, session, district_id, candidate, homepage, dry_run):
     """Download, store, and insert one classified PDF candidate.
 
@@ -1054,10 +1652,18 @@ def _store_candidate(cur, conn, session, district_id, candidate, homepage, dry_r
     unit      = candidate.get("bargaining_unit", "teachers")
     found_via = candidate.get("found_via", "direct_crawl")
 
-    # Final domain guard (defense-in-depth). Search-fallback results may be
-    # off-domain — the search engine already vetted them — but direct-crawl
-    # candidates must stay on the district's own domain.
-    if found_via == "direct_crawl" and homepage and not _same_domain(homepage, pdf_url):
+    # HTML-contract pages have no downloadable file — store their text instead.
+    if candidate.get("source_type") == "html_contract":
+        return _store_html_contract(cur, conn, district_id, candidate, dry_run)
+
+    # Final domain guard (defense-in-depth). Off-domain candidates are allowed
+    # only when they came from a vetted path: search-fallback (the search engine
+    # vetted them) or a broadened on-page / JS-render discovery that we then
+    # confirmed with a ranged %PDF check. Unverified direct-crawl candidates must
+    # stay on the district's own domain.
+    off_domain = bool(homepage) and not _same_domain(homepage, pdf_url)
+    verified_pdf = bool(candidate.get("verified_pdf"))
+    if off_domain and found_via == "direct_crawl" and not verified_pdf:
         log.info("  Rejecting off-domain PDF URL (final check): %s", pdf_url)
         return "failed", {"status": "failed", "url": pdf_url,
                           "reason": "off_domain", "bargaining_unit": unit}
@@ -1125,7 +1731,11 @@ def _store_candidate(cur, conn, session, district_id, candidate, homepage, dry_r
 
 def crawl(dry_run: bool = False, limit: Optional[int] = None,
           target_rcdts: Optional[str] = None,
-          search_fallback: bool = False):
+          search_fallback: bool = False,
+          retry_failed: bool = False):
+    global _render_domains, _manual_review, _verify_cache
+    _manual_review = []
+    _verify_cache = {}
     conn = common.get_db_conn()
 
     # Always-on Serper discovery: when a Serper key is present, enable
@@ -1182,6 +1792,29 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
 
     state = _load_crawl_state()
     state["il_no_url"] = no_url_count
+
+    # Load the render-domain cache so domains that needed JS rendering before go
+    # straight to the browser this run.
+    _render_domains = set(state.get("render_domains", []))
+
+    # Snapshot the pre-run found counts (by method) for the before/after report.
+    baseline_stats = _coverage_stats(state["per_district"])
+
+    # --retry-failed: re-attempt districts previously marked failed/search_failed
+    # (which now benefit from sitemap discovery, JS rendering, and broadened
+    # on-page discovery). Snapshot the current state as a one-time baseline first.
+    if retry_failed:
+        if not IL_CBA_CRAWL_BASELINE.exists():
+            IL_CBA_CRAWL_BASELINE.parent.mkdir(parents=True, exist_ok=True)
+            if IL_CBA_CRAWL_STATE.exists():
+                shutil.copyfile(IL_CBA_CRAWL_STATE, IL_CBA_CRAWL_BASELINE)
+                log.info("Saved crawl-state baseline → %s", IL_CBA_CRAWL_BASELINE.name)
+        cleared = [r for r, e in state["per_district"].items()
+                   if e.get("status") in ("failed", "search_failed")]
+        for r in cleared:
+            del state["per_district"][r]
+        log.info("--retry-failed: cleared %d failed/search_failed district(s) for retry",
+                 len(cleared))
 
     # Record no_url entries in per_district so the schema is complete
     no_url_districts = _load_il_no_url_districts(conn)
@@ -1323,6 +1956,14 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
         and str(e.get("found_via", "")).startswith("search_fallback")
     )
     state["il_search_failed"]  = sum(1 for s in all_statuses if s == "search_failed")
+
+    # Per-method found counters (new capabilities) for visibility.
+    after_stats = _coverage_stats(state["per_district"])
+    for method in ("sitemap", "js_render", "onpage", "html_contract"):
+        state[f"il_found_via_{method}"] = after_stats["by_via"].get(method, 0)
+
+    # Persist the render-domain cache so future runs skip straight to rendering.
+    state["render_domains"] = sorted(_render_domains)
     _save_crawl_state(state)
 
     # Write unfound CSV
@@ -1330,6 +1971,12 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
         unfound_n = _write_unfound_csv(conn)
     else:
         unfound_n = len(districts) - found
+
+    # Manual-review CSV (unresolvable embedded viewers — Box/Issuu/Drive folders).
+    manual_n = 0 if dry_run else _write_manual_review_csv()
+
+    # Close the headless browser (if one was launched).
+    _close_browser()
 
     cur.close()
     conn.close()
@@ -1354,6 +2001,23 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
     print(f"  Skipped (done or dup):       {skipped:>6,}")
     if not dry_run:
         print(f"  Unfound CSV:                 {unfound_n:>6,} rows")
+        print(f"  Manual-review CSV:           {manual_n:>6,} rows")
+    print(f"{'='*65}")
+
+    # Before/after coverage by discovery method (cumulative found totals).
+    print("  Cumulative found by method (before → after this run):")
+    methods = ["direct_crawl", "sitemap", "js_render", "onpage",
+               "html_contract", "search"]
+    seen_methods = set(methods) | set(baseline_stats["by_via"]) | set(after_stats["by_via"])
+    for m in methods + sorted(seen_methods - set(methods)):
+        b = baseline_stats["by_via"].get(m, 0)
+        a = after_stats["by_via"].get(m, 0)
+        if b == 0 and a == 0:
+            continue
+        arrow = f"  (+{a - b})" if a != b else ""
+        print(f"    {m:<16} {b:>5,} → {a:>5,}{arrow}")
+    print(f"    {'TOTAL':<16} {baseline_stats['found']:>5,} → {after_stats['found']:>5,}"
+          f"  (+{after_stats['found'] - baseline_stats['found']})")
     print(f"{'='*65}\n")
 
 
@@ -1380,10 +2044,20 @@ if __name__ == "__main__":
             "not retried on subsequent runs."
         ),
     )
+    parser.add_argument(
+        "--retry-failed", action="store_true",
+        help=(
+            "Re-attempt districts previously recorded as failed/search_failed so "
+            "they benefit from the new sitemap discovery, JS-render fallback, and "
+            "broadened on-page document discovery. Snapshots the current crawl "
+            "state to il_cba_crawl.baseline.json once before clearing those rows."
+        ),
+    )
     args = parser.parse_args()
     crawl(
         dry_run=args.dry_run,
         limit=args.limit,
         target_rcdts=args.district,
         search_fallback=args.search_fallback,
+        retry_failed=args.retry_failed,
     )

@@ -28,6 +28,7 @@ export const sourceDocumentsTable = pgTable(
     sourceUrl: text("source_url").notNull(),
     fileHash: char("file_hash", { length: 64 }),
     storageKey: text("storage_key"),
+    sourceType: text("source_type").notNull().default("pdf"),
     schoolYear: varchar("school_year", { length: 7 }),
     retrievedAt: timestamp("retrieved_at", { withTimezone: true }).defaultNow(),
   },

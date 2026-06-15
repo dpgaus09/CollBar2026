@@ -39,12 +39,12 @@ outputType = "console"
 name = "pipeline: IL CBA Crawl"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "bash -c 'cd /home/runner/workspace/pipeline && python3 -u 11_crawl_il_cbas.py; echo \"[CRAWL DONE]\"; sleep infinity'"
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash -c 'cd /home/runner/workspace/pipeline && python3 -u 11_crawl_il_cbas.py --retry-failed; echo \"[CRAWL DONE]\"; sleep infinity'"
 
 [agent]
 stack = "PNPM_WORKSPACE"
