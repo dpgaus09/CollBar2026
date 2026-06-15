@@ -2,6 +2,7 @@ import { Router, type IRouter, type Request, type Response, type NextFunction } 
 import { db } from "@workspace/db";
 import { sql, type SQL } from "drizzle-orm";
 import { parseUnit } from "./bargaining-units.js";
+import { coerceId, coerceIds } from "../lib/coerce.js";
 
 const router: IRouter = Router();
 
@@ -93,7 +94,7 @@ router.get("/dashboard/districts", requireAuth, async (req: Request, res: Respon
       ORDER BY name
       LIMIT 5000
     `);
-    res.json({ districts: rows.rows });
+    res.json({ districts: coerceIds(rows.rows) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -140,7 +141,7 @@ router.get("/dashboard/districts/:id", canAccessDistrict, async (req: Request, r
     }[]).map((c) => ({ ...c, daysUntilExpiration: daysUntil(c.effective_end) }));
 
     res.json({
-      ...district,
+      ...coerceId(district),
       enrollmentBand: enrollmentBand(district.enrollment),
       currentContract: contracts[0] ?? null,
       recentContracts: contracts,

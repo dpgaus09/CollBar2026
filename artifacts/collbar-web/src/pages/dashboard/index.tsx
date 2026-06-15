@@ -198,7 +198,7 @@ function AdminDistrictPicker({
   const { data: myDistrict } = useMyDistrict(districtId);
 
   const filtered = (data?.districts ?? []).filter((d) => {
-    if (districtId != null && Number(d.id) === Number(districtId)) return false;
+    if (districtId != null && d.id === districtId) return false;
     return true;
   });
 

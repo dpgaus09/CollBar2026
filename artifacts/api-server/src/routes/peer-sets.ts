@@ -9,6 +9,7 @@ import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import React from "react";
 import { parseUnit } from "./bargaining-units.js";
+import { coerceIds } from "../lib/coerce.js";
 import { renderToBuffer } from "@react-pdf/renderer";
 import { BoardPacketPDF } from "./pdf-template.js";
 import type { BoardPacketProps, SettlementRow, PeerMedians } from "./pdf-template.js";
@@ -139,7 +140,7 @@ router.get(
            LIMIT 200`,
         ),
       );
-      res.json({ districts: rows.rows, total: rows.rows.length });
+      res.json({ districts: coerceIds(rows.rows), total: rows.rows.length });
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }
@@ -177,7 +178,7 @@ router.get(
             ORDER BY name
             LIMIT 20
           `);
-      res.json({ districts: rows.rows });
+      res.json({ districts: coerceIds(rows.rows) });
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }
