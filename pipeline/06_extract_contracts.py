@@ -41,6 +41,14 @@ MAX_TOKENS = 16000
 # Minimum chars for a text layer to count as "usable" (below this we OCR).
 MIN_TEXT_CHARS = 100
 
+# Bound text-layer reads so a pathological PDF (e.g. a 3,000-page combined
+# document) cannot exhaust memory. The LLM context is truncated to
+# MAX_TEXT_CHARS anyway, so once we have a comfortable buffer past that we stop
+# reading more pages. TEXT_LAYER_MAX_PAGES is a hard ceiling on pages scanned
+# per engine regardless of how little text each page yields.
+TEXT_LAYER_MAX_PAGES = 600
+TEXT_LAYER_STOP_CHARS = MAX_TEXT_CHARS * 2  # early-stop buffer (160k chars)
+
 # OCR configuration (scanned / image-only PDFs)
 OCR_DPI = 150               # render resolution for rasterizing pages
 OCR_MAX_PAGES = 60          # cap pages OCR'd per doc (most CBAs fit; bounds time)
@@ -182,10 +190,24 @@ def _text_layer(pdf_path: Path) -> tuple[str, bool]:
     try:
         import pdfplumber
         parts: list[str] = []
+        acc = 0
         with pdfplumber.open(pdf_path) as pdf:
             readable = True
-            for page in pdf.pages:
-                parts.append(page.extract_text() or "")
+            for i, page in enumerate(pdf.pages):
+                if i >= TEXT_LAYER_MAX_PAGES:
+                    log.debug(
+                        "pdfplumber stopped at %d pages for %s (cap)",
+                        TEXT_LAYER_MAX_PAGES, pdf_path.name,
+                    )
+                    break
+                txt = page.extract_text() or ""
+                parts.append(txt)
+                acc += len(txt)
+                # pdfplumber caches per-page layout objects; flush so memory does
+                # not grow unbounded on very large PDFs.
+                page.flush_cache()
+                if acc >= TEXT_LAYER_STOP_CHARS:
+                    break
         best = "\n\n".join(parts).strip()
     except Exception as e:
         log.debug("pdfplumber failed for %s: %s", pdf_path.name, e)
@@ -198,10 +220,15 @@ def _text_layer(pdf_path: Path) -> tuple[str, bool]:
         doc = pdfium.PdfDocument(str(pdf_path))
         readable = True
         parts = []
-        for i in range(len(doc)):
+        acc = 0
+        for i in range(min(len(doc), TEXT_LAYER_MAX_PAGES)):
             tp = doc[i].get_textpage()
-            parts.append(tp.get_text_range() or "")
+            txt = tp.get_text_range() or ""
             tp.close()
+            parts.append(txt)
+            acc += len(txt)
+            if acc >= TEXT_LAYER_STOP_CHARS:
+                break
         doc.close()
         alt = "\n\n".join(parts).strip()
         if len(alt) > len(best):
@@ -1094,6 +1121,10 @@ def derive_settlements(conn):
         off_sched   = prov.get("off_schedule_bonus_yr1", {}).get("val")
 
         try:
+            # Per-row SAVEPOINT: a single bad value (e.g. an LLM-misread
+            # base_increase_pct that overflows numeric(5,2)) must not abort the
+            # whole derive transaction and roll back every other settlement.
+            cur.execute("SAVEPOINT sp_settlement")
             cur.execute(
                 """
                 INSERT INTO settlements
@@ -1119,7 +1150,9 @@ def derive_settlements(conn):
                     source_doc_id,
                 ),
             )
-            if cur.rowcount > 0:
+            inserted = cur.rowcount > 0
+            cur.execute("RELEASE SAVEPOINT sp_settlement")
+            if inserted:
                 settlements_inserted += 1
                 stated_emitted.add(contract_id)
                 log.info(
@@ -1139,6 +1172,11 @@ def derive_settlements(conn):
                 stated_emitted.add(contract_id)  # still counts as handled
                 _skip("stated:conflict_already_exists")
         except Exception as e:
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT sp_settlement")
+                cur.execute("RELEASE SAVEPOINT sp_settlement")
+            except Exception:
+                pass
             log.warning("Settlement insert error for contract %d: %s", contract_id, e)
             _skip("stated:insert_error")
 
@@ -1292,6 +1330,9 @@ def derive_settlements(conn):
             off_sched  = prov.get("off_schedule_bonus_yr1", {}).get("val")
 
             try:
+                # Per-row SAVEPOINT (see PASS 1) so one overflow/bad value cannot
+                # abort the whole derive transaction.
+                cur.execute("SAVEPOINT sp_settlement")
                 cur.execute(
                     """
                     INSERT INTO settlements
@@ -1317,7 +1358,9 @@ def derive_settlements(conn):
                         source_doc_id,
                     ),
                 )
-                if cur.rowcount > 0:
+                inserted = cur.rowcount > 0
+                cur.execute("RELEASE SAVEPOINT sp_settlement")
+                if inserted:
                     settlements_inserted += 1
                     log.info(
                         "Settlement [ba_min_delta] district=%d contract=%d %s→%s "
@@ -1328,6 +1371,11 @@ def derive_settlements(conn):
                 else:
                     _skip("ba_min_delta:conflict_already_exists")
             except Exception as e:
+                try:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_settlement")
+                    cur.execute("RELEASE SAVEPOINT sp_settlement")
+                except Exception:
+                    pass
                 log.warning("Settlement insert error for contract %d: %s", contract_id, e)
                 _skip("ba_min_delta:insert_error")
 

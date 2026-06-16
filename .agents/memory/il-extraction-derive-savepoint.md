@@ -1,9 +1,24 @@
 ---
-name: Settlement derive vs. unit reclassification conflict
-description: Why backfill_contract_units must wrap each row in a SAVEPOINT or it aborts the whole settlement-derivation transaction.
+name: derive_settlements per-row SAVEPOINT
+description: Every per-row DB write inside derive_settlements (unit reclassification AND settlement INSERTs) must use a SAVEPOINT or one bad row aborts the whole transaction and rolls back all derived settlements.
 ---
 
-# backfill_contract_units must use per-row SAVEPOINT
+# Every per-row write in derive_settlements must use a SAVEPOINT
+
+**Rule:** in `derive_settlements` / `backfill_contract_units`
+(`pipeline/06_extract_contracts.py`), EVERY per-row DB write must be wrapped in
+its own SAVEPOINT with ROLLBACK TO on error, then continue. This covers two
+distinct failure modes seen in production:
+
+1. **Unit reclassification UPDATEs** — `UniqueViolation` against
+   `contracts_district_bargaining_unit_scope_start_unique`.
+2. **Settlement INSERTs (both `stated` and `ba_min_delta` passes)** — a single
+   `numeric field overflow` when an LLM-misread `base_increase_pct` exceeds
+   `numeric(5,2)` range (≥1000). A plain try/except that logs a WARNING is NOT
+   enough: the failed statement leaves the transaction aborted, so every later
+   `cur.execute` raises `InFailedSqlTransaction`, the function crashes, and the
+   final `conn.commit()` never runs — silently rolling back ALL otherwise-good
+   settlements (observed as batch districts showing 0 `stated` rows).
 
 **Rule:** any loop that UPDATEs `contracts.bargaining_unit` (reclassifying units
 during `derive_settlements` / `backfill_contract_units` in
