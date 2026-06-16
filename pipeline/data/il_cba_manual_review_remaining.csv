@@ -1,0 +1,4 @@
+district,host,page,rcdts,reason,recover_status,text,url
+Payson CUSD 1,app.box.com,http://www.cusd1.org/hr,01001001026,viewer_unresolved,needs_manual_download,Teacher CBA,https://app.box.com/s/fakeshareid
+Central CUSD 3,drive.google.com,http://www.cusd3.com/board,,viewer_unresolved,download_failed,Negotiated Agreement,https://drive.google.com/file/d/REALFILEIDXYZ/view
+CUSD 4,issuu.com,http://www.cusd4.com/staff,,viewer_iframe_unresolved,needs_manual_download,Master Agreement,https://issuu.com/somedistrict/docs/cba2024

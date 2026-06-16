@@ -212,6 +212,11 @@ _render_domains: set[str] = set()
 # Accumulated manual-review items (unresolvable embedded viewers) for CSV output.
 _manual_review: list[dict] = []
 
+# District currently being crawled — used to attribute manual-review viewer rows
+# back to a district (name/rcdts) so the recovery step (13_recover_viewer_cbas.py)
+# and human reviewers can act on il_cba_manual_review.csv.
+_current_district: dict = {}
+
 # Lazy Playwright singleton — one headless Chromium reused across districts.
 _pw = None
 _browser = None
@@ -792,6 +797,31 @@ def _resolve_viewer(url: str) -> tuple[Optional[str], bool]:
     return None, False
 
 
+def _manual_review_row(url: str, page: str, text: str, reason: str) -> dict:
+    """Build a manual-review CSV row, attributing it to the current district.
+
+    The host column lets the recovery step (13_recover_viewer_cbas.py) and human
+    reviewers group/sort by viewer platform; district/rcdts let it write a proper
+    source_documents row without re-deriving the district from the page host.
+    """
+    host = ""
+    try:
+        host = urlparse(url).netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+    except Exception:
+        pass
+    return {
+        "url":      url,
+        "page":     page,
+        "host":     host,
+        "district": _current_district.get("name", ""),
+        "rcdts":    _current_district.get("rcdts", ""),
+        "text":     (text or "")[:120],
+        "reason":   reason,
+    }
+
+
 def _extract_document_candidates(soup, base_url: str, homepage: str) -> list[dict]:
     """Broadened on-page document discovery.
 
@@ -843,8 +873,8 @@ def _extract_document_candidates(soup, base_url: str, homepage: str) -> list[dic
             if resolved:
                 _add(resolved, text, "onpage")
             elif _score_pdf_text(f"{text} {href}") > 0:
-                _manual_review.append({"url": abs_url, "page": base_url,
-                                       "text": text[:120], "reason": "viewer_unresolved"})
+                _manual_review.append(_manual_review_row(
+                    abs_url, base_url, text, "viewer_unresolved"))
             continue
         hl = f"{href} {abs_url}".lower()
         if any(tok in hl for tok in DOC_PATTERN_TOKENS) or DOC_ID_RE.search(urlparse(abs_url).path):
@@ -861,8 +891,8 @@ def _extract_document_candidates(soup, base_url: str, homepage: str) -> list[dic
         if is_viewer and resolved:
             _add(resolved, ctx, "onpage")
         elif is_viewer:
-            _manual_review.append({"url": abs_url, "page": base_url,
-                                   "text": str(ctx)[:120], "reason": "viewer_iframe_unresolved"})
+            _manual_review.append(_manual_review_row(
+                abs_url, base_url, str(ctx), "viewer_iframe_unresolved"))
         elif _is_pdf_url(abs_url, src) or any(tok in abs_url.lower() for tok in DOC_PATTERN_TOKENS):
             _add(abs_url, ctx, "onpage")
 
@@ -1144,7 +1174,7 @@ def _write_manual_review_csv() -> int:
             continue
         seen.add(k)
         rows.append(it)
-    fields = ["url", "page", "text", "reason"]
+    fields = ["url", "host", "district", "rcdts", "page", "text", "reason"]
     with open(IL_MANUAL_REVIEW_CSV, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
@@ -1860,6 +1890,8 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
 
         log.info("[ATTEMPT] %s (%s) → %s", name, rcdts, homepage or "(no URL — search-fallback only)")
         attempted += 1
+        global _current_district
+        _current_district = {"name": name, "rcdts": rcdts, "homepage": homepage}
 
         candidates: list[dict] = []
         if homepage:
