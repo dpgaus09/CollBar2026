@@ -1021,6 +1021,14 @@ def backfill_contract_units(conn) -> int:
     return updated
 
 
+# An LLM occasionally misreads a dollar figure as a percentage (e.g. a $4,500
+# base salary read as a 4500% raise). Any |base increase| beyond this bound is
+# implausible for a K-12 salary settlement, so derive_settlements flags it for
+# human review instead of inserting bad data or letting a numeric(5,2) overflow
+# silently drop the whole row.
+MAX_PLAUSIBLE_BASE_PCT = 50.0
+
+
 def derive_settlements(conn):
     """
     Derives settlements via two independent paths:
@@ -1058,9 +1066,23 @@ def derive_settlements(conn):
     stated_emitted: set[int] = set()   # contract IDs that already produced a row
     settlements_inserted = 0
     contracts_evaluated = 0
+    # Contracts whose stated/derived base % is implausibly large — collected so a
+    # short list can be surfaced for re-extraction / human review at the end.
+    flagged_for_review: list[tuple] = []  # (method, district_id, contract_id, source_doc_id, base_pct)
 
     def _skip(reason: str) -> None:
         skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+
+    def _flag_out_of_range(method: str, district_id, contract_id, source_doc_id,
+                           base_pct: float) -> None:
+        """Record an implausible base % for review instead of inserting it."""
+        flagged_for_review.append((method, district_id, contract_id, source_doc_id, base_pct))
+        _skip(f"{method}:base_pct_out_of_range")
+        log.warning(
+            "Contract %s (district=%s) [%s]: base_increase_pct=%.2f%% exceeds "
+            "+/-%.0f%% plausible range — flagged for review, not inserted",
+            contract_id, district_id, method, base_pct, MAX_PLAUSIBLE_BASE_PCT,
+        )
 
     # -------------------------------------------------------------------------
     # PASS 1 — 'stated' path
@@ -1119,6 +1141,13 @@ def derive_settlements(conn):
         yr2_val     = prov.get("base_salary_increase_yr2", {}).get("val")
         yr3_val     = prov.get("base_salary_increase_yr3", {}).get("val")
         off_sched   = prov.get("off_schedule_bonus_yr1", {}).get("val")
+
+        # Sanity guard: flag implausible base % (likely an LLM dollar→percent
+        # misread) for review rather than inserting bad data or relying on a DB
+        # numeric overflow to drop it.
+        if isinstance(base_pct, (int, float)) and abs(base_pct) > MAX_PLAUSIBLE_BASE_PCT:
+            _flag_out_of_range("stated", district_id, contract_id, source_doc_id, float(base_pct))
+            continue
 
         try:
             # Per-row SAVEPOINT: a single bad value (e.g. an LLM-misread
@@ -1329,6 +1358,14 @@ def derive_settlements(conn):
             yr3_val    = prov.get("base_salary_increase_yr3", {}).get("val")
             off_sched  = prov.get("off_schedule_bonus_yr1", {}).get("val")
 
+            # Sanity guard: a bad BA-min delta (e.g. a misread salary figure) can
+            # produce a wildly implausible implied increase. Flag for review
+            # rather than inserting it or relying on a DB numeric overflow.
+            if abs(base_pct) > MAX_PLAUSIBLE_BASE_PCT:
+                _flag_out_of_range("ba_min_delta", district_id, contract_id, source_doc_id, base_pct)
+                prev_ba_min, prev_ba_conf, prev_eff_end = next_ba_min, next_ba_conf, next_eff_end
+                continue
+
             try:
                 # Per-row SAVEPOINT (see PASS 1) so one overflow/bad value cannot
                 # abort the whole derive transaction.
@@ -1402,6 +1439,27 @@ def derive_settlements(conn):
     print(f"  {'Total skip events':<48} {total_skips:>6,}")
     print(f"  {'Settlements inserted':<48} {settlements_inserted:>6,}")
     print()
+
+    # -------------------------------------------------------------------------
+    # Flagged-for-review table — implausible base % values (likely LLM misreads
+    # of a dollar amount as a percent). These are NOT inserted; the source docs
+    # should be re-extracted or reviewed by a human.
+    # -------------------------------------------------------------------------
+    if flagged_for_review:
+        print(f"  Flagged for review — implausible base increase (|%| > {MAX_PLAUSIBLE_BASE_PCT:.0f}%)")
+        print(f"  {'method':<14}{'district':>9}{'contract':>10}{'source_doc':>12}{'base_pct':>12}")
+        print(f"  {'-'*57}")
+        SHOW = 25
+        for method, d_id, c_id, sd_id, bp in flagged_for_review[:SHOW]:
+            print(f"  {method:<14}{str(d_id):>9}{str(c_id):>10}{str(sd_id):>12}{bp:>10.2f}%")
+        if len(flagged_for_review) > SHOW:
+            print(f"  ... and {len(flagged_for_review) - SHOW:,} more")
+        print(f"  {'Total flagged for review':<48} {len(flagged_for_review):>6,}")
+        print()
+        log.warning(
+            "%d contract(s) had an implausible base_increase_pct and were flagged "
+            "for review instead of inserted", len(flagged_for_review),
+        )
 
     log.info(
         "Settlements derived: %d (evaluated %d contracts, %d skip events)",
