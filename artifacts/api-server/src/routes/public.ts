@@ -68,9 +68,9 @@ const BAND_LABELS: Record<string, string> = {
 const BAND_ORDER = ["tiny", "small", "medium", "large", "xlarge"];
 
 async function computeTrackerStats(state?: string): Promise<TrackerStats> {
-  const sc = state ? `AND d.state = '${state.replace(/'/g, "''")}'` : "";
+  const sc = state ? sql`AND d.state = ${state}` : sql.empty();
   const [globalRows, bandRows, newestRows] = await Promise.all([
-    db.execute(sql.raw(`
+    db.execute(sql`
       SELECT
         COUNT(*)::int                                                 AS total_settlements,
         COUNT(DISTINCT s.district_id)::int                           AS districts_covered,
@@ -82,8 +82,8 @@ async function computeTrackerStats(state?: string): Promise<TrackerStats> {
       FROM settlements s
       JOIN districts d ON s.district_id = d.id
       WHERE s.base_increase_pct IS NOT NULL ${sc}
-    `)),
-    db.execute(sql.raw(`
+    `),
+    db.execute(sql`
       SELECT
         CASE
           WHEN d.enrollment < 500  THEN 'tiny'
@@ -101,8 +101,8 @@ async function computeTrackerStats(state?: string): Promise<TrackerStats> {
         AND d.enrollment IS NOT NULL ${sc}
       GROUP BY band
       ORDER BY MIN(d.enrollment)
-    `)),
-    db.execute(sql.raw(`
+    `),
+    db.execute(sql`
       SELECT
         d.name   AS district_name,
         d.county,
@@ -124,7 +124,7 @@ async function computeTrackerStats(state?: string): Promise<TrackerStats> {
       WHERE s.base_increase_pct IS NOT NULL ${sc}
       ORDER BY s.id DESC
       LIMIT 30
-    `)),
+    `),
   ]);
 
   const g = (globalRows.rows[0] ?? {}) as Record<string, unknown>;
@@ -202,7 +202,8 @@ router.get(
         .setHeader("Cache-Control", "public, max-age=3600, s-maxage=3600")
         .json(stats);
     } catch (err) {
-      res.status(500).json({ error: String(err) });
+      console.error(err);
+      res.status(500).json({ error: "Internal server error" });
     }
   },
 );
@@ -220,10 +221,8 @@ router.get(
 
     try {
       const districtRows = await db.execute(
-        sql.raw(
-          `SELECT id, name, county, district_type, enrollment, slug, state
-           FROM districts WHERE slug = '${slug.replace(/'/g, "''")}' LIMIT 1`,
-        ),
+        sql`SELECT id, name, county, district_type, enrollment, slug, state
+            FROM districts WHERE slug = ${slug} LIMIT 1`,
       );
       if (districtRows.rows.length === 0) {
         res.status(404).json({ error: "District not found" });
@@ -236,19 +235,19 @@ router.get(
       const districtId = Number(d.id);
 
       const [settleRows, contractRows, compRows] = await Promise.all([
-        db.execute(sql.raw(`
+        db.execute(sql`
           SELECT from_year, to_year, base_increase_pct, year2_pct, year3_pct,
                  term_years, human_verified
           FROM settlements
           WHERE district_id = ${districtId} AND base_increase_pct IS NOT NULL
           ORDER BY from_year DESC NULLS LAST, id DESC LIMIT 1
-        `)),
-        db.execute(sql.raw(`
+        `),
+        db.execute(sql`
           SELECT effective_start, effective_end, term_years, union_name
           FROM contracts WHERE district_id = ${districtId}
           ORDER BY effective_end DESC NULLS LAST LIMIT 1
-        `)),
-        db.execute(sql.raw(`
+        `),
+        db.execute(sql`
           SELECT d2.name, d2.county, d2.slug,
             (SELECT base_increase_pct FROM settlements
              WHERE district_id = d2.id AND base_increase_pct IS NOT NULL
@@ -257,12 +256,12 @@ router.get(
              WHERE district_id = d2.id AND base_increase_pct IS NOT NULL
              ORDER BY from_year DESC LIMIT 1)  AS term_years
           FROM districts d2
-          WHERE d2.county = '${(d.county ?? "").replace(/'/g, "''")}'
+          WHERE d2.county = ${d.county ?? ""}
             AND d2.id != ${districtId}
-            AND d2.state = '${(d.state ?? "OH").replace(/'/g, "''")}'
+            AND d2.state = ${d.state ?? "OH"}
           ORDER BY RANDOM()
           LIMIT 3
-        `)),
+        `),
       ]);
 
       res
@@ -274,7 +273,8 @@ router.get(
           comparables: compRows.rows,
         });
     } catch (err) {
-      res.status(500).json({ error: String(err) });
+      console.error(err);
+      res.status(500).json({ error: "Internal server error" });
     }
   },
 );
@@ -288,15 +288,16 @@ router.get(
   publicRateLimit,
   async (_req: Request, res: Response) => {
     try {
-      const rows = await db.execute(sql.raw(
-        `SELECT id, slug, name, county, updated_at
-         FROM districts WHERE slug IS NOT NULL ORDER BY name`,
-      ));
+      const rows = await db.execute(sql`
+        SELECT id, slug, name, county, updated_at
+        FROM districts WHERE slug IS NOT NULL ORDER BY name
+      `);
       res
         .setHeader("Cache-Control", "public, max-age=86400, s-maxage=86400")
         .json({ districts: rows.rows, total: rows.rows.length });
     } catch (err) {
-      res.status(500).json({ error: String(err) });
+      console.error(err);
+      res.status(500).json({ error: "Internal server error" });
     }
   },
 );

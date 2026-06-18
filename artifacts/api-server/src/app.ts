@@ -39,7 +39,32 @@ app.use(
   }),
 );
 
-app.use(cors({ origin: true, credentials: true }));
+// CORS — restrict credentialed cross-origin requests to known frontend
+// origins. In dev the frontend reaches the API same-origin through the Vite
+// proxy, so no Origin header is sent; non-browser requests (curl, server-to-
+// server) also omit it and are allowed. Unknown browser origins simply receive
+// no CORS headers (the browser then blocks the response) rather than a 500.
+const allowedOrigins = new Set(
+  [
+    ...(process.env.FRONTEND_URL ?? "http://localhost:5173")
+      .split(",")
+      .map((o) => o.trim()),
+    process.env.APP_URL,
+  ].filter((o): o is string => !!o),
+);
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.has(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(null, false);
+    },
+    credentials: true,
+  }),
+);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 

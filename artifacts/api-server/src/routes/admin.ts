@@ -120,8 +120,10 @@ router.get("/admin/session", (req, res) => {
 // POST /admin/logout
 // ---------------------------------------------------------------------------
 router.post("/admin/logout", (req, res) => {
-  req.session.destroy(() => {});
-  res.json({ ok: true });
+  req.session.destroy((err) => {
+    if (err) console.error("Session destroy error during admin logout:", err);
+    res.json({ ok: true });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -710,7 +712,8 @@ router.get("/admin/extraction-report", requireAdminToken, async (_req, res) => {
       failedDocs,
     });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -808,7 +811,8 @@ router.get("/admin/review-queue", requireAdminToken, async (req, res) => {
       pages: Math.ceil(total / limit),
     });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -861,7 +865,8 @@ router.get("/admin/alerts", requireAdminToken, async (req, res) => {
       pendingCount,
     });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -900,7 +905,8 @@ router.post(
       }
       res.json({ ok: true });
     } catch (err) {
-      res.status(500).json({ error: String(err) });
+      console.error(err);
+      res.status(500).json({ error: "Internal server error" });
     }
   },
 );
@@ -981,7 +987,8 @@ router.patch("/admin/review-queue/:id", requireAdminToken, async (req, res) => {
     }
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -1084,7 +1091,8 @@ router.get("/admin/il-eis-crosscheck", requireAdminToken, async (req, res) => {
       pages: Math.ceil((countRow.rows[0] as { n: number }).n / limit),
     });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -1146,7 +1154,8 @@ router.post("/admin/start-il-crawl", requireAdminToken, (req, res) => {
     const result = spawnIlCrawl(extraArgs);
     res.json({ ...result, log: IL_CRAWL_LOG });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -1213,7 +1222,8 @@ router.post("/admin/run-extraction-cron", requireAdminToken, (_req, res) => {
     const result = spawnExtractionCron();
     res.json({ ...result, log: EXTRACTION_CRON_LOG });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -1305,7 +1315,8 @@ router.post("/admin/retry-extraction", requireAdminToken, (req, res) => {
     const result = spawnExtractionRetry(docId);
     res.json({ ...result, log: EXTRACTION_RETRY_LOG, docId: docId ?? null });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -1508,7 +1519,8 @@ router.post("/admin/upload-cba", requireAdminToken, (req, res) => {
       return;
     }
     handleCbaUpload(req, res).catch((e) => {
-      res.status(500).json({ error: String(e) });
+      console.error(e);
+      res.status(500).json({ error: "Internal server error" });
     });
   });
 });
@@ -1554,7 +1566,8 @@ router.post("/admin/run-directory-refresh", requireAdminToken, (_req, res) => {
     const result = spawnDirectoryRefresh();
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -1589,7 +1602,8 @@ router.get("/admin/directory-refresh-status", requireAdminToken, async (_req, re
 
     res.json({ running, pid: _refreshPid, latest, il_with_url: ilWithUrl });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -1611,7 +1625,8 @@ router.get("/admin/customers", requireAdminToken, async (_req, res) => {
     `);
     res.json({ customers: rows.rows });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -1646,7 +1661,8 @@ router.post("/admin/customers", requireAdminToken, async (req, res) => {
     if (msg.includes("unique") || msg.includes("duplicate")) {
       res.status(409).json({ error: "This email is already registered" });
     } else {
-      res.status(500).json({ error: msg });
+      console.error(err);
+      res.status(500).json({ error: "Internal server error" });
     }
   }
 });
@@ -1685,7 +1701,8 @@ router.patch("/admin/customers/:id", requireAdminToken, async (req, res) => {
     }
     res.json({ customer: updated.rows[0] });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -1716,7 +1733,8 @@ router.patch("/admin/customers/:id/password", requireAdminToken, async (req, res
     }
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -1731,7 +1749,8 @@ router.delete("/admin/customers/:id", requireAdminToken, async (req, res) => {
     await db.execute(sql`DELETE FROM users WHERE id = ${id} AND role = 'district_user'`);
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 

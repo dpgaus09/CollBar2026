@@ -403,7 +403,8 @@ ${footer()}`;
         }),
       );
   } catch (err) {
-    res.status(500).send(`<pre>Error: ${esc(String(err))}</pre>`);
+    console.error(err);
+    res.status(500).send(`<pre>Internal server error</pre>`);
   }
 });
 
@@ -419,10 +420,8 @@ router.get("/oh/:slug", async (req: Request, res: Response) => {
 
   try {
     const districtRows = await db.execute(
-      sql.raw(
-        `SELECT id, name, county, district_type, enrollment, slug
-         FROM districts WHERE slug = '${rawSlug.replace(/'/g, "''")}' AND state = 'OH' LIMIT 1`,
-      ),
+      sql`SELECT id, name, county, district_type, enrollment, slug
+          FROM districts WHERE slug = ${rawSlug} AND state = 'OH' LIMIT 1`,
     );
     if (districtRows.rows.length === 0) {
       res.status(404).send(
@@ -447,18 +446,18 @@ router.get("/oh/:slug", async (req: Request, res: Response) => {
     const districtId = Number(d.id);
 
     const [settleRows, contractRows, compRows] = await Promise.all([
-      db.execute(sql.raw(`
+      db.execute(sql`
         SELECT from_year, to_year, base_increase_pct, year2_pct, year3_pct, term_years, human_verified
         FROM settlements
         WHERE district_id = ${districtId} AND base_increase_pct IS NOT NULL
         ORDER BY from_year DESC NULLS LAST, id DESC LIMIT 1
-      `)),
-      db.execute(sql.raw(`
+      `),
+      db.execute(sql`
         SELECT effective_start, effective_end, term_years, union_name
         FROM contracts WHERE district_id = ${districtId}
         ORDER BY effective_end DESC NULLS LAST LIMIT 1
-      `)),
-      db.execute(sql.raw(`
+      `),
+      db.execute(sql`
         SELECT d2.name, d2.county, d2.slug,
           (SELECT base_increase_pct FROM settlements
            WHERE district_id = d2.id AND base_increase_pct IS NOT NULL
@@ -467,11 +466,11 @@ router.get("/oh/:slug", async (req: Request, res: Response) => {
            WHERE district_id = d2.id AND base_increase_pct IS NOT NULL
            ORDER BY from_year DESC LIMIT 1) AS term_years
         FROM districts d2
-        WHERE d2.county = '${(d.county ?? "").replace(/'/g, "''")}'
+        WHERE d2.county = ${d.county ?? ""}
           AND d2.id != ${districtId}
           AND d2.state = 'OH'
         ORDER BY RANDOM() LIMIT 3
-      `)),
+      `),
     ]);
 
     const s = (settleRows.rows[0] ?? null) as Record<string, unknown> | null;
@@ -648,7 +647,8 @@ ${footer()}`;
         }),
       );
   } catch (err) {
-    res.status(500).send(`<html><body><pre>Error: ${esc(String(err))}</pre></body></html>`);
+    console.error(err);
+    res.status(500).send(`<html><body><pre>Internal server error</pre></body></html>`);
   }
 });
 
@@ -664,10 +664,8 @@ router.get("/il/:slug", async (req: Request, res: Response) => {
 
   try {
     const districtRows = await db.execute(
-      sql.raw(
-        `SELECT id, name, county, district_type, enrollment, slug
-         FROM districts WHERE slug = '${rawSlug.replace(/'/g, "\'\''")}' AND state = 'IL' LIMIT 1`,
-      ),
+      sql`SELECT id, name, county, district_type, enrollment, slug
+          FROM districts WHERE slug = ${rawSlug} AND state = 'IL' LIMIT 1`,
     );
     if (districtRows.rows.length === 0) {
       res.status(404).send(
@@ -692,18 +690,18 @@ router.get("/il/:slug", async (req: Request, res: Response) => {
     const districtId = Number(d.id);
 
     const [settleRows, contractRows, compRows] = await Promise.all([
-      db.execute(sql.raw(`
+      db.execute(sql`
         SELECT from_year, to_year, base_increase_pct, year2_pct, year3_pct, term_years, human_verified
         FROM settlements
         WHERE district_id = ${districtId} AND base_increase_pct IS NOT NULL
         ORDER BY from_year DESC NULLS LAST, id DESC LIMIT 1
-      `)),
-      db.execute(sql.raw(`
+      `),
+      db.execute(sql`
         SELECT effective_start, effective_end, term_years, union_name
         FROM contracts WHERE district_id = ${districtId}
         ORDER BY effective_end DESC NULLS LAST LIMIT 1
-      `)),
-      db.execute(sql.raw(`
+      `),
+      db.execute(sql`
         SELECT d2.name, d2.county, d2.slug,
           (SELECT base_increase_pct FROM settlements
            WHERE district_id = d2.id AND base_increase_pct IS NOT NULL
@@ -712,11 +710,11 @@ router.get("/il/:slug", async (req: Request, res: Response) => {
            WHERE district_id = d2.id AND base_increase_pct IS NOT NULL
            ORDER BY from_year DESC LIMIT 1) AS term_years
         FROM districts d2
-        WHERE d2.county = '${(d.county ?? "").replace(/'/g, "\'\''")}' 
+        WHERE d2.county = ${d.county ?? ""}
           AND d2.id != ${districtId}
           AND d2.state = 'IL'
         ORDER BY RANDOM() LIMIT 3
-      `)),
+      `),
     ]);
 
     const s = (settleRows.rows[0] ?? null) as Record<string, unknown> | null;
@@ -862,7 +860,8 @@ ${footer()}`;
         }),
       );
   } catch (err) {
-    res.status(500).send(`<html><body><pre>Error: ${esc(String(err))}</pre></body></html>`);
+    console.error(err);
+    res.status(500).send(`<html><body><pre>Internal server error</pre></body></html>`);
   }
 });
 
@@ -872,9 +871,9 @@ ${footer()}`;
 
 router.get("/sitemap.xml", async (_req: Request, res: Response) => {
   try {
-    const rows = await db.execute(sql.raw(
-      `SELECT slug, state, updated_at FROM districts WHERE slug IS NOT NULL ORDER BY name`,
-    ));
+    const rows = await db.execute(sql`
+      SELECT slug, state, updated_at FROM districts WHERE slug IS NOT NULL ORDER BY name
+    `);
     const today = new Date().toISOString().slice(0, 10);
     const urls = (rows.rows as Array<{ slug: string; state: string; updated_at: unknown }>).map((r) => {
       const lastmod = r.updated_at
@@ -908,7 +907,8 @@ router.get("/sitemap.xml", async (_req: Request, res: Response) => {
       .setHeader("Content-Type", "application/xml; charset=utf-8")
       .send(xml);
   } catch (err) {
-    res.status(500).send(`<!-- error: ${esc(String(err))} -->`);
+    console.error(err);
+    res.status(500).send(`<!-- internal server error -->`);
   }
 });
 

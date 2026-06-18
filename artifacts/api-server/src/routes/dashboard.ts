@@ -96,7 +96,8 @@ router.get("/dashboard/districts", requireAuth, async (req: Request, res: Respon
     `);
     res.json({ districts: coerceIds(rows.rows) });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -147,7 +148,8 @@ router.get("/dashboard/districts/:id", canAccessDistrict, async (req: Request, r
       recentContracts: contracts,
     });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -179,7 +181,8 @@ router.get("/dashboard/districts/:id/provisions", canAccessDistrict, async (req:
     `);
     res.json({ provisions: rows.rows });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -293,7 +296,8 @@ router.get("/dashboard/districts/:id/settlements", canAccessDistrict, async (req
       availableUnits: unitRows.rows,
     });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -317,7 +321,8 @@ router.get("/dashboard/districts/:id/factfinding", canAccessDistrict, async (req
     `);
     res.json({ proposals: rows.rows });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -372,7 +377,8 @@ router.get("/dashboard/medians", requireAuth, async (req: Request, res: Response
       },
     });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -527,7 +533,8 @@ router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Resp
       peer_set_name: peerSetName,
     });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -568,7 +575,8 @@ router.get("/dashboard/expiration-calendar", requireAdmin, async (_req: Request,
 
     res.json({ months, totalContracts: rows.rows.length });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -583,7 +591,8 @@ router.get("/dashboard/counties", requireAuth, async (req: Request, res: Respons
       : await db.execute(sql`SELECT DISTINCT county FROM districts WHERE county IS NOT NULL ORDER BY county`);
     res.json({ counties: (rows.rows as { county: string }[]).map((r) => r.county) });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -598,7 +607,8 @@ router.get("/dashboard/district-types", requireAuth, async (req: Request, res: R
       : await db.execute(sql`SELECT DISTINCT district_type FROM districts WHERE district_type IS NOT NULL ORDER BY district_type`);
     res.json({ districtTypes: (rows.rows as { district_type: string }[]).map((r) => r.district_type) });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -651,7 +661,8 @@ router.get("/dashboard/provision-medians", requireAuth, async (req: Request, res
 
     res.json({ medians, n: totalN });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -771,7 +782,8 @@ router.get("/dashboard/acceptance", requireAdmin, async (_req: Request, res: Res
       factfinding_gaps: factfindingGaps.rows,
     });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 

@@ -212,8 +212,10 @@ router.get("/auth/me", (req: Request, res: Response) => {
 // POST /api/auth/logout
 // ============================================================================
 router.post("/auth/logout", (req: Request, res: Response) => {
-  req.session.destroy(() => {});
-  res.json({ ok: true });
+  req.session.destroy((err) => {
+    if (err) console.error("Session destroy error during logout:", err);
+    res.json({ ok: true });
+  });
 });
 
 export default router;

@@ -6,7 +6,7 @@ import {
   type NextFunction,
 } from "express";
 import { db } from "@workspace/db";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import React from "react";
 import { parseUnit } from "./bargaining-units.js";
 import { coerceIds } from "../lib/coerce.js";
@@ -32,42 +32,53 @@ function requireAuth(req: Request, res: Response, next: NextFunction): void {
 // Band helper (mirrors dashboard.ts)
 // ---------------------------------------------------------------------------
 
-function bandWhere(band: string, alias = "d"): string | null {
-  const map: Record<string, string> = {
-    tiny: `${alias}.enrollment < 500`,
-    small: `${alias}.enrollment BETWEEN 500 AND 999`,
-    medium: `${alias}.enrollment BETWEEN 1000 AND 2499`,
-    large: `${alias}.enrollment BETWEEN 2500 AND 4999`,
-    xlarge: `${alias}.enrollment >= 5000`,
-  };
-  return map[band] ?? null;
+// Build a band predicate as a parameterized SQL fragment. The alias prefix is
+// an internal, code-controlled value ("d" or "") — never user input — so it is
+// safe to inline via sql.raw. The numeric thresholds are static SQL literals.
+function bandWhereSql(band: string, alias = "d"): SQL | null {
+  const p = sql.raw(alias ? `${alias}.` : "");
+  switch (band) {
+    case "tiny":
+      return sql`${p}enrollment < 500`;
+    case "small":
+      return sql`${p}enrollment BETWEEN 500 AND 999`;
+    case "medium":
+      return sql`${p}enrollment BETWEEN 1000 AND 2499`;
+    case "large":
+      return sql`${p}enrollment BETWEEN 2500 AND 4999`;
+    case "xlarge":
+      return sql`${p}enrollment >= 5000`;
+    default:
+      return null;
+  }
 }
 
-// Build WHERE fragment for district filters (no alias prefix issues)
+// Build a WHERE predicate for district filters as a parameterized SQL fragment.
+// User-supplied values (county, district_type, valuation bounds) are bound as
+// parameters; the alias prefix is code-controlled (see bandWhereSql).
 function buildDistrictFilters(
   filters: Record<string, unknown>,
   alias = "d",
-): string {
-  const parts: string[] = [];
+): SQL | null {
+  const p = sql.raw(alias ? `${alias}.` : "");
+  const parts: SQL[] = [];
   if (filters.county && typeof filters.county === "string") {
-    parts.push(`${alias}.county = '${filters.county.replace(/'/g, "''")}'`);
+    parts.push(sql`${p}county = ${filters.county}`);
   }
   if (filters.district_type && typeof filters.district_type === "string") {
-    parts.push(
-      `${alias}.district_type = '${filters.district_type.replace(/'/g, "''")}'`,
-    );
+    parts.push(sql`${p}district_type = ${filters.district_type}`);
   }
   if (filters.band && typeof filters.band === "string") {
-    const b = bandWhere(filters.band, alias);
+    const b = bandWhereSql(filters.band, alias);
     if (b) parts.push(b);
   }
   if (filters.valuation_min != null) {
-    parts.push(`${alias}.valuation >= ${Number(filters.valuation_min)}`);
+    parts.push(sql`${p}valuation >= ${Number(filters.valuation_min)}`);
   }
   if (filters.valuation_max != null) {
-    parts.push(`${alias}.valuation <= ${Number(filters.valuation_max)}`);
+    parts.push(sql`${p}valuation <= ${Number(filters.valuation_max)}`);
   }
-  return parts.length > 0 ? parts.join(" AND ") : "";
+  return parts.length > 0 ? sql.join(parts, sql` AND `) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -111,18 +122,13 @@ router.get(
       : null;
     const state = req.query.state ? String(req.query.state).toUpperCase() : null;
 
-    const parts: string[] = [];
-    if (state) parts.push(`state = '${state.replace(/'/g, "''")}'`);
-    if (county) parts.push(`county = '${county.replace(/'/g, "''")}'`);
-    if (districtType)
-      parts.push(`district_type = '${districtType.replace(/'/g, "''")}'`);
+    const parts: SQL[] = [];
+    if (state) parts.push(sql`state = ${state}`);
+    if (county) parts.push(sql`county = ${county}`);
+    if (districtType) parts.push(sql`district_type = ${districtType}`);
     if (band) {
-      const b = bandWhere(band, "");
-      // bandWhere uses alias prefix; strip alias since no alias here
-      const stripped = b
-        ? b.replace(/\bd\./g, "")
-        : null;
-      if (stripped) parts.push(stripped);
+      const b = bandWhereSql(band, "");
+      if (b) parts.push(b);
     }
 
     if (parts.length === 0) {
@@ -131,18 +137,18 @@ router.get(
     }
 
     try {
+      const where = sql.join(parts, sql` AND `);
       const rows = await db.execute(
-        sql.raw(
-          `SELECT id, name, county, district_type, enrollment
-           FROM districts
-           WHERE ${parts.join(" AND ")}
-           ORDER BY name
-           LIMIT 200`,
-        ),
+        sql`SELECT id, name, county, district_type, enrollment
+            FROM districts
+            WHERE ${where}
+            ORDER BY name
+            LIMIT 200`,
       );
       res.json({ districts: coerceIds(rows.rows), total: rows.rows.length });
     } catch (err) {
-      res.status(500).json({ error: String(err) });
+      console.error(err);
+      res.status(500).json({ error: "Internal server error" });
     }
   },
 );
@@ -180,7 +186,8 @@ router.get(
           `);
       res.json({ districts: coerceIds(rows.rows) });
     } catch (err) {
-      res.status(500).json({ error: String(err) });
+      console.error(err);
+      res.status(500).json({ error: "Internal server error" });
     }
   },
 );
@@ -201,7 +208,8 @@ router.get("/peer-sets", requireAuth, async (req: Request, res: Response) => {
     `);
     res.json({ peerSets: rows.rows });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -225,10 +233,10 @@ router.post("/peer-sets", requireAuth, async (req: Request, res: Response) => {
   const ids = district_ids.map(Number).filter((n) => !isNaN(n));
 
   if (ids.length > 0) {
-    const idList = ids.join(",");
-    const stateRows = await db.execute(sql.raw(
-      `SELECT DISTINCT state FROM districts WHERE id IN (${idList})`,
-    ));
+    const idFragment = sql.join(ids.map((n) => sql`${n}`), sql`, `);
+    const stateRows = await db.execute(
+      sql`SELECT DISTINCT state FROM districts WHERE id IN (${idFragment})`,
+    );
     const states = (stateRows.rows as { state: string }[]).map((r) => r.state);
     if (states.length > 1) {
       res.status(400).json({
@@ -266,7 +274,8 @@ router.post("/peer-sets", requireAuth, async (req: Request, res: Response) => {
       `);
       res.status(201).json({ peerSet: rows.rows[0] });
     } catch (err2) {
-      res.status(500).json({ error: String(err2) });
+      console.error(err2);
+      res.status(500).json({ error: "Internal server error" });
     }
   }
 });
@@ -313,10 +322,10 @@ router.put(
     const ids = (district_ids ?? ps.district_ids).map(Number).filter((n) => !isNaN(n));
 
     if (ids.length > 0) {
-      const idList = ids.join(",");
-      const stateRows = await db.execute(sql.raw(
-        `SELECT DISTINCT state FROM districts WHERE id IN (${idList})`,
-      ));
+      const idFragment = sql.join(ids.map((n) => sql`${n}`), sql`, `);
+      const stateRows = await db.execute(
+        sql`SELECT DISTINCT state FROM districts WHERE id IN (${idFragment})`,
+      );
       const states = (stateRows.rows as { state: string }[]).map((r) => r.state);
       if (states.length > 1) {
         res.status(400).json({
@@ -342,7 +351,8 @@ router.put(
       `);
       res.json({ peerSet: rows.rows[0] });
     } catch (err) {
-      res.status(500).json({ error: String(err) });
+      console.error(err);
+      res.status(500).json({ error: "Internal server error" });
     }
   },
 );
@@ -365,7 +375,8 @@ router.delete(
       );
       res.status(204).end();
     } catch (err) {
-      res.status(500).json({ error: String(err) });
+      console.error(err);
+      res.status(500).json({ error: "Internal server error" });
     }
   },
 );
@@ -400,9 +411,7 @@ router.get(
       const filterSql = buildDistrictFilters(filters, "");
       if (filterSql) {
         const fr = await db.execute(
-          sql.raw(
-            `SELECT id FROM districts WHERE ${filterSql} ORDER BY id LIMIT 300`,
-          ),
+          sql`SELECT id FROM districts WHERE ${filterSql} ORDER BY id LIMIT 300`,
         );
         for (const r of fr.rows as { id: number }[]) {
           if (!memberIds.includes(Number(r.id))) memberIds.push(Number(r.id));
@@ -420,9 +429,9 @@ router.get(
         allIds.push(districtId);
       }
 
-      const idList = allIds.join(",");
+      const idFragment = sql.join(allIds.map((n) => sql`${n}`), sql`, `);
 
-      const settlementRows = await db.execute(sql.raw(`
+      const settlementRows = await db.execute(sql`
         SELECT
           s.id, s.from_year, s.to_year,
           s.base_increase_pct, s.year2_pct, s.year3_pct,
@@ -439,11 +448,11 @@ router.get(
           ORDER BY c2.effective_end DESC NULLS LAST LIMIT 1
         ) lc ON true
         LEFT JOIN source_documents sd ON COALESCE(s.source_doc_id, lc.source_doc_id) = sd.id
-        WHERE s.district_id IN (${idList})
+        WHERE s.district_id IN (${idFragment})
           AND s.base_increase_pct IS NOT NULL
-          AND s.bargaining_unit = '${unit}'
+          AND s.bargaining_unit = ${unit}
         ORDER BY s.from_year DESC, d.name
-      `));
+      `);
 
       const allSettlements = settlementRows.rows as unknown as SettlementRow[];
 
@@ -499,7 +508,8 @@ router.get(
       );
       res.send(buffer);
     } catch (err) {
-      res.status(500).json({ error: String(err) });
+      console.error(err);
+      res.status(500).json({ error: "Internal server error" });
     }
   },
 );
