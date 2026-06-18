@@ -204,6 +204,32 @@ _AGENDA_PHRASES = (
     "notice of",
 )
 
+# Phrases that mark a school-board *policy manual* — typically the IASB PRESS
+# (Policy Reference Education Subscription Service) product. These manuals share
+# a lot of contract-body vocabulary (insurance, retirement, grievance,
+# personnel) so they sail past the agenda/minutes signals, but they are board
+# policy, not a negotiated union contract. They almost never appear in a CBA.
+_POLICY_PHRASES = (
+    "press plus",
+    "press issue",
+    "board policy manual",
+    "board policy reference",
+    "policy reference manual",
+    "policy reference education",
+    "school board policy",
+    "district policy manual",
+    "iasb",
+    "illinois association of school boards",
+    "cross reference:",
+    "legal reference:",
+    "administrative procedure",
+)
+
+# PRESS-style policy numbers, e.g. "2:105", "5:30", "7:340". A policy manual is
+# riddled with these section numbers; a real CBA uses "Article I" / "Section 1"
+# and rarely carries more than a couple of clock-time colons (8:00 a.m.).
+_POLICY_NUM_RE = re.compile(r"\b\d{1,2}:\d{2,3}\b")
+
 # How many leading characters of the document to inspect. A CBA's table of
 # contents + opening articles (rich in body phrases) fall well within this.
 CLASSIFY_TEXT_CHARS = 40_000
@@ -270,12 +296,33 @@ def classify_cba_text(text: str) -> tuple[bool, str]:
     agenda = sum(1 for p in _AGENDA_PHRASES if p in head)
     kw     = _crawler_keyword_score(head[:8000])
 
+    # Board-policy-manual (PRESS) signals. A policy manual is a known gray area:
+    # it carries contract-body vocab but is not a negotiated union contract.
+    pol_phrases = sum(1 for p in _POLICY_PHRASES if p in head)
+    pol_nums    = len(set(_POLICY_NUM_RE.findall(head)))
+    # Treat the doc as a policy manual when an explicit PRESS/policy phrase is
+    # paired with section numbers, when two such phrases appear, or when the doc
+    # is saturated with distinct policy numbers (clock times can't reach this).
+    is_policy = (
+        pol_phrases >= 2
+        or (pol_phrases >= 1 and pol_nums >= 3)
+        or pol_nums >= 8
+    )
+
     decision = False
+    reason = ""
     # Agenda / minutes dominate and the contract body is thin -> reject.
     if agenda >= 4 and body < max(6, agenda):
         decision = False
     elif agenda >= 3 and body <= 2 and title == 0:
         decision = False
+    # Board policy manual: policy signals dominate, no agreement title, and the
+    # contract body is not rich enough to overrule. Genuine CBAs reach body>=6
+    # (handled below) and almost never carry PRESS phrasing, so this won't
+    # false-reject a real contract.
+    elif is_policy and title == 0 and body < 6:
+        decision = False
+        reason = " policy_manual"
     # Rich contract body -> accept.
     elif body >= 6:
         decision = True
@@ -289,8 +336,9 @@ def classify_cba_text(text: str) -> tuple[bool, str]:
     elif kw >= 8 and body >= 3 and agenda <= 1:
         decision = True
 
-    detail = (f"title={title} body={body} agenda={agenda} kw={kw} "
-              f"-> {'CBA' if decision else 'not-CBA'}")
+    detail = (f"title={title} body={body} agenda={agenda} "
+              f"policy={pol_phrases}/{pol_nums} kw={kw} "
+              f"-> {'CBA' if decision else 'not-CBA'}{reason}")
     return decision, detail
 
 

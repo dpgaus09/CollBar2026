@@ -64,8 +64,19 @@ score agenda≥4. Content check is ON by default for CSV recovery
 `_score_pdf_text` (loaded via importlib — both modules have numeric filenames).
 **Gotcha:** the crawler keyword score is noisy ("teachers"/"agreement" hit on
 handbooks) — never let it override a thin body (rescue branch requires kw≥8 AND
-body≥3 AND agenda≤1). **Known gray area:** PRESS board-policy manuals (body 3-5,
-agenda low) still pass — they're not the agenda problem this targets.
+body≥3 AND agenda≤1).
+
+**PRESS board-policy manuals now rejected (June 2026).** Policy manuals (IASB
+PRESS) share contract vocab (insurance/retirement/grievance) so they cleared the
+agenda gate. `classify_cba_text` now scores policy signals: `_POLICY_PHRASES`
+("press plus", "board policy manual", "iasb", "cross reference:"…) +
+`_POLICY_NUM_RE` (PRESS section numbers like 2:105/5:30/7:340). is_policy when
+2+ phrases, OR 1 phrase + 3 distinct numbers, OR 8+ distinct numbers. Rejection
+branch fires only when `title==0 AND body<6` so a real CBA (body≥6 or titled)
+still wins; a couple of clock-time colons (7:30 a.m.) can't reach 8 distinct.
+Detail string ends `...policy_manual` on rejection. Crawler `CBA_KEYWORDS`
+dropped "board policy" (it pulled in manuals, added little CBA signal; board
+pages still reached via NAV_KEYWORDS).
 
 **Wider net is opt-in at the crawler.** `11_crawl_il_cbas.py --log-all-viewers`
 logs EVERY embedded viewer/doc-host file to the manual-review CSV (reason

@@ -183,6 +183,25 @@ class TestClassifyCbaText(unittest.TestCase):
         "moved by Mr. A, seconded by Ms. B. Public Comment. Old Business. New "
         "Business. Superintendent's report. Adjournment."
     ) * 3
+    # An IASB PRESS board-policy manual. It shares contract vocabulary
+    # (grievance, insurance, retirement, personnel) but is board policy, not a
+    # union contract. PRESS phrasing + section numbers like "2:105" mark it.
+    PRESS_POLICY_MANUAL = (
+        "BOARD POLICY MANUAL. PRESS PLUS. Illinois Association of School Boards. "
+        "SECTION 5 - PERSONNEL. 5:10 Equal Employment Opportunity. 5:30 "
+        "Hiring Process. 2:105 Ethics and Gift Ban. 7:340 Student Records. "
+        "Insurance and retirement benefits. Grievance procedure for staff. "
+        "Cross Reference: 4:60, 5:120. Legal Reference: 105 ILCS 5/10. "
+        "Administrative procedure adopted by the board."
+    ) * 4
+    # A policy manual without explicit PRESS phrasing, but saturated with
+    # distinct policy section numbers — still a policy manual, not a CBA.
+    POLICY_MANUAL_NUMBERS_ONLY = (
+        "District policies. 2:20 Powers of the Board. 2:105 Ethics. 4:60 "
+        "Purchases. 5:10 Equal Opportunity. 5:30 Hiring. 6:15 Standards. "
+        "7:340 Student Records. 8:30 Visitors. Personnel, insurance, "
+        "retirement, and grievance provisions for employees."
+    ) * 4
 
     def test_accepts_real_cba(self):
         ok, detail = rec.classify_cba_text(self.CBA)
@@ -203,6 +222,24 @@ class TestClassifyCbaText(unittest.TestCase):
     def test_rejects_agenda_that_mentions_a_cba(self):
         ok, detail = rec.classify_cba_text(self.AGENDA_MENTIONING_CBA)
         self.assertFalse(ok, detail)
+
+    def test_rejects_press_policy_manual(self):
+        ok, detail = rec.classify_cba_text(self.PRESS_POLICY_MANUAL)
+        self.assertFalse(ok, detail)
+        self.assertIn("policy_manual", detail)
+
+    def test_rejects_policy_manual_numbers_only(self):
+        ok, detail = rec.classify_cba_text(self.POLICY_MANUAL_NUMBERS_ONLY)
+        self.assertFalse(ok, detail)
+        self.assertIn("policy_manual", detail)
+
+    def test_real_cba_not_flagged_as_policy(self):
+        # A genuine CBA must still pass even if it carries a few clock-time
+        # colons (e.g. "7:30 a.m.") that resemble policy numbers.
+        cba = self.CBA + " The workday begins at 7:30 a.m. and ends at 3:15 p.m."
+        ok, detail = rec.classify_cba_text(cba)
+        self.assertTrue(ok, detail)
+        self.assertNotIn("policy_manual", detail)
 
     def test_rejects_insufficient_text(self):
         ok, detail = rec.classify_cba_text("too short")

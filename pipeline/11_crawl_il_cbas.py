@@ -139,7 +139,11 @@ CBA_KEYWORDS = [
     "cba",
     "iea",
     "ift",
-    "board policy",
+    # NOTE: "board policy" deliberately omitted. It pulled in IASB PRESS
+    # board-policy manuals (which share contract vocabulary but are not union
+    # contracts) and added little CBA signal. Board pages are still reached via
+    # NAV_KEYWORDS ("board of education", "school board"); a true CBA linked
+    # from such a page is matched on its own contract keywords.
 ] + UNIT_KEYWORDS
 
 # Navigation keywords — broader terms for following links that may lead to CBA pages.
