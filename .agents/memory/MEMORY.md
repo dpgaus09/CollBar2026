@@ -17,3 +17,4 @@
 - [Bargaining-unit scoping](bargaining-unit-scoping.md) — benchmarks never mix units, default teachers; parseUnit whitelist; provenance own-doc→same-unit fallback; cost-impact teachers-only; contracts-unique gap.
 - [OCR quality flag](ocr-quality-flag.md) — extraction_runs.ocr_confidence/ocr_low_quality (threshold 70); use latest-per-doc; legacy cache has no score (NULL != good).
 - [IL viewer recovery](il-viewer-recovery.md) — manual-review CSV is a crawl side-effect (empty until non-dry-run re-crawl); 13_recover_viewer_cbas.py resolves Box/Issuu/Drive best-effort + --pdf manual ingest.
+- [Board-policy manual purge](policy-manual-purge.md) — non-CBA PRESS manuals stored as cba_pdf; re-label to doc_type 'policy_manual' + purge derived rows; scanned ones caught by URL not OCR.
