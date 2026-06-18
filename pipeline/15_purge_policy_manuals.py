@@ -80,7 +80,7 @@ _INCONCLUSIVE = {"needs-OCR", "unreadable"}
 # the 'policy_manual' value.
 _DOC_TYPES = (
     "cba_pdf", "mou", "factfinding_report", "wage_settlement_report",
-    "cdss_extract", "directory", "stats", "policy_manual",
+    "cdss_extract", "directory", "stats", "policy_manual", "non_cba",
 )
 
 
