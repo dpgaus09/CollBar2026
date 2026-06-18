@@ -50,6 +50,28 @@ the folder id regex requires an alphanumeric first char to skip them. Large
 files hit Drive's virus-scan interstitial and return HTML — `_download_pdf`
 correctly rejects non-`%PDF` bytes, so bad ids fail safe (no garbage stored).
 
+**Content-aware CBA classification (June 2026).** `13_recover_viewer_cbas.py`
+now downloads each candidate and classifies its *text* before storing:
+`classify_cba_text` balances title phrases ("collective bargaining agreement"),
+contract-body phrases (grievance/salary schedule/arbitration/seniority…), and
+board-meeting phrases (call to order/roll call/consent agenda/motion/minutes).
+A doc dominated by agenda signals with a thin body is rejected (status
+`not_cba`) even if it *mentions* a CBA. Real CBAs accumulate body≥6; agendas
+score agenda≥4. Content check is ON by default for CSV recovery
+(`--no-content-check` to disable, `--fast` for text-layer-only/no-OCR); manual
+`--pdf` ingests skip it unless `--content-check`. Text extraction reuses
+06's `extract_pdf_text`/`_text_layer`; keyword score reuses 11's
+`_score_pdf_text` (loaded via importlib — both modules have numeric filenames).
+**Gotcha:** the crawler keyword score is noisy ("teachers"/"agreement" hit on
+handbooks) — never let it override a thin body (rescue branch requires kw≥8 AND
+body≥3 AND agenda≤1). **Known gray area:** PRESS board-policy manuals (body 3-5,
+agenda low) still pass — they're not the agenda problem this targets.
+
+**Wider net is opt-in at the crawler.** `11_crawl_il_cbas.py --log-all-viewers`
+logs EVERY embedded viewer/doc-host file to the manual-review CSV (reason
+`viewer_unflagged`), not just keyword-flagged ones, so 13 can content-check the
+full set. Default off so routine crawls keep the near-empty keyword-gated CSV.
+
 **District mapping** in the recovery step uses the CSV `rcdts` column when
 present, else falls back to matching the source `page` host to
 `districts.website_url`. The crawler now writes `host/district/rcdts` columns

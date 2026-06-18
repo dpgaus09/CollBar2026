@@ -20,9 +20,19 @@ This script turns those logged viewer URLs into real ``source_documents`` rows:
        - Yumpu         ``/document/download/<id>``
        - AnyFlip       book-config ``downloadUrl``
        - Flipsnack     ``/download``
-  4. Download, verify the ``%PDF`` header, dedupe by hash, store the bytes in
-     object storage, and upsert a proper ``cba_pdf`` ``source_documents`` row —
-     exactly the contract the LLM extractor (``06_extract_contracts.py``) expects.
+  4. Download, verify the ``%PDF`` header, then **classify the content**: the
+     document's text is read (reusing ``06_extract_contracts.py``) and only docs
+     that actually look like a collective-bargaining agreement are kept. Board
+     agendas, minutes, handbooks, and plans are rejected (status ``not_cba``) so
+     casting a wider net at the crawler (``11 --log-all-viewers``) cannot pollute
+     the database. Genuine CBAs are deduped by hash, stored in object storage,
+     and upserted as a proper ``cba_pdf`` ``source_documents`` row — exactly the
+     contract the LLM extractor (``06_extract_contracts.py``) expects.
+
+The content check is ON by default for CSV recovery (disable with
+``--no-content-check``); ``--fast`` skips OCR and inspects only the embedded
+text layer. Hand-downloaded ``--pdf`` ingests skip the check (human-curated)
+unless ``--content-check`` is passed.
 
 Anything a resolver cannot crack is reported as "needs manual download". For
 those, download the PDF by hand from the viewer and ingest it directly:
@@ -103,6 +113,219 @@ def _host_of(url: str) -> str:
     except Exception:
         return ""
     return h[4:] if h.startswith("www.") else h
+
+
+# ---------------------------------------------------------------------------
+# Content-aware CBA classification
+#
+# Embedded viewers (Google Drive, Box, Issuu, ...) on district sites mostly host
+# board-meeting agendas, minutes, and plans — NOT union contracts. A probe of 80
+# high-enrollment IL districts (see .agents/memory/il-viewer-recovery.md) found
+# 136 embeds, zero of which were CBAs. To cast a wider net without polluting the
+# database, we download each candidate and read its text before storing: only a
+# document whose *content* looks like a collective-bargaining agreement is kept
+# as a cba_pdf. Board agendas/minutes/handbooks are rejected.
+#
+# Text extraction reuses 06_extract_contracts.py (pdfplumber/pypdfium2 text layer
+# with an OCR fallback for scanned PDFs). Keyword scoring reuses the crawler's
+# _score_pdf_text (11_crawl_il_cbas.py) as a supporting positive signal.
+# ---------------------------------------------------------------------------
+
+# Title-page phrases that name the document a collective-bargaining agreement.
+_CBA_TITLE_PHRASES = (
+    "collective bargaining agreement",
+    "collective bargaining contract",
+    "negotiated agreement",
+    "negotiations agreement",
+    "master agreement",
+    "professional negotiation agreement",
+    "professional negotiations agreement",
+    "agreement between the board",
+    "agreement by and between",
+    "articles of agreement",
+)
+
+# Body phrases typical of a contract's articles / table of contents. A real CBA
+# accumulates many of these; an agenda that merely *mentions* a contract will not.
+_CBA_BODY_PHRASES = (
+    "grievance",
+    "salary schedule",
+    "bargaining unit",
+    "just cause",
+    "duration of this agreement",
+    "this agreement shall",
+    "sick leave",
+    "personal leave",
+    "reduction in force",
+    "arbitration",
+    "education association",
+    "federation of teachers",
+    "fair share",
+    "extra duty",
+    "extra-duty",
+    "hereinafter",
+    "recognition",
+    "seniority",
+    "tenure",
+    "probationary",
+    "sabbatical",
+    "workday",
+    "work year",
+    "prep period",
+    "retirement",
+    "insurance",
+    "negotiat",
+)
+
+# Phrases that mark a board-meeting agenda or minutes — the documents we must
+# reject. These almost never appear in the body of a union contract.
+_AGENDA_PHRASES = (
+    "call to order",
+    "roll call",
+    "pledge of allegiance",
+    "consent agenda",
+    "approval of minutes",
+    "approval of the minutes",
+    "motion to approve",
+    "moved by",
+    "seconded by",
+    "public participation",
+    "public comment",
+    "minutes of the",
+    "regular meeting",
+    "old business",
+    "new business",
+    "superintendent's report",
+    "treasurer's report",
+    "board recessed",
+    "agenda item",
+    "call to the meeting",
+    "return to learn",
+    "notice of",
+)
+
+# How many leading characters of the document to inspect. A CBA's table of
+# contents + opening articles (rich in body phrases) fall well within this.
+CLASSIFY_TEXT_CHARS = 40_000
+MIN_CLASSIFY_CHARS  = 200
+
+_extractor_mod = None
+_crawler_mod = None
+
+
+def _load_pipeline_module(filename: str, modname: str):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        modname, Path(__file__).parent / filename)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _get_extractor():
+    """Lazily load 06_extract_contracts.py (text extraction with OCR fallback)."""
+    global _extractor_mod
+    if _extractor_mod is None:
+        _extractor_mod = _load_pipeline_module(
+            "06_extract_contracts.py", "extract_contracts")
+    return _extractor_mod
+
+
+def _crawler_keyword_score(text: str) -> int:
+    """Reuse the crawler's PDF keyword scoring as a supporting positive signal.
+
+    Best-effort: if the crawler module can't be imported, return 0 so content
+    classification still works from the phrase signals alone.
+    """
+    global _crawler_mod
+    try:
+        if _crawler_mod is None:
+            _crawler_mod = _load_pipeline_module(
+                "11_crawl_il_cbas.py", "crawl_il_cbas")
+        return _crawler_mod._score_pdf_text(text)
+    except Exception as e:  # noqa: BLE001
+        log.debug("crawler keyword score unavailable: %s", e)
+        return 0
+
+
+def classify_cba_text(text: str) -> tuple[bool, str]:
+    """Classify document text as a CBA (True) or not (False).
+
+    Returns (is_cba, detail). The decision balances three signals:
+      - title : explicit "collective bargaining agreement" style title phrases
+      - body  : article/TOC phrases a real contract accumulates
+      - agenda: board-meeting / minutes phrases that mark a non-contract doc
+    plus the crawler's keyword score as supporting evidence. A doc dominated by
+    agenda signals with a weak contract body is rejected even if it *mentions* a
+    contract (e.g. a board agenda item "approve the collective bargaining
+    agreement").
+    """
+    tl = (text or "").lower()
+    if len(tl.strip()) < MIN_CLASSIFY_CHARS:
+        return False, f"insufficient_text ({len(tl.strip())} chars)"
+    head = tl[:CLASSIFY_TEXT_CHARS]
+
+    title  = sum(1 for p in _CBA_TITLE_PHRASES if p in head)
+    body   = sum(1 for p in _CBA_BODY_PHRASES if p in head)
+    agenda = sum(1 for p in _AGENDA_PHRASES if p in head)
+    kw     = _crawler_keyword_score(head[:8000])
+
+    decision = False
+    # Agenda / minutes dominate and the contract body is thin -> reject.
+    if agenda >= 4 and body < max(6, agenda):
+        decision = False
+    elif agenda >= 3 and body <= 2 and title == 0:
+        decision = False
+    # Rich contract body -> accept.
+    elif body >= 6:
+        decision = True
+    # Titled as an agreement with a real (if shorter) body -> accept.
+    elif title >= 1 and body >= 3 and agenda <= 3:
+        decision = True
+    elif body >= 4 and agenda <= 1:
+        decision = True
+    # Very strong crawler keyword signal with a real body and no agenda signal —
+    # rescues a contract whose exact title/body phrasing we didn't enumerate.
+    elif kw >= 8 and body >= 3 and agenda <= 1:
+        decision = True
+
+    detail = (f"title={title} body={body} agenda={agenda} kw={kw} "
+              f"-> {'CBA' if decision else 'not-CBA'}")
+    return decision, detail
+
+
+def classify_cba_bytes(pdf_bytes: bytes, *, use_ocr: bool = True) -> tuple[bool, str]:
+    """Download-ready content check: extract text from PDF bytes and classify.
+
+    use_ocr=True falls back to OCR for scanned/image-only PDFs (slower but
+    catches scanned CBAs). use_ocr=False inspects only the embedded text layer
+    (fast); scanned docs then classify as "insufficient_text".
+    """
+    import tempfile
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as fh:
+            fh.write(pdf_bytes)
+            tmp = Path(fh.name)
+        extractor = _get_extractor()
+        if use_ocr:
+            text, _used_ocr, reason, _conf = extractor.extract_pdf_text(tmp)
+            if not text and reason:
+                return False, f"unreadable ({reason})"
+        else:
+            text, readable = extractor._text_layer(tmp)
+            if not readable:
+                return False, "unreadable (PDF_CORRUPT_OR_UNREADABLE)"
+        return classify_cba_text(text)
+    except Exception as e:  # noqa: BLE001 — best-effort, never crash recovery
+        log.info("  content classification error: %s", e)
+        return False, f"classify_error ({e})"
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -353,12 +576,25 @@ def _upsert_source_document(cur, district_id: int, source_url: str,
 
 
 def _ingest_pdf_bytes(conn, district_id: int, source_url: str, pdf_bytes: bytes,
-                      bargaining_unit: str, dry_run: bool) -> tuple[str, str]:
-    """Validate, store, and upsert one PDF. Returns (status, detail)."""
+                      bargaining_unit: str, dry_run: bool,
+                      content_check: bool = True,
+                      use_ocr: bool = True) -> tuple[str, str]:
+    """Validate, store, and upsert one PDF. Returns (status, detail).
+
+    When content_check is True (default), the PDF's text is read and classified
+    before storing: documents that don't look like a collective-bargaining
+    agreement (board agendas, minutes, handbooks, plans) are rejected with
+    status 'not_cba' instead of polluting source_documents.
+    """
     if len(pdf_bytes) < MIN_PDF_BYTES:
         return "failed", f"too_small ({len(pdf_bytes)} bytes)"
     if b"%PDF" not in pdf_bytes[:1024]:
         return "failed", "not_a_pdf (no %PDF header)"
+
+    if content_check:
+        is_cba, detail = classify_cba_bytes(pdf_bytes, use_ocr=use_ocr)
+        if not is_cba:
+            return "not_cba", detail
 
     file_hash   = common.sha256_bytes(pdf_bytes)
     storage_key = f"il/cba/{file_hash}.pdf"
@@ -430,8 +666,14 @@ def recover_from_csv(args) -> None:
     log.info("Processing %d manual-review row(s) from %s",
              len(rows), MANUAL_REVIEW_CSV.name)
 
+    content_check = not args.no_content_check
+    use_ocr = not args.fast
+    log.info("Content classification: %s%s",
+             "ON" if content_check else "OFF (storing every resolved PDF)",
+             "" if use_ocr else " (text-layer only, no OCR)")
+
     stats = {"found": 0, "skip": 0, "failed": 0, "no_district": 0,
-             "unresolved": 0}
+             "unresolved": 0, "not_cba": 0}
     manual_needed: list[dict] = []
 
     for row in rows:
@@ -457,17 +699,27 @@ def recover_from_csv(args) -> None:
             continue
 
         ingested = False
+        rejected_not_cba = False
         for cand in candidates:
             pdf_bytes = _download_pdf(session, cand)
             if pdf_bytes is None:
                 continue
             status, detail = _ingest_pdf_bytes(
-                conn, district_id, viewer_url, pdf_bytes, unit, args.dry_run)
+                conn, district_id, viewer_url, pdf_bytes, unit, args.dry_run,
+                content_check=content_check, use_ocr=use_ocr)
             log.info("  [%s] %s → %s :: %s", status, host, dname, detail)
             stats[status] = stats.get(status, 0) + 1
             if status in ("found", "skip"):
                 ingested = True
                 break
+            if status == "not_cba":
+                rejected_not_cba = True
+        if rejected_not_cba and not ingested:
+            # Downloaded fine but the content isn't a contract — record it so a
+            # human can confirm, but do NOT treat it as a download failure.
+            manual_needed.append({**row, "recover_status": "not_cba",
+                                  "district": dname})
+            continue
         if not ingested and host:
             if not any(m.get("url") == viewer_url for m in manual_needed):
                 stats["failed"] += 1
@@ -479,7 +731,7 @@ def recover_from_csv(args) -> None:
 
     log.info("=" * 60)
     log.info("Recovery summary%s:", "  [DRY RUN]" if args.dry_run else "")
-    for k in ("found", "skip", "failed", "unresolved", "no_district"):
+    for k in ("found", "skip", "not_cba", "failed", "unresolved", "no_district"):
         log.info("  %-13s %d", k, stats.get(k, 0))
     log.info("=" * 60)
 
@@ -516,11 +768,14 @@ def ingest_manual(args) -> None:
     source_url = args.url or f"manual:{pdf_path.name}"
     unit = args.unit or "teachers"
     pdf_bytes = pdf_path.read_bytes()
+    # A hand-downloaded PDF is human-curated, so content classification is OFF by
+    # default here; pass --content-check to run it anyway (e.g. batch ingest).
     status, detail = _ingest_pdf_bytes(
-        conn, district_id, source_url, pdf_bytes, unit, args.dry_run)
+        conn, district_id, source_url, pdf_bytes, unit, args.dry_run,
+        content_check=args.content_check, use_ocr=not args.fast)
     conn.close()
     log.info("[%s] %s (%s) :: %s", status, dname, args.rcdts, detail)
-    if status == "failed":
+    if status in ("failed", "not_cba"):
         sys.exit(1)
 
 
@@ -542,6 +797,16 @@ if __name__ == "__main__":
                         help="Manual ingest: original viewer URL (recorded as source_url)")
     parser.add_argument("--unit", type=str, default=None,
                         help="Manual ingest: bargaining unit (default: teachers)")
+    parser.add_argument("--no-content-check", action="store_true",
+                        help="CSV recovery: skip the content-aware CBA classifier "
+                             "and store every resolved PDF (not recommended — lets "
+                             "agendas/minutes through)")
+    parser.add_argument("--content-check", action="store_true",
+                        help="Manual ingest: run the content-aware CBA classifier "
+                             "on the hand-downloaded PDF before storing")
+    parser.add_argument("--fast", action="store_true",
+                        help="Content check: inspect only the embedded text layer "
+                             "(skip OCR; scanned PDFs classify as insufficient_text)")
     args = parser.parse_args()
 
     if args.pdf:

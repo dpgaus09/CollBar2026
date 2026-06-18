@@ -147,5 +147,68 @@ class TestIngestGuards(unittest.TestCase):
         self.assertIn("not_a_pdf", detail)
 
 
+class TestClassifyCbaText(unittest.TestCase):
+    """The content-aware CBA classifier — the core of telling real union
+    contracts apart from board-meeting agendas in embedded viewers."""
+
+    CBA = (
+        "COLLECTIVE BARGAINING AGREEMENT between the Board of Education and the "
+        "Education Association. ARTICLE I RECOGNITION. ARTICLE II GRIEVANCE "
+        "PROCEDURE. The grievance shall be resolved by binding arbitration. "
+        "ARTICLE III SALARY SCHEDULE. Sick leave and personal leave. Reduction "
+        "in force and seniority. This agreement shall be effective. The "
+        "bargaining unit. Retirement and insurance. Probationary teachers. "
+        "Negotiations between the parties hereinafter. Workday and work year."
+    )
+    AGENDA = (
+        "BOARD OF EDUCATION REGULAR MEETING AGENDA. Call to Order. Roll Call. "
+        "Pledge of Allegiance. Approval of minutes. Consent Agenda. Public "
+        "Comment. Superintendent's report. Old Business. New Business. Motion "
+        "to approve, moved by Mr. Smith, seconded by Mrs. Jones. Adjournment."
+    ) * 3
+    MINUTES = (
+        "MINUTES of the Regular Meeting of the Board of Education. The meeting "
+        "was called to order. Roll call was taken. Motion to approve the consent "
+        "agenda, moved by Director Lopez, seconded by Director Kim. Public "
+        "participation. The board recessed into executive session. Adjourn."
+    ) * 3
+    RETURN_TO_LEARN = (
+        "Return to Learn Plan 2021-2022. This plan outlines remote learning, "
+        "hybrid instruction, mitigation, masking, and student safety protocols."
+    ) * 8
+    # An agenda that merely *mentions* approving a CBA must still be rejected.
+    AGENDA_MENTIONING_CBA = (
+        "BOARD MEETING AGENDA. Call to Order. Roll Call. Approval of minutes. "
+        "Consent Agenda. Motion to approve the collective bargaining agreement, "
+        "moved by Mr. A, seconded by Ms. B. Public Comment. Old Business. New "
+        "Business. Superintendent's report. Adjournment."
+    ) * 3
+
+    def test_accepts_real_cba(self):
+        ok, detail = rec.classify_cba_text(self.CBA)
+        self.assertTrue(ok, detail)
+
+    def test_rejects_agenda(self):
+        ok, detail = rec.classify_cba_text(self.AGENDA)
+        self.assertFalse(ok, detail)
+
+    def test_rejects_minutes(self):
+        ok, detail = rec.classify_cba_text(self.MINUTES)
+        self.assertFalse(ok, detail)
+
+    def test_rejects_return_to_learn(self):
+        ok, detail = rec.classify_cba_text(self.RETURN_TO_LEARN)
+        self.assertFalse(ok, detail)
+
+    def test_rejects_agenda_that_mentions_a_cba(self):
+        ok, detail = rec.classify_cba_text(self.AGENDA_MENTIONING_CBA)
+        self.assertFalse(ok, detail)
+
+    def test_rejects_insufficient_text(self):
+        ok, detail = rec.classify_cba_text("too short")
+        self.assertFalse(ok)
+        self.assertIn("insufficient_text", detail)
+
+
 if __name__ == "__main__":
     unittest.main()

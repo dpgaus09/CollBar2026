@@ -212,6 +212,15 @@ _render_domains: set[str] = set()
 # Accumulated manual-review items (unresolvable embedded viewers) for CSV output.
 _manual_review: list[dict] = []
 
+# When True, log EVERY embedded viewer/doc-host file to the manual-review CSV,
+# not just those whose link text carries a CBA keyword. The content-aware
+# recovery step (13_recover_viewer_cbas.py) downloads and classifies each one,
+# so casting this wider net is safe: agendas/minutes are rejected by content,
+# only genuine CBAs are stored. Opt-in via --log-all-viewers (default off so
+# routine crawls keep the keyword-gated, near-empty CSV described in
+# .agents/memory/il-viewer-recovery.md).
+LOG_ALL_VIEWERS: bool = False
+
 # District currently being crawled — used to attribute manual-review viewer rows
 # back to a district (name/rcdts) so the recovery step (13_recover_viewer_cbas.py)
 # and human reviewers can act on il_cba_manual_review.csv.
@@ -870,11 +879,21 @@ def _extract_document_candidates(soup, base_url: str, homepage: str) -> list[dic
             continue
         resolved, is_viewer = _resolve_viewer(abs_url)
         if is_viewer:
-            if resolved:
+            kw = _score_pdf_text(f"{text} {href}")
+            if resolved and kw > 0:
                 _add(resolved, text, "onpage")
-            elif _score_pdf_text(f"{text} {href}") > 0:
+            elif resolved and LOG_ALL_VIEWERS:
+                # Resolvable but no link-text CBA signal — log the resolved
+                # download URL so the content-aware recovery step can fetch and
+                # classify it (instead of silently dropping a possible CBA).
+                _manual_review.append(_manual_review_row(
+                    resolved, base_url, text, "viewer_unflagged"))
+            elif kw > 0:
                 _manual_review.append(_manual_review_row(
                     abs_url, base_url, text, "viewer_unresolved"))
+            elif LOG_ALL_VIEWERS:
+                _manual_review.append(_manual_review_row(
+                    abs_url, base_url, text, "viewer_unflagged"))
             continue
         hl = f"{href} {abs_url}".lower()
         if any(tok in hl for tok in DOC_PATTERN_TOKENS) or DOC_ID_RE.search(urlparse(abs_url).path):
@@ -889,7 +908,11 @@ def _extract_document_candidates(soup, base_url: str, homepage: str) -> list[dic
         ctx = tag.get("title") or tag.get("name") or ""
         resolved, is_viewer = _resolve_viewer(abs_url)
         if is_viewer and resolved:
-            _add(resolved, ctx, "onpage")
+            if _score_pdf_text(f"{ctx} {src}") > 0:
+                _add(resolved, ctx, "onpage")
+            elif LOG_ALL_VIEWERS:
+                _manual_review.append(_manual_review_row(
+                    resolved, base_url, str(ctx), "viewer_unflagged"))
         elif is_viewer:
             _manual_review.append(_manual_review_row(
                 abs_url, base_url, str(ctx), "viewer_iframe_unresolved"))
@@ -2085,7 +2108,18 @@ if __name__ == "__main__":
             "state to il_cba_crawl.baseline.json once before clearing those rows."
         ),
     )
+    parser.add_argument(
+        "--log-all-viewers", action="store_true",
+        help=(
+            "Log EVERY embedded viewer/doc-host file to il_cba_manual_review.csv, "
+            "not just those whose link text carries a CBA keyword. Lets the "
+            "content-aware recovery step (13_recover_viewer_cbas.py) download and "
+            "classify each one so CBAs hidden behind link text like 'Document' are "
+            "found, while agendas/minutes are rejected by content. Off by default."
+        ),
+    )
     args = parser.parse_args()
+    LOG_ALL_VIEWERS = args.log_all_viewers
     crawl(
         dry_run=args.dry_run,
         limit=args.limit,
