@@ -26,6 +26,13 @@ misleading for a public-facing cost estimate.
 2,072 of 7,246 IL settlements carry a cost-impact estimate (school-year join
 must hit both il_district_fte and tss_annual for the same year).
 
+## Loaders (populate the three reference tables)
+Run from `pipeline/`: `load_il_tss.py` (~20s), `load_il_classsize.py` (~10s),
+`load_il_eis.py` (~150s for 6×13MB xlsx). All upsert via ON CONFLICT — safe to re-run.
+**Gotcha:** `load_il_eis.py` exceeds a single 120s tool timeout; it commits per-file,
+so re-run it (idempotent) or load a missing year individually via
+`python3 -c "import load_il_eis as m; m._process_file(m.IL_EIS_DIR/'2025-ATSB.xlsx')"`.
+
 ## Frontend
 SettlementTable in district.tsx shows "Est. annual cost impact: $X *" in amber
 below each row when est_annual_cost_impact != null; footnote cites ISBE Class

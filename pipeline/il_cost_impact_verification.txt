@@ -1,0 +1,47 @@
+IL Cost-Impact Reference Data Load — Verification Record
+==========================================================
+Run date: 2026-06-16
+
+## Loaders executed
+
+  pipeline/load_il_tss.py
+  pipeline/load_il_classsize.py
+  pipeline/load_il_eis.py            (6 files; last year loaded individually
+                                      via _process_file due to 120s tool timeout)
+
+## Table row counts (post-load)
+
+  tss_annual      (state='IL')  :  9,750 rows   (956 distinct districts, FY2015-16..FY2025-26)
+  il_district_fte               :  5,528 rows   (FY2020-21..FY2023-24; FY2023-24 statewide FTE 131,840 ✓ within 5% of expected)
+  il_eis_district               :  5,165 rows   (FY2019-20..FY2024-25, ~860 districts/year)
+
+  il_eis_district breakdown:
+    2019-20 : 860 districts
+    2020-21 : 861 districts
+    2021-22 : 862 districts
+    2022-23 : 862 districts
+    2023-24 : 861 districts
+    2024-25 : 859 districts
+
+## Cost-impact coverage (IL stated teacher settlements)
+
+  Total IL stated teacher settlements  :  71
+  Settlements with est_annual_cost_impact non-NULL  :  25  (35%)
+    - via EIS real-salary path  :  25
+    - via TSS midpoint fallback :   0
+  Note: coverage limited to school years where il_district_fte has FTE
+        (FY2020-21..FY2023-24); settlements outside that window → NULL.
+
+## API spot-check (GET /api/dashboard/districts/:id/settlements)
+
+  District 10856 (Aurora West USD 129), FY2023-24, 6.00% → $3,558,385  [eis]
+  District 10735 (Naperville CUSD 203), FY2022-23, 3.40% → $3,248,026  [eis]
+  District 10990 (Granite City CUSD 9), FY2021-22, 4.50% → $1,057,913  [eis]
+  District 11177 (Joliet Twp HSD 204),  FY2022-23, 2.00% →   $605,385  [eis]
+  District 10696 (Bensenville SD 2),    FY2022-23, 5.00% →   $568,489  [eis]
+  District 10717 (Darien SD 61),        FY2023-24, 4.00% →   $320,525  [eis]
+
+  Full HTTP round-trip verified: logged in as admin, called
+  GET /api/dashboard/districts/10588/settlements?bargainingUnit=teachers
+  (Charleston CUSD 1) — returned 4 settlements with non-NULL dollar estimates,
+  cost_impact_source='eis' in all cases.
