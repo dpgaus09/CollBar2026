@@ -14,13 +14,12 @@ interface District {
   state: string;
 }
 
-function useDistricts(search: string, stateFilter: "" | "IL") {
+function useDistricts(search: string) {
   return useQuery<{ districts: District[] }>({
-    queryKey: ["/api/dashboard/districts", { search, stateFilter }],
+    queryKey: ["/api/dashboard/districts", { search }],
     queryFn: () => {
       const params = new URLSearchParams();
       if (search) params.set("q", search);
-      if (stateFilter) params.set("state", stateFilter);
       const qs = params.toString();
       return fetch(apiUrl(`/api/dashboard/districts${qs ? `?${qs}` : ""}`), {
         credentials: "include",
@@ -191,9 +190,8 @@ function AdminDistrictPicker({
   setSearch: (s: string) => void;
 }) {
   const [, setLocation] = useLocation();
-  const [stateFilter, setStateFilter] = useState<"" | "IL">("");
   const debouncedSearch = useDebounced(search);
-  const { data, isLoading, isError } = useDistricts(debouncedSearch, stateFilter);
+  const { data, isLoading, isError } = useDistricts(debouncedSearch);
   const { districtId } = useAuth();
   const { data: myDistrict } = useMyDistrict(districtId);
 
@@ -213,22 +211,6 @@ function AdminDistrictPicker({
               } for “${debouncedSearch}”`
             : `${data?.districts.length.toLocaleString() ?? "—"} districts in the database`}
         </p>
-      </div>
-
-      <div className="flex gap-1">
-        {(["", "IL"] as const).map((s) => (
-          <button
-            key={s || "all"}
-            onClick={() => setStateFilter(s)}
-            className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
-              stateFilter === s
-                ? "bg-blue-600 text-white"
-                : "bg-slate-800 text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            {s || "All"}
-          </button>
-        ))}
       </div>
 
       <input

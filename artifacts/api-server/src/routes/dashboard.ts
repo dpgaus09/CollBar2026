@@ -72,10 +72,19 @@ function buildWhere(conditions: Array<SQL | null | undefined>): SQL {
 }
 
 // ---------------------------------------------------------------------------
+// CollBar's customer-facing dashboard is Illinois-only. Out-of-state districts
+// (e.g. Ohio) are retained in the database for back-office use but must never
+// surface in the customer view — lists, medians, comparables, the county /
+// district-type filter dropdowns, or a directly-requested district detail.
+// Every customer-facing state filter routes through this single constant.
+// ---------------------------------------------------------------------------
+const CUSTOMER_STATE = "IL";
+
+// ---------------------------------------------------------------------------
 // GET /api/dashboard/districts
 // ---------------------------------------------------------------------------
 router.get("/dashboard/districts", requireAuth, async (req: Request, res: Response) => {
-  const stateFilter = req.query.state ? String(req.query.state).toUpperCase() : null;
+  const stateFilter = CUSTOMER_STATE;
   const q = req.query.q ? String(req.query.q).trim() : "";
   try {
     const conditions: Array<SQL | null> = [];
@@ -112,7 +121,7 @@ router.get("/dashboard/districts/:id", canAccessDistrict, async (req: Request, r
     const distRows = await db.execute(sql`
       SELECT id, name, county, district_type, enrollment, state, avg_teacher_salary, valuation, website_url, updated_at
       FROM districts
-      WHERE id = ${districtId}
+      WHERE id = ${districtId} AND state = ${CUSTOMER_STATE}
     `);
     if (!distRows.rows.length) { res.status(404).json({ error: "District not found" }); return; }
 
@@ -334,7 +343,7 @@ router.get("/dashboard/medians", requireAuth, async (req: Request, res: Response
   const band = req.query.band ? String(req.query.band) : null;
   const yearFrom = req.query.yearFrom ? String(req.query.yearFrom) : null;
   const yearTo = req.query.yearTo ? String(req.query.yearTo) : null;
-  const state = req.query.state ? String(req.query.state).toUpperCase() : null;
+  const state = CUSTOMER_STATE;
   const unit = parseUnit(req.query.bargainingUnit);
 
   const conds: Array<SQL | null> = [
@@ -391,7 +400,7 @@ router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Resp
   const districtType = req.query.districtType ? String(req.query.districtType) : null;
   const yearFrom = req.query.yearFrom ? String(req.query.yearFrom) : null;
   const yearTo = req.query.yearTo ? String(req.query.yearTo) : null;
-  const state = req.query.state ? String(req.query.state).toUpperCase() : null;
+  const state = CUSTOMER_STATE;
   const unit = parseUnit(req.query.bargainingUnit);
   const format = req.query.format ? String(req.query.format) : "json";
   const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10));
@@ -584,7 +593,7 @@ router.get("/dashboard/expiration-calendar", requireAdmin, async (_req: Request,
 // GET /api/dashboard/counties
 // ---------------------------------------------------------------------------
 router.get("/dashboard/counties", requireAuth, async (req: Request, res: Response) => {
-  const stateFilter = req.query.state ? String(req.query.state).toUpperCase() : null;
+  const stateFilter = CUSTOMER_STATE;
   try {
     const rows = stateFilter
       ? await db.execute(sql`SELECT DISTINCT county FROM districts WHERE county IS NOT NULL AND state = ${stateFilter} ORDER BY county`)
@@ -600,7 +609,7 @@ router.get("/dashboard/counties", requireAuth, async (req: Request, res: Respons
 // GET /api/dashboard/district-types
 // ---------------------------------------------------------------------------
 router.get("/dashboard/district-types", requireAuth, async (req: Request, res: Response) => {
-  const stateFilter = req.query.state ? String(req.query.state).toUpperCase() : null;
+  const stateFilter = CUSTOMER_STATE;
   try {
     const rows = stateFilter
       ? await db.execute(sql`SELECT DISTINCT district_type FROM districts WHERE district_type IS NOT NULL AND state = ${stateFilter} ORDER BY district_type`)
@@ -622,7 +631,7 @@ router.get("/dashboard/provision-medians", requireAuth, async (req: Request, res
   const category = req.query.category ? String(req.query.category) : null;
   const county = req.query.county ? String(req.query.county) : null;
   const band = req.query.band ? String(req.query.band) : null;
-  const state = req.query.state ? String(req.query.state).toUpperCase() : null;
+  const state = CUSTOMER_STATE;
 
   if (!category) {
     res.status(400).json({ error: "category query parameter is required" });

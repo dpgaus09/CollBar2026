@@ -47,6 +47,7 @@ Usage:
 import argparse
 import csv
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -141,6 +142,215 @@ def _classify_doc(pdf_path: Path, *, use_ocr: bool) -> tuple[Optional[bool], str
         return None, f"classify_error ({e})"
 
 
+def get_stored_cba_docs_by_ids(conn, ids):
+    """Return current cba_pdf rows for the given doc ids (joined with district).
+
+    Filters ``doc_type='cba_pdf'`` so ids that were re-labelled (e.g. to
+    ``non_cba`` / ``policy_manual``) or removed since the prior audit are simply
+    absent from the result — the caller drops those stale rows.
+
+    Tuples match get_stored_cba_docs():
+        (id, district_id, district_name, state, school_year,
+         bargaining_unit, source_url, storage_key, source_type)
+    """
+    if not ids:
+        return []
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT sd.id, sd.district_id, d.name, d.state, sd.school_year,
+               sd.bargaining_unit, sd.source_url, sd.storage_key, sd.source_type
+        FROM source_documents sd
+        LEFT JOIN districts d ON d.id = sd.district_id
+        WHERE sd.doc_type = 'cba_pdf'
+          AND sd.id = ANY(%s)
+        ORDER BY sd.id
+        """,
+        (list(ids),),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    return rows
+
+
+def _parse_body(detail: str) -> Optional[int]:
+    """Pull the ``body=N`` signal count out of a classifier detail string."""
+    m = re.search(r"\bbody=(\d+)", detail or "")
+    return int(m.group(1)) if m else None
+
+
+def _select_recheck_ids(prior_rows: list[dict], thin_body: int) -> set[int]:
+    """Doc ids worth a forced-OCR re-read: the inconclusive 'needs-OCR' bucket
+    plus the 'thin-text trap' — 'not-CBA' rows whose contract body signal is so
+    thin (body<=thin_body) that a tiny embedded text layer, not real content,
+    drove the call. Confident policy-manual non-CBAs (strong policy signal) are
+    left alone; re-OCR'ing a 100-page PRESS manual wastes hours and that purge
+    is owned elsewhere.
+    """
+    ids: set[int] = set()
+    for r in prior_rows:
+        cls = r.get("classification", "")
+        try:
+            did = int(r["doc_id"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if cls == "needs-OCR":
+            ids.add(did)
+        elif cls == "not-CBA":
+            detail = r.get("detail", "")
+            if "policy_manual" in detail:
+                continue
+            body = _parse_body(detail)
+            if body is not None and body <= thin_body:
+                ids.add(did)
+    return ids
+
+
+def _recheck_classify(pdf_path: Path, extractor, recovery) -> tuple[str, str]:
+    """Force-OCR re-read of one PDF. Returns (label, detail).
+
+    Reads the embedded text layer AND a forced raster-OCR pass (``_ocr_pdf``,
+    cached by file hash), classifies each, and prefers the OCR result only when
+    it is substantive (>= MIN_CLASSIFY_CHARS) and either the text layer was
+    insufficient or the OCR text is materially longer (avoids letting a few
+    noisy OCR chars override a clean text layer). Provenance — which source won,
+    char counts, OCR confidence and any OCR failure reason — is appended to the
+    detail so a reviewer can judge each flip.
+
+    A doc that is still unreadable after a forced OCR attempt is labelled
+    ``unreadable`` (we tried), never silently downgraded to a confirmed
+    ``not-CBA``.
+    """
+    min_chars = getattr(recovery, "MIN_CLASSIFY_CHARS", 200)
+    try:
+        text_layer, _readable = extractor._text_layer(pdf_path)
+    except Exception as e:  # noqa: BLE001
+        text_layer = ""
+        log.debug("text-layer read failed for %s: %s", pdf_path, e)
+    tl = (text_layer or "").strip()
+    tl_is_cba, tl_detail = recovery.classify_cba_text(tl)
+
+    try:
+        ocr_text, ocr_reason, ocr_conf = extractor._ocr_pdf(pdf_path)
+    except Exception as e:  # noqa: BLE001
+        ocr_text, ocr_reason, ocr_conf = "", f"OCR_ERROR ({e})", None
+    ot = (ocr_text or "").strip()
+
+    tl_insufficient = tl_detail.startswith("insufficient_text")
+    use_ocr = len(ot) >= min_chars and (tl_insufficient or len(ot) >= len(tl) + 100)
+    if use_ocr:
+        is_cba, base_detail = recovery.classify_cba_text(ot)
+        source = "ocr"
+    else:
+        is_cba, base_detail = tl_is_cba, tl_detail
+        source = "text_layer"
+
+    if is_cba is True:
+        label = "CBA"
+    elif base_detail.startswith("insufficient_text"):
+        # Could not read enough text even after a forced OCR attempt. This is
+        # INCONCLUSIVE, not a confirmed non-CBA.
+        label = "unreadable"
+    else:
+        label = "not-CBA"
+
+    conf_str = (f"{ocr_conf:.1f}" if isinstance(ocr_conf, (int, float))
+                else "na")
+    detail = (f"{base_detail} [recheck source={source} text_chars={len(tl)} "
+              f"ocr_chars={len(ot)} ocr_conf={conf_str} "
+              f"ocr_reason={ocr_reason or '-'}]")
+    return label, detail
+
+
+def run_recheck(args) -> int:
+    """OCR-recheck mode: force-OCR the inconclusive subset of a prior fast audit
+    and merge the resolutions back into a single report (read-only)."""
+    extractor = _get_extractor()
+    recovery = _get_recovery()
+
+    with open(args.recheck_from, newline="", encoding="utf-8") as fh:
+        prior_rows = list(csv.DictReader(fh))
+    if not prior_rows:
+        log.error("Prior audit CSV %s is empty — nothing to recheck.",
+                  args.recheck_from)
+        return 1
+
+    candidates = _select_recheck_ids(prior_rows, args.thin_body)
+    log.info("Loaded %d prior rows from %s; %d candidate(s) to OCR-recheck "
+             "(needs-OCR + thin not-CBA body<=%d, excluding policy_manual)",
+             len(prior_rows), args.recheck_from, len(candidates),
+             args.thin_body)
+
+    conn = common.get_db_conn()
+    try:
+        db_rows = get_stored_cba_docs_by_ids(conn, candidates)
+    finally:
+        conn.close()
+    db_map = {r[0]: r for r in db_rows}
+    n_stale = len(candidates) - len(db_map)
+    log.info("%d/%d candidate(s) are still doc_type='cba_pdf'; %d stale "
+             "(re-labelled/removed) and will be dropped from the report",
+             len(db_map), len(candidates), n_stale)
+
+    merged: list[dict] = []
+    n_recheck = n_cba = n_not = n_unreadable = 0
+    for row in prior_rows:
+        try:
+            did = int(row["doc_id"])
+        except (KeyError, ValueError, TypeError):
+            merged.append(row)
+            continue
+        if did not in candidates:
+            merged.append(row)               # untouched (confident prior call)
+            continue
+        if did not in db_map:
+            continue                          # stale: drop from merged report
+
+        (_id, district_id, dname, state, sy, unit,
+         source_url, storage_key, _stype) = db_map[did]
+        pdf_path = extractor.resolve_pdf_path(source_url or "", storage_key or "")
+        if pdf_path is None:
+            label, detail = "unreadable", "file_not_found"
+        else:
+            try:
+                label, detail = _recheck_classify(pdf_path, extractor, recovery)
+            except Exception as e:  # noqa: BLE001 — never crash the audit
+                label, detail = "unreadable", f"recheck_error ({e})"
+
+        new_row = dict(row)
+        new_row["classification"] = label
+        new_row["detail"] = detail
+        merged.append(new_row)
+
+        n_recheck += 1
+        if label == "CBA":
+            n_cba += 1
+        elif label == "not-CBA":
+            n_not += 1
+        else:
+            n_unreadable += 1
+        if n_recheck % 10 == 0 or n_recheck == len(db_map):
+            log.info("  OCR-rechecked %d/%d (resolved cba=%d not-cba=%d "
+                     "unreadable=%d)", n_recheck, len(db_map), n_cba, n_not,
+                     n_unreadable)
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    fields = ["doc_id", "district_id", "district_name", "state", "school_year",
+              "bargaining_unit", "classification", "detail", "source_url"]
+    with open(args.out, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(merged)
+
+    log.info("=" * 60)
+    log.info("OCR-recheck complete: %d rechecked → %d CBA, %d not-CBA, "
+             "%d unreadable; %d stale dropped", n_recheck, n_cba, n_not,
+             n_unreadable, n_stale)
+    log.info("Wrote %d merged rows to %s", len(merged), args.out)
+    log.info("This audit is read-only — nothing in the database was changed.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -155,7 +365,19 @@ def main() -> int:
                          "(default: report only likely non-CBAs).")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT,
                     help=f"CSV output path (default: {DEFAULT_OUT}).")
+    ap.add_argument("--recheck-from", type=Path, dest="recheck_from",
+                    help="OCR-recheck mode: read a prior (fast) audit CSV, "
+                         "force-OCR its inconclusive subset (needs-OCR + thin "
+                         "not-CBA), and merge the resolutions into --out. "
+                         "Forces OCR regardless of --fast.")
+    ap.add_argument("--thin-body", type=int, default=1, dest="thin_body",
+                    help="In --recheck-from mode, re-OCR 'not-CBA' rows whose "
+                         "body signal is <= this (default 1: the thin-text "
+                         "trap).")
     args = ap.parse_args()
+
+    if args.recheck_from:
+        return run_recheck(args)
 
     use_ocr = not args.fast
     extractor = _get_extractor()  # also exposes resolve_pdf_path
