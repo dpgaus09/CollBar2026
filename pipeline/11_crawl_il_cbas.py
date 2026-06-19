@@ -1648,6 +1648,62 @@ def _ensure_website_urls(conn):
 
 
 # ---------------------------------------------------------------------------
+# Content guard — reject non-contract PDFs before they pollute the corpus
+# ---------------------------------------------------------------------------
+
+# Detail prefixes that mean "we could not actually READ the document" (no
+# embedded text layer, corrupt PDF, or an extractor error). A scanned real CBA
+# is indistinguishable from scanned junk without OCR — too slow to run mid-crawl
+# — so docs with these outcomes are KEPT and left for downstream OCR extraction
+# and the stored-doc audit to resolve. We only reject docs we could READ.
+_CONTENT_INCONCLUSIVE_PREFIXES = ("insufficient_text", "unreadable", "classify_error")
+
+_classifier_mod = None
+
+
+def _get_classifier():
+    """Lazily load 13_recover_viewer_cbas.py for its accurate content classifier.
+
+    Loaded on first use (importlib) so a plain import of this crawler stays cheap
+    and so the two modules can reference each other without an import-time cycle
+    (13 already lazy-loads this module for its keyword score).
+    """
+    global _classifier_mod
+    if _classifier_mod is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "recover_viewer_cbas",
+            Path(__file__).parent / "13_recover_viewer_cbas.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _classifier_mod = mod
+    return _classifier_mod
+
+
+def _reject_non_cba_content(pdf_bytes: bytes) -> tuple[bool, str]:
+    """Decide whether a downloaded PDF should be rejected as a non-contract.
+
+    Returns (reject, detail). The link keyword-score that surfaces candidates is
+    noisy — handbooks, board agendas and policy manuals score highly — so before
+    storing a PDF as ``cba_pdf`` we run the same content classifier the audit and
+    viewer-recovery use (text layer only, no OCR, to keep the crawl fast).
+
+    reject is True ONLY when the text layer was readable AND the classifier
+    judged it a confident non-contract. Unreadable / scanned / too-short PDFs
+    come back inconclusive and are KEPT, so we never newly false-reject a scanned
+    real CBA.
+    """
+    try:
+        is_cba, detail = _get_classifier().classify_cba_bytes(pdf_bytes, use_ocr=False)
+    except Exception as e:  # noqa: BLE001 — the gate must never crash a crawl
+        log.debug("  content classifier unavailable (%s) — keeping PDF", e)
+        return False, f"classify_unavailable ({e})"
+    if is_cba or detail.startswith(_CONTENT_INCONCLUSIVE_PREFIXES):
+        return False, detail
+    return True, detail
+
+
+# ---------------------------------------------------------------------------
 # Download + store a single classified PDF candidate
 # ---------------------------------------------------------------------------
 
@@ -1763,6 +1819,22 @@ def _store_candidate(cur, conn, session, district_id, candidate, homepage, dry_r
         log.info("  Duplicate (hash already stored for district) — skipping download")
         return "skip", {"status": "skip", "url": pdf_url, "file_hash": file_hash,
                         "reason": "duplicate", "bargaining_unit": unit}
+
+    # Content guard (Task #89): the link keyword-score that surfaced this
+    # candidate is noisy — handbooks, board agendas and policy manuals score
+    # highly and used to be stored as cba_pdf, polluting the contract corpus.
+    # Run the accurate content classifier on the PDF's actual text BEFORE saving
+    # it to disk/object storage or upserting. Only confidently-readable
+    # non-contracts are rejected; scanned/unreadable PDFs are kept (a scanned
+    # real CBA is indistinguishable until OCR, which is too slow mid-crawl). A
+    # rejection returns "failed" so a district with only junk stays in the retry
+    # pool instead of being marked resolved.
+    reject, cdetail = _reject_non_cba_content(pdf_bytes)
+    if reject:
+        log.info("  Rejected as non-CBA content [%s] — not storing: %s", cdetail, pdf_url)
+        return "failed", {"status": "failed", "url": pdf_url, "file_hash": file_hash,
+                          "reason": "not_cba_content", "bargaining_unit": unit,
+                          "classify_detail": cdetail}
 
     IL_CBA_DATA_DIR.mkdir(parents=True, exist_ok=True)
     local_path = IL_CBA_DATA_DIR / f"{file_hash}.pdf"
