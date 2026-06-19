@@ -18,5 +18,7 @@
 - [OCR quality flag](ocr-quality-flag.md) — extraction_runs.ocr_confidence/ocr_low_quality (threshold 70); use latest-per-doc; legacy cache has no score (NULL != good).
 - [IL viewer recovery](il-viewer-recovery.md) — manual-review CSV is a crawl side-effect (empty until non-dry-run re-crawl); 13_recover_viewer_cbas.py resolves Box/Issuu/Drive best-effort + --pdf manual ingest.
 - [Board-policy manual purge](policy-manual-purge.md) — non-CBA PRESS manuals stored as cba_pdf; re-label to doc_type 'policy_manual' + purge derived rows; scanned ones caught by URL not OCR.
+- [Customer-view state scoping](collbar-customer-state-scoping.md) — customer dashboard is IL-only via CUSTOMER_STATE; per-id child endpoints need their own guard or OH leaks (IDOR); OH kept in DB.
+- [Stored CBA audit OCR-recheck](cba-audit-recheck.md) — force-OCR recheck: OCR-fail must label 'unreadable', never fall back to a confident 'not-CBA' from the distrusted thin text layer.
 - [doc_type purge constraint lockstep](doc-type-purge-constraint-lockstep.md) — 15/16 purge scripts each DROP/ADD the doc_type CHECK from their own _DOC_TYPES; keep all lists + schema in lockstep or the later --apply fails.
 - [Non-CBA cleanup confident vs borderline](non-cba-cleanup-split.md) — 16_purge_non_cbas relabels confident not-CBA→non_cba; CBA-named/thin rows HELD to non_cba_review.csv, never bulk-deleted.

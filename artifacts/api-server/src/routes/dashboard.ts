@@ -80,6 +80,16 @@ function buildWhere(conditions: Array<SQL | null | undefined>): SQL {
 // ---------------------------------------------------------------------------
 const CUSTOMER_STATE = "IL";
 
+// Guard for per-district child endpoints. Returns true only when the district
+// exists AND belongs to the customer-facing state, so an authenticated user
+// cannot read another state's data by passing its district id directly.
+async function isCustomerDistrict(districtId: number): Promise<boolean> {
+  const r = await db.execute(
+    sql`SELECT 1 FROM districts WHERE id = ${districtId} AND state = ${CUSTOMER_STATE} LIMIT 1`,
+  );
+  return r.rows.length > 0;
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/dashboard/districts
 // ---------------------------------------------------------------------------
@@ -174,6 +184,7 @@ router.get("/dashboard/districts/:id/provisions", canAccessDistrict, async (req:
   if (rawCat && !VALID.has(rawCat)) { res.status(400).json({ error: "Invalid category" }); return; }
 
   try {
+    if (!(await isCustomerDistrict(districtId))) { res.status(404).json({ error: "District not found" }); return; }
     const catCondition = rawCat ? sql`AND cp.category = ${rawCat}` : sql``;
     const rows = await db.execute(sql`
       SELECT cp.id, cp.category, cp.provision_key, cp.value_numeric, cp.value_text,
@@ -203,6 +214,7 @@ router.get("/dashboard/districts/:id/settlements", canAccessDistrict, async (req
   if (isNaN(districtId)) { res.status(400).json({ error: "Invalid district id" }); return; }
   const unit = parseUnit(req.query.bargainingUnit);
   try {
+    if (!(await isCustomerDistrict(districtId))) { res.status(404).json({ error: "District not found" }); return; }
     // Settlements: compute cost impact using EIS real salary (preferred) or TSS midpoint fallback.
     // Also include EIS cross-check (YoY salary change vs. our base_increase_pct).
     // Cost-impact / EIS columns are teacher-specific (FTE, TSS, EIS salary tables
@@ -317,6 +329,7 @@ router.get("/dashboard/districts/:id/factfinding", canAccessDistrict, async (req
   const districtId = parseInt(String(req.params.id), 10);
   if (isNaN(districtId)) { res.status(400).json({ error: "Invalid district id" }); return; }
   try {
+    if (!(await isCustomerDistrict(districtId))) { res.status(404).json({ error: "District not found" }); return; }
     const rows = await db.execute(sql`
       SELECT fp.id, fp.case_number, fp.report_date, fp.union_name,
              fp.employer_proposal_pct, fp.union_proposal_pct,

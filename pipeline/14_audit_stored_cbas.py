@@ -245,11 +245,17 @@ def _recheck_classify(pdf_path: Path, extractor, recovery) -> tuple[str, str]:
         is_cba, base_detail = tl_is_cba, tl_detail
         source = "text_layer"
 
+    ocr_insufficient = len(ot) < min_chars
     if is_cba is True:
         label = "CBA"
     elif base_detail.startswith("insufficient_text"):
         # Could not read enough text even after a forced OCR attempt. This is
         # INCONCLUSIVE, not a confirmed non-CBA.
+        label = "unreadable"
+    elif source == "text_layer" and ocr_insufficient:
+        # This candidate was force-OCR'd precisely because its (thin) text layer
+        # was not trustworthy. The OCR pass failed to produce substantive text,
+        # so we cannot confirm not-CBA — flag INCONCLUSIVE, never not-CBA.
         label = "unreadable"
     else:
         label = "not-CBA"
