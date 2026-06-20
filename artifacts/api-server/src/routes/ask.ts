@@ -8,6 +8,8 @@ import {
 import rateLimit from "express-rate-limit";
 import type Anthropic from "@anthropic-ai/sdk";
 import { anthropic } from "@workspace/integrations-anthropic-ai";
+import { db } from "@workspace/db";
+import { sql } from "drizzle-orm";
 import { logger } from "../lib/logger.js";
 import {
   ASK_TOOL_DEFS,
@@ -37,6 +39,7 @@ const MAX_QUESTION_LEN = 1000;
 const MAX_ANSWER_LEN = 6000; // cap on a prior assistant answer carried in history
 const MAX_HISTORY_MESSAGES = 10; // prior turns (user+assistant) carried as context
 const MAX_TOOL_RESULT_CHARS = 12_000; // cap serialized rows handed back to model
+const FALLBACK_ANSWER = "I couldn't find an answer to that question.";
 
 function requireAuth(req: Request, res: Response, next: NextFunction): void {
   if (!req.session.userId) {
@@ -80,38 +83,114 @@ function extractText(content: Anthropic.ContentBlock[]): string {
     .trim();
 }
 
-// Rebuild prior conversation turns from the (untrusted) client payload into a
-// clean, strictly-alternating user/assistant message list. We only carry plain
-// text turns (the user's questions and the assistant's prose answers) — tool
-// calls are not replayed; the model simply re-runs tools with refined scope.
-// State lives client-side for the session: persistence was deliberately
-// deferred (no conversations/messages tables yet).
-function sanitizeHistory(raw: unknown): Anthropic.MessageParam[] {
-  if (!Array.isArray(raw)) return [];
+// Coerce node-postgres' string bigint ids back to numbers at the API boundary
+// (every client interface declares id: number; the values are small serials).
+function num(v: unknown): number {
+  return Number(v);
+}
+
+interface StoredMessage {
+  role: "user" | "assistant";
+  content: string;
+  results: AskResult[] | null;
+}
+
+// Load a conversation's stored turns from the DB, verifying it belongs to the
+// signed-in user. Returns null when the conversation does not exist or is owned
+// by someone else (the caller turns that into a 404 / fresh thread).
+async function loadConversation(
+  conversationId: number,
+  userId: number,
+): Promise<{ title: string; messages: StoredMessage[] } | null> {
+  const conv = await db.execute(sql`
+    SELECT id, title FROM conversations
+    WHERE id = ${conversationId} AND user_id = ${userId}
+  `);
+  if (!conv.rows.length) return null;
+  const title = (conv.rows[0] as { title: string }).title;
+
+  const msgs = await db.execute(sql`
+    SELECT role, content, results
+    FROM messages
+    WHERE conversation_id = ${conversationId}
+    ORDER BY created_at ASC, id ASC
+  `);
+  const messages: StoredMessage[] = msgs.rows.map((r) => {
+    const row = r as { role: string; content: string; results: unknown };
+    return {
+      role: row.role === "assistant" ? "assistant" : "user",
+      content: String(row.content),
+      results: Array.isArray(row.results)
+        ? (row.results as AskResult[])
+        : null,
+    };
+  });
+  return { title, messages };
+}
+
+// Turn stored turns into a clean, strictly-alternating message list for the
+// model. Only plain text is carried (tool calls are re-run, never replayed);
+// any trailing unanswered user turn from a prior failed request is dropped so
+// appending the new question keeps the user/assistant alternation the API
+// requires.
+function toModelHistory(stored: StoredMessage[]): Anthropic.MessageParam[] {
   const out: Array<{ role: "user" | "assistant"; content: string }> = [];
   let expected: "user" | "assistant" = "user";
-  for (const item of raw) {
-    if (!item || typeof item !== "object") continue;
-    const role = (item as { role?: unknown }).role;
-    const content = (item as { content?: unknown }).content;
-    if (role !== "user" && role !== "assistant") continue;
-    if (typeof content !== "string") continue;
-    const text = content.trim();
+  for (const m of stored) {
+    const text = m.content.trim();
     if (!text) continue;
-    if (role !== expected) continue; // enforce strict alternation, starting at user
-    const cap = role === "user" ? MAX_QUESTION_LEN : MAX_ANSWER_LEN;
-    out.push({ role, content: text.slice(0, cap) });
-    expected = role === "user" ? "assistant" : "user";
+    if (m.role !== expected) continue;
+    const cap = m.role === "user" ? MAX_QUESTION_LEN : MAX_ANSWER_LEN;
+    out.push({ role: m.role, content: text.slice(0, cap) });
+    expected = m.role === "user" ? "assistant" : "user";
   }
-  // Keep only the most recent turns, then trim so the slice still starts with a
-  // user turn and ends with an assistant turn (so appending the new question
-  // keeps the user/assistant alternation the API requires).
   let trimmed = out.slice(-MAX_HISTORY_MESSAGES);
   if (trimmed.length && trimmed[0].role !== "user") trimmed = trimmed.slice(1);
   if (trimmed.length && trimmed[trimmed.length - 1].role !== "assistant") {
     trimmed = trimmed.slice(0, -1);
   }
   return trimmed;
+}
+
+// Persist a completed turn (the user's question + the assistant's grounded
+// answer) atomically, creating the conversation on the first turn. Returns the
+// conversation id so the client can keep adding to the same thread. A best-
+// effort title is derived from the first question.
+async function persistTurn(args: {
+  conversationId: number | null;
+  userId: number;
+  question: string;
+  answer: string;
+  results: AskResult[];
+}): Promise<number> {
+  const { userId, question, answer, results } = args;
+  const resultsJson = JSON.stringify(results);
+  return await db.transaction(async (tx) => {
+    let convId = args.conversationId;
+    if (convId == null) {
+      const title = question.slice(0, 80);
+      const created = await tx.execute(sql`
+        INSERT INTO conversations (user_id, title)
+        VALUES (${userId}, ${title})
+        RETURNING id
+      `);
+      convId = num((created.rows[0] as { id: unknown }).id);
+    } else {
+      await tx.execute(sql`
+        UPDATE conversations SET updated_at = NOW()
+        WHERE id = ${convId} AND user_id = ${userId}
+      `);
+    }
+    await tx.execute(sql`
+      INSERT INTO messages (conversation_id, role, content)
+      VALUES (${convId}, 'user', ${question})
+    `);
+    await tx.execute(sql`
+      INSERT INTO messages (conversation_id, role, content, results)
+      VALUES (${convId}, 'assistant', ${answer}, ${resultsJson}::jsonb)
+    `);
+    return convId;
+  });
 }
 
 router.post(
@@ -135,7 +214,36 @@ router.post(
       return;
     }
 
-    const history = sanitizeHistory(req.body?.history);
+    // Resume an existing thread when the client passes a conversationId. We
+    // load history server-side from the DB (never trusting a client payload)
+    // and verify ownership; an unknown/foreign id is rejected before streaming.
+    const rawConvId = req.body?.conversationId;
+    let conversationId: number | null = null;
+    if (rawConvId != null) {
+      const parsed = Number(rawConvId);
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        res.status(400).json({ error: "Invalid conversation id." });
+        return;
+      }
+      conversationId = parsed;
+    }
+
+    let history: Anthropic.MessageParam[] = [];
+    if (conversationId != null) {
+      try {
+        const loaded = await loadConversation(conversationId, userId as number);
+        if (!loaded) {
+          res.status(404).json({ error: "Conversation not found." });
+          return;
+        }
+        history = toModelHistory(loaded.messages);
+      } catch (err) {
+        logger.error({ err, userId }, "ask: failed to load conversation");
+        res.status(500).json({ error: "Could not load the conversation." });
+        return;
+      }
+    }
+
     const messages: Anthropic.MessageParam[] = [
       ...history,
       { role: "user", content: question },
@@ -236,15 +344,34 @@ router.post(
       return msg;
     };
 
-    // Reveal (or confirm) the assembled result cards, then close the stream.
-    const finish = (answer: string) => {
+    // Reveal (or confirm) the assembled result cards, persist the completed
+    // turn, then close the stream. The `meta` event carries the conversation id
+    // (newly created on the first turn) so the client can keep adding to the
+    // same thread and refresh its saved-conversation list.
+    const finish = async (answer: string) => {
       send({ type: "results", results: collected });
+      const finalAnswer = answer.trim() || FALLBACK_ANSWER;
       if (!answer.trim()) {
-        send({
-          type: "token",
-          text: "I couldn't find an answer to that question.",
-        });
+        send({ type: "token", text: FALLBACK_ANSWER });
       }
+
+      // Persist before emitting `done` so the saved thread is durable the moment
+      // the client considers the turn finished. A persistence failure must not
+      // break the answer the user already has — log it and carry on.
+      try {
+        const savedId = await persistTurn({
+          conversationId,
+          userId: userId as number,
+          question,
+          answer: finalAnswer,
+          results: collected,
+        });
+        conversationId = savedId;
+        send({ type: "meta", conversationId: savedId });
+      } catch (err) {
+        logger.error({ err, userId }, "ask: failed to persist conversation");
+      }
+
       send({ type: "done" });
       res.end();
       logCompletion();
@@ -258,7 +385,7 @@ router.post(
         if (clientGone) return;
 
         if (response.stop_reason !== "tool_use" || budgetExhausted) {
-          finish(extractText(response.content));
+          await finish(extractText(response.content));
           return;
         }
 
@@ -324,7 +451,7 @@ router.post(
       // answer with no tools available, streamed like any other turn.
       if (clientGone) return;
       const finalResp = await streamTurn(false);
-      finish(extractText(finalResp.content));
+      await finish(extractText(finalResp.content));
     } catch (err) {
       // The client disconnected (we aborted the model request) — the socket is
       // gone and there's nothing to report, so just stop.
@@ -338,6 +465,79 @@ router.post(
         send({ type: "error", error: message });
         res.end();
       }
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// GET /api/dashboard/conversations
+//
+// The signed-in user's saved Ask threads, newest activity first. Used to
+// populate the "Recent conversations" list so the user can resume one.
+// ---------------------------------------------------------------------------
+router.get(
+  "/dashboard/conversations",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const userId = req.session.userId as number;
+    try {
+      const rows = await db.execute(sql`
+        SELECT id, title, updated_at
+        FROM conversations
+        WHERE user_id = ${userId}
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 50
+      `);
+      const conversations = rows.rows.map((r) => {
+        const row = r as { id: unknown; title: string; updated_at: unknown };
+        return {
+          id: num(row.id),
+          title: row.title,
+          updatedAt: row.updated_at,
+        };
+      });
+      res.json({ conversations });
+    } catch (err) {
+      logger.error({ err, userId }, "ask: failed to list conversations");
+      res.status(500).json({ error: "Could not load conversations." });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// GET /api/dashboard/conversations/:id
+//
+// The full thread for one saved conversation (verified to belong to the user),
+// so the client can render it and continue asking follow-ups.
+// ---------------------------------------------------------------------------
+router.get(
+  "/dashboard/conversations/:id",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const userId = req.session.userId as number;
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ error: "Invalid conversation id." });
+      return;
+    }
+    try {
+      const loaded = await loadConversation(id, userId);
+      if (!loaded) {
+        res.status(404).json({ error: "Conversation not found." });
+        return;
+      }
+      res.json({
+        id,
+        title: loaded.title,
+        messages: loaded.messages.map((m) => ({
+          role: m.role,
+          content: m.content,
+          results: m.results ?? [],
+        })),
+      });
+    } catch (err) {
+      logger.error({ err, userId }, "ask: failed to load conversation");
+      res.status(500).json({ error: "Could not load the conversation." });
     }
   },
 );

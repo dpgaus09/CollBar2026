@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { useAuth, useLogout } from "@/hooks/use-auth";
 import { apiUrl } from "@/lib/api";
@@ -26,22 +26,23 @@ interface AskResult {
 interface AskResponse {
   answer: string;
   results: AskResult[];
+  conversationId: number | null;
 }
 
-// A turn in the on-screen conversation. The user's question and the assistant's
-// prose answer (plus its grounded result cards). State lives only for the
-// session — there's no server-side persistence yet.
+// A turn in the on-screen conversation: the user's question and the assistant's
+// prose answer (plus its grounded result cards). Threads are persisted
+// server-side, keyed by a conversation id, so they survive refresh / re-login.
 interface Turn {
   role: "user" | "assistant";
   content: string;
   results?: AskResult[];
 }
 
-// What we send back to the server as prior context. Only the plain text of each
-// turn travels — the server rebuilds a clean, alternating message list from it.
-interface HistoryMessage {
-  role: "user" | "assistant";
-  content: string;
+// A saved conversation as listed in the sidebar.
+interface ConversationSummary {
+  id: number;
+  title: string;
+  updatedAt: string;
 }
 
 // The in-progress assistant turn while the answer is streaming in.
@@ -196,23 +197,43 @@ const FALLBACK_ANSWER = "I couldn't find an answer to that question.";
 export default function AskPage() {
   const [, setLocation] = useLocation();
   const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const queryClient = useQueryClient();
 
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
   const [streaming, setStreaming] = useState<StreamingTurn | null>(null);
+  // The persisted thread we're currently adding to. null = a brand-new, unsaved
+  // conversation; the server assigns an id on the first answered turn.
+  const [conversationId, setConversationId] = useState<number | null>(null);
+  const [resumeError, setResumeError] = useState<string | null>(null);
   const threadEndRef = useRef<HTMLDivElement | null>(null);
+
+  // The user's saved conversations (sidebar). Refetched after each turn so a
+  // newly created thread (and bumped activity) shows up.
+  const conversationsQuery = useQuery<ConversationSummary[]>({
+    queryKey: ["ask", "conversations"],
+    enabled: isAuthenticated,
+    queryFn: async () => {
+      const r = await fetch(apiUrl("/api/dashboard/conversations"), {
+        credentials: "include",
+      });
+      if (!r.ok) throw new Error("Could not load conversations.");
+      const body = (await r.json()) as { conversations: ConversationSummary[] };
+      return body.conversations;
+    },
+  });
 
   const ask = useMutation<
     AskResponse,
     Error,
-    { question: string; history: HistoryMessage[] }
+    { question: string; conversationId: number | null }
   >({
-    mutationFn: async ({ question: q, history }) => {
+    mutationFn: async ({ question: q, conversationId: convId }) => {
       const r = await fetch(apiUrl("/api/dashboard/ask"), {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: q, history }),
+        body: JSON.stringify({ question: q, conversationId: convId }),
       });
       if (r.status === 429) throw new Error("RATE_LIMIT");
       if (r.status === 401) throw new Error("UNAUTHENTICATED");
@@ -223,12 +244,14 @@ export default function AskPage() {
       if (!r.body) throw new Error("The assistant returned an empty response.");
 
       // Read the Server-Sent Events stream: append `token`, clear on `reset`,
-      // swap in cards on `results`, finish on `done`, throw on `error`.
+      // swap in cards on `results`, capture the thread id on `meta`, finish on
+      // `done`, throw on `error`.
       const reader = r.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
       let content = "";
       let results: AskResult[] = [];
+      let savedId: number | null = convId;
       let done = false;
 
       const flush = () => setStreaming({ content, results });
@@ -254,6 +277,7 @@ export default function AskPage() {
             text?: string;
             results?: AskResult[];
             error?: string;
+            conversationId?: number;
           };
           try {
             evt = JSON.parse(payload);
@@ -270,6 +294,10 @@ export default function AskPage() {
           } else if (evt.type === "results") {
             results = evt.results ?? [];
             flush();
+          } else if (evt.type === "meta") {
+            if (typeof evt.conversationId === "number") {
+              savedId = evt.conversationId;
+            }
           } else if (evt.type === "error") {
             throw new Error(evt.error || "STREAM_ERROR");
           } else if (evt.type === "done") {
@@ -287,7 +315,7 @@ export default function AskPage() {
           "The connection was interrupted before the answer finished. Please try again.",
         );
       }
-      return { answer: content || FALLBACK_ANSWER, results };
+      return { answer: content || FALLBACK_ANSWER, results, conversationId: savedId };
     },
     onMutate: () => {
       setStreaming({ content: "", results: [] });
@@ -298,6 +326,9 @@ export default function AskPage() {
         { role: "assistant", content: data.answer, results: data.results },
       ]);
       setStreaming(null);
+      if (data.conversationId != null) setConversationId(data.conversationId);
+      // Surface the newly created / freshly bumped thread in the sidebar.
+      queryClient.invalidateQueries({ queryKey: ["ask", "conversations"] });
     },
     onError: (_err, vars) => {
       // Roll back the optimistic user turn so the thread stays a clean
@@ -305,6 +336,43 @@ export default function AskPage() {
       setStreaming(null);
       setTurns((prev) => prev.slice(0, -1));
       setQuestion(vars.question);
+    },
+  });
+
+  // Load a saved thread into the view so the user can read it and continue.
+  const resume = useMutation<
+    { id: number; messages: Turn[] },
+    Error,
+    number
+  >({
+    mutationFn: async (id) => {
+      const r = await fetch(apiUrl(`/api/dashboard/conversations/${id}`), {
+        credentials: "include",
+      });
+      if (!r.ok) throw new Error("Could not open that conversation.");
+      const body = (await r.json()) as {
+        id: number;
+        messages: { role: "user" | "assistant"; content: string; results: AskResult[] }[];
+      };
+      return {
+        id: body.id,
+        messages: body.messages.map((m) => ({
+          role: m.role,
+          content: m.content,
+          results: m.role === "assistant" ? m.results : undefined,
+        })),
+      };
+    },
+    onSuccess: (data) => {
+      ask.reset();
+      setResumeError(null);
+      setTurns(data.messages);
+      setStreaming(null);
+      setQuestion("");
+      setConversationId(data.id);
+    },
+    onError: () => {
+      setResumeError("Could not open that conversation. Please try again.");
     },
   });
 
@@ -323,24 +391,28 @@ export default function AskPage() {
   const submit = (q: string) => {
     const trimmed = q.trim();
     if (!trimmed || ask.isPending) return;
-    // Only completed assistant-answered turns become history; the optimistic
-    // user turn we're about to add is the current question, sent separately.
-    const history: HistoryMessage[] = turns.map((t) => ({
-      role: t.role,
-      content: t.content,
-    }));
     setTurns((prev) => [...prev, { role: "user", content: trimmed }]);
     setQuestion("");
-    ask.mutate({ question: trimmed, history });
+    ask.mutate({ question: trimmed, conversationId });
   };
 
   const newConversation = () => {
     if (ask.isPending) return;
     ask.reset();
+    setResumeError(null);
     setTurns([]);
     setStreaming(null);
     setQuestion("");
+    setConversationId(null);
   };
+
+  const openConversation = (id: number) => {
+    if (ask.isPending || resume.isPending) return;
+    if (id === conversationId) return;
+    resume.mutate(id);
+  };
+
+  const conversations = conversationsQuery.data ?? [];
 
   const errorMessage = (() => {
     if (!ask.isError) return null;
@@ -356,7 +428,50 @@ export default function AskPage() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-mono">
       <Header />
-      <main className="max-w-3xl mx-auto px-6 py-10 space-y-6">
+      <div className="max-w-6xl mx-auto px-6 py-10 flex gap-8">
+        {/* Saved conversations sidebar */}
+        <aside className="hidden md:block w-60 flex-shrink-0">
+          <div className="sticky top-10 space-y-3">
+            <button
+              onClick={newConversation}
+              disabled={ask.isPending}
+              className="w-full text-[11px] font-medium text-slate-200 border border-slate-700 rounded px-2.5 py-2 hover:border-slate-500 hover:bg-slate-900 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              + New conversation
+            </button>
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-600 px-1">
+              Recent
+            </div>
+            {conversationsQuery.isLoading ? (
+              <div className="text-xs text-slate-600 px-1">Loading…</div>
+            ) : conversations.length === 0 ? (
+              <div className="text-xs text-slate-600 px-1 leading-relaxed">
+                No saved conversations yet. Ask something to start one.
+              </div>
+            ) : (
+              <ul className="space-y-1">
+                {conversations.map((c) => (
+                  <li key={c.id}>
+                    <button
+                      onClick={() => openConversation(c.id)}
+                      disabled={ask.isPending || resume.isPending}
+                      className={`w-full text-left text-xs rounded px-2.5 py-2 truncate transition-colors disabled:cursor-not-allowed ${
+                        c.id === conversationId
+                          ? "bg-slate-800 text-slate-100 border border-slate-700"
+                          : "text-slate-400 hover:bg-slate-900 hover:text-slate-200 border border-transparent"
+                      }`}
+                      title={c.title}
+                    >
+                      {c.title}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </aside>
+
+        <main className="flex-1 min-w-0 max-w-3xl space-y-6">
         <div className="flex items-start justify-between gap-3">
           <div>
             <h1 className="text-xl font-bold text-slate-100">Ask CollBar</h1>
@@ -371,12 +486,18 @@ export default function AskPage() {
             <button
               onClick={newConversation}
               disabled={ask.isPending}
-              className="flex-shrink-0 text-[11px] text-slate-400 border border-slate-800 rounded px-2.5 py-1.5 hover:border-slate-600 hover:text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              className="flex-shrink-0 text-[11px] text-slate-400 border border-slate-800 rounded px-2.5 py-1.5 hover:border-slate-600 hover:text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors md:hidden"
             >
               New conversation
             </button>
           )}
         </div>
+
+        {resumeError && (
+          <div className="rounded-lg border border-red-900 bg-red-950/30 p-3 text-red-300 text-xs">
+            {resumeError}
+          </div>
+        )}
 
         {/* Conversation thread */}
         {hasThread && (
@@ -465,7 +586,8 @@ export default function AskPage() {
         </div>
 
         <div ref={threadEndRef} />
-      </main>
+        </main>
+      </div>
     </div>
   );
 }
