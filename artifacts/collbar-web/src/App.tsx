@@ -10,6 +10,7 @@ import DistrictDashboardPage from "@/pages/dashboard/district";
 import ClausesPage from "@/pages/dashboard/clauses";
 import ComparablesPage from "@/pages/dashboard/comparables";
 import AskVsGotPage from "@/pages/dashboard/ask-vs-got";
+import AskPage from "@/pages/dashboard/ask";
 import ExpirationCalendarPage from "@/pages/expiration-calendar";
 import PeerSetsPage from "@/pages/peer-sets";
 import PlansPage from "@/pages/plans";
@@ -63,6 +64,7 @@ function Router() {
 
       {/* Dashboard */}
       <Route path="/dashboard" component={DashboardIndexPage} />
+      <Route path="/dashboard/ask" component={AskPage} />
       <Route path="/dashboard/:id" component={DistrictDashboardPage} />
       <Route path="/dashboard/:id/clauses" component={ClausesPage} />
       <Route path="/dashboard/:id/comparables" component={ComparablesPage} />

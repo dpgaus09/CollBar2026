@@ -55,8 +55,16 @@ export default function ClausesPage() {
   const { isAuthenticated, isLoading: authLoading } = useAuth();
   const logout = useLogout();
 
-  const [category, setCategory] = useState("");
-  const [search, setSearch] = useState("");
+  // Seed filters from deep-link query params (?category=&q=) so a result card
+  // from the Ask page lands on the clauses view already filtered.
+  const initialFilters = (() => {
+    if (typeof window === "undefined") return { category: "", search: "" };
+    const sp = new URLSearchParams(window.location.search);
+    return { category: sp.get("category") ?? "", search: sp.get("q") ?? "" };
+  })();
+
+  const [category, setCategory] = useState(initialFilters.category);
+  const [search, setSearch] = useState(initialFilters.search);
 
   const { data, isLoading } = useQuery<{ provisions: Provision[] }>({
     queryKey: [`/api/dashboard/districts/${id}/provisions`],

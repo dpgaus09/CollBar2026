@@ -23,3 +23,4 @@
 - [doc_type purge constraint lockstep](doc-type-purge-constraint-lockstep.md) — 15/16 purge scripts each DROP/ADD the doc_type CHECK from their own _DOC_TYPES; keep all lists + schema in lockstep or the later --apply fails.
 - [Non-CBA cleanup confident vs borderline](non-cba-cleanup-split.md) — 16_purge_non_cbas relabels confident not-CBA→non_cba; CBA-named/thin rows HELD to non_cba_review.csv, never bulk-deleted.
 - [Crawler content gate (cba_pdf)](crawler-content-gate.md) — crawler classifies PDF text-layer before storing; reject only readable confident non-CBAs, KEEP inconclusive (scanned CBAs) or you false-reject contracts.
+- [api-server new-route 404 → restart](api-server-new-route-restart.md) — a correct, registered new route 404s when the tsx-watch dev server predates it; restart the API Server workflow before curl-testing.

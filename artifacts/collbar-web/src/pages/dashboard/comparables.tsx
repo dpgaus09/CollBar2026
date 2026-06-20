@@ -145,18 +145,28 @@ export default function ComparablesPage() {
   const { isAuthenticated, isLoading: authLoading } = useAuth();
   const logout = useLogout();
 
-  // Read peer_set_id from URL search params
-  const initialPeerSetId = (() => {
-    if (typeof window === "undefined") return "";
+  // Read filters + peer_set_id from URL search params so a deep link from the
+  // Ask page (?county=&band=&districtType=&yearFrom=&yearTo=) lands pre-filtered.
+  const initialParams = (() => {
+    if (typeof window === "undefined")
+      return { peerSetId: "", county: "", band: "", districtType: "", yearFrom: "", yearTo: "" };
     const sp = new URLSearchParams(window.location.search);
-    return sp.get("peer_set_id") ?? "";
+    return {
+      peerSetId: sp.get("peer_set_id") ?? "",
+      county: sp.get("county") ?? "",
+      band: sp.get("band") ?? "",
+      districtType: sp.get("districtType") ?? "",
+      yearFrom: sp.get("yearFrom") ?? "",
+      yearTo: sp.get("yearTo") ?? "",
+    };
   })();
+  const initialPeerSetId = initialParams.peerSetId;
 
-  const [county, setCounty] = useState("");
-  const [band, setBand] = useState("");
-  const [districtType, setDistrictType] = useState("");
-  const [yearFrom, setYearFrom] = useState("");
-  const [yearTo, setYearTo] = useState("");
+  const [county, setCounty] = useState(initialParams.county);
+  const [band, setBand] = useState(initialParams.band);
+  const [districtType, setDistrictType] = useState(initialParams.districtType);
+  const [yearFrom, setYearFrom] = useState(initialParams.yearFrom);
+  const [yearTo, setYearTo] = useState(initialParams.yearTo);
   const [page, setPage] = useState(1);
   const [selectedPeerSetId, setSelectedPeerSetId] = useState(initialPeerSetId);
 

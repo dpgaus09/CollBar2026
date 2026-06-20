@@ -75,6 +75,12 @@ function TopBar() {
       </div>
       <div className="flex items-center gap-4">
         <a
+          href={`${import.meta.env.BASE_URL}dashboard/ask`}
+          className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
+        >
+          Ask AI
+        </a>
+        <a
           href={`${import.meta.env.BASE_URL}peer-sets`}
           className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
         >
