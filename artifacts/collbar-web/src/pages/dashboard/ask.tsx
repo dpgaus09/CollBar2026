@@ -44,6 +44,12 @@ interface HistoryMessage {
   content: string;
 }
 
+// The in-progress assistant turn while the answer is streaming in.
+interface StreamingTurn {
+  content: string;
+  results: AskResult[];
+}
+
 const EXAMPLE_QUESTIONS = [
   "Which districts settled above 4% in their most recent contract?",
   "Who has a teacher contract expiring in 2026?",
@@ -120,6 +126,19 @@ function ResultCard({ r }: { r: AskResult }) {
   );
 }
 
+function ResultList({ results }: { results: AskResult[] }) {
+  return (
+    <div className="space-y-2">
+      <div className="text-xs text-slate-500">
+        {results.length} result{results.length !== 1 ? "s" : ""} — click to open
+      </div>
+      {results.map((r, i) => (
+        <ResultCard key={`${r.type}-${r.id}-${i}`} r={r} />
+      ))}
+    </div>
+  );
+}
+
 function AnswerTurn({ turn }: { turn: Turn }) {
   const results = turn.results ?? [];
   return (
@@ -134,14 +153,7 @@ function AnswerTurn({ turn }: { turn: Turn }) {
       </div>
 
       {results.length > 0 ? (
-        <div className="space-y-2">
-          <div className="text-xs text-slate-500">
-            {results.length} result{results.length !== 1 ? "s" : ""} — click to open
-          </div>
-          {results.map((r, i) => (
-            <ResultCard key={`${r.type}-${r.id}-${i}`} r={r} />
-          ))}
-        </div>
+        <ResultList results={results} />
       ) : (
         <div className="text-xs text-slate-600">
           No matching records to link to.
@@ -151,12 +163,43 @@ function AnswerTurn({ turn }: { turn: Turn }) {
   );
 }
 
+// The live assistant turn rendered while the answer streams in. Shows a
+// "Searching…" hint until the first tokens arrive, a blinking caret as the
+// prose fills in, and the result cards the moment the server reveals them.
+function StreamingAnswer({ turn }: { turn: StreamingTurn }) {
+  return (
+    <div className="space-y-3">
+      <div className="rounded-lg border border-slate-800 bg-slate-900 p-5">
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 mb-2 flex items-center gap-2">
+          Answer
+          <span className="inline-block h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />
+        </div>
+        {turn.content ? (
+          <div className="text-sm text-slate-200 leading-relaxed whitespace-pre-wrap">
+            {turn.content}
+            <span className="inline-block w-1.5 h-4 bg-blue-400/80 ml-0.5 align-text-bottom animate-pulse" />
+          </div>
+        ) : (
+          <div className="text-sm text-slate-500 animate-pulse">
+            Searching the database…
+          </div>
+        )}
+      </div>
+
+      {turn.results.length > 0 && <ResultList results={turn.results} />}
+    </div>
+  );
+}
+
+const FALLBACK_ANSWER = "I couldn't find an answer to that question.";
+
 export default function AskPage() {
   const [, setLocation] = useLocation();
   const { isAuthenticated, isLoading: authLoading } = useAuth();
 
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
+  const [streaming, setStreaming] = useState<StreamingTurn | null>(null);
   const threadEndRef = useRef<HTMLDivElement | null>(null);
 
   const ask = useMutation<
@@ -177,17 +220,89 @@ export default function AskPage() {
         const body = (await r.json().catch(() => ({}))) as { error?: string };
         throw new Error(body.error || `Request failed (HTTP ${r.status})`);
       }
-      return (await r.json()) as AskResponse;
+      if (!r.body) throw new Error("The assistant returned an empty response.");
+
+      // Read the Server-Sent Events stream: append `token`, clear on `reset`,
+      // swap in cards on `results`, finish on `done`, throw on `error`.
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let content = "";
+      let results: AskResult[] = [];
+      let done = false;
+
+      const flush = () => setStreaming({ content, results });
+
+      while (!done) {
+        const { value, done: readerDone } = await reader.read();
+        if (readerDone) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let sep: number;
+        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          const dataLine = frame
+            .split("\n")
+            .find((l) => l.startsWith("data:"));
+          if (!dataLine) continue;
+          const payload = dataLine.slice(5).trim();
+          if (!payload) continue;
+
+          let evt: {
+            type: string;
+            text?: string;
+            results?: AskResult[];
+            error?: string;
+          };
+          try {
+            evt = JSON.parse(payload);
+          } catch {
+            continue;
+          }
+
+          if (evt.type === "token") {
+            content += evt.text ?? "";
+            flush();
+          } else if (evt.type === "reset") {
+            content = "";
+            flush();
+          } else if (evt.type === "results") {
+            results = evt.results ?? [];
+            flush();
+          } else if (evt.type === "error") {
+            throw new Error(evt.error || "STREAM_ERROR");
+          } else if (evt.type === "done") {
+            done = true;
+            break;
+          }
+        }
+      }
+
+      // The stream ended without a terminal `done` — the connection dropped
+      // mid-answer. Treat it as a failure so we roll back rather than keeping a
+      // truncated answer.
+      if (!done) {
+        throw new Error(
+          "The connection was interrupted before the answer finished. Please try again.",
+        );
+      }
+      return { answer: content || FALLBACK_ANSWER, results };
+    },
+    onMutate: () => {
+      setStreaming({ content: "", results: [] });
     },
     onSuccess: (data) => {
       setTurns((prev) => [
         ...prev,
         { role: "assistant", content: data.answer, results: data.results },
       ]);
+      setStreaming(null);
     },
     onError: (_err, vars) => {
       // Roll back the optimistic user turn so the thread stays a clean
       // alternation, and restore the text so the user can retry easily.
+      setStreaming(null);
       setTurns((prev) => prev.slice(0, -1));
       setQuestion(vars.question);
     },
@@ -198,10 +313,10 @@ export default function AskPage() {
     if (!isAuthenticated) setLocation("/login");
   }, [authLoading, isAuthenticated, setLocation]);
 
-  // Keep the latest turn / spinner in view as the conversation grows.
+  // Keep the latest turn / streaming answer in view as the conversation grows.
   useEffect(() => {
     threadEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [turns.length, ask.isPending]);
+  }, [turns.length, streaming?.content, streaming?.results.length]);
 
   if (authLoading || !isAuthenticated) return null;
 
@@ -223,6 +338,7 @@ export default function AskPage() {
     if (ask.isPending) return;
     ask.reset();
     setTurns([]);
+    setStreaming(null);
     setQuestion("");
   };
 
@@ -277,12 +393,8 @@ export default function AskPage() {
               ),
             )}
 
-            {/* Loading */}
-            {ask.isPending && (
-              <div className="rounded-lg border border-slate-800 bg-slate-900 p-8 text-center text-slate-500 text-sm animate-pulse">
-                Searching the database…
-              </div>
-            )}
+            {/* Live streaming answer */}
+            {streaming && <StreamingAnswer turn={streaming} />}
 
             {/* Error */}
             {errorMessage && (

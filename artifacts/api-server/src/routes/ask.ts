@@ -69,6 +69,7 @@ Strict rules:
 - Base increase percentages are first-year salary-schedule base increases unless noted.
 - Keep answers concise and factual: a short prose summary (2-5 sentences). Cite specific districts and figures from the tool rows. Do NOT output markdown tables or lists of links — the app shows clickable result cards separately.
 - Plan tool calls efficiently; you have a limited tool budget. Prefer one well-scoped call over many broad ones.
+- When you need data, call the tools right away without writing any prose before the tool calls. Only write your answer text once you have the tool results.
 - This may be a multi-turn conversation. The user can ask follow-up questions that build on the previous answer (e.g. "now only the large ones", "what about 2023?", "how about Cook County?"). Interpret such follow-ups in the context of the conversation so far, carry forward the relevant filters and scope, and re-run the tools with the refined criteria. Never reuse figures from earlier in the conversation from memory — always re-fetch with the tools.`;
 
 function extractText(content: Anthropic.ContentBlock[]): string {
@@ -153,7 +154,38 @@ router.post(
       }
     };
 
-    const respond = (answer: string) => {
+    // --- SSE plumbing -------------------------------------------------------
+    // The answer streams back as Server-Sent Events over this POST response.
+    // Auth (401) and rate-limit (429) already ran as middleware, and the length
+    // checks above replied with plain JSON — so by here the request is valid.
+    // Header writing is lazy (startStream) so that a total failure of the very
+    // first model call can still fall back to a clean JSON 502 instead of a
+    // half-open event stream.
+    let streamStarted = false;
+    let clientGone = false;
+    const startStream = () => {
+      if (streamStarted) return;
+      streamStarted = true;
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+    };
+    const send = (event: Record<string, unknown>) => {
+      if (clientGone) return;
+      startStream();
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+
+    const abortController = new AbortController();
+    req.on("close", () => {
+      clientGone = true;
+      abortController.abort();
+    });
+
+    const logCompletion = () => {
       logger.info(
         {
           msg: "ask_completed",
@@ -166,35 +198,74 @@ router.post(
           resultCount: collected.length,
           questionLen: question.length,
           historyMessages: history.length,
+          streamed: true,
         },
         "ask request completed",
       );
-      res.json({
-        answer: answer || "I couldn't find an answer to that question.",
-        results: collected,
+    };
+
+    // Stream one model turn, forwarding text deltas to the client as they
+    // arrive. Returns the assembled final message so the caller can inspect
+    // stop_reason and any tool-use blocks.
+    const streamTurn = async (
+      withTools: boolean,
+    ): Promise<Anthropic.Message> => {
+      const ms = anthropic.messages.stream(
+        {
+          model: MODEL,
+          max_tokens: MAX_TOKENS,
+          system: SYSTEM_PROMPT,
+          // Drop tools once the budget is spent so the model is forced to answer
+          // from what it already has.
+          ...(withTools ? { tools: ASK_TOOL_DEFS as Anthropic.Tool[] } : {}),
+          messages,
+        },
+        // Abort the in-flight request if the client disconnects so we stop
+        // consuming (and paying for) model output nobody will see.
+        { signal: abortController.signal },
+      );
+      // A no-op error listener keeps an unhandled 'error' event from crashing
+      // the process; the rejection still surfaces via finalMessage().
+      ms.on("error", () => {});
+      ms.on("text", (delta) => {
+        if (delta) send({ type: "token", text: delta });
       });
+      const msg = await ms.finalMessage();
+      totalIn += msg.usage.input_tokens;
+      totalOut += msg.usage.output_tokens;
+      return msg;
+    };
+
+    // Reveal (or confirm) the assembled result cards, then close the stream.
+    const finish = (answer: string) => {
+      send({ type: "results", results: collected });
+      if (!answer.trim()) {
+        send({
+          type: "token",
+          text: "I couldn't find an answer to that question.",
+        });
+      }
+      send({ type: "done" });
+      res.end();
+      logCompletion();
     };
 
     try {
       for (let round = 0; round < MAX_ROUNDS; round++) {
+        if (clientGone) return;
         const budgetExhausted = toolCallCount >= MAX_TOOL_CALLS;
-        const response = await anthropic.messages.create({
-          model: MODEL,
-          max_tokens: MAX_TOKENS,
-          system: SYSTEM_PROMPT,
-          // Drop tools once the budget is spent so the model is forced to
-          // answer from what it already has.
-          ...(budgetExhausted ? {} : { tools: ASK_TOOL_DEFS as Anthropic.Tool[] }),
-          messages,
-        });
-        totalIn += response.usage.input_tokens;
-        totalOut += response.usage.output_tokens;
+        const response = await streamTurn(!budgetExhausted);
+        if (clientGone) return;
 
         if (response.stop_reason !== "tool_use" || budgetExhausted) {
-          respond(extractText(response.content));
+          finish(extractText(response.content));
           return;
         }
 
+        // This turn called tools. Any prose streamed before the tool calls is
+        // just preamble (the prompt asks the model not to) — tell the client to
+        // clear what it has shown so far so only the real answer remains.
+        send({ type: "reset" });
         messages.push({ role: "assistant", content: response.content });
 
         const toolUses = response.content.filter(
@@ -245,24 +316,28 @@ router.post(
         }
 
         messages.push({ role: "user", content: toolResults });
+        // Reveal the cards gathered so far while the final prose is generated.
+        send({ type: "results", results: collected });
       }
 
       // Exhausted all rounds without a natural-language stop — force a final
-      // answer with no tools available.
-      const finalResp = await anthropic.messages.create({
-        model: MODEL,
-        max_tokens: MAX_TOKENS,
-        system: SYSTEM_PROMPT,
-        messages,
-      });
-      totalIn += finalResp.usage.input_tokens;
-      totalOut += finalResp.usage.output_tokens;
-      respond(extractText(finalResp.content));
+      // answer with no tools available, streamed like any other turn.
+      if (clientGone) return;
+      const finalResp = await streamTurn(false);
+      finish(extractText(finalResp.content));
     } catch (err) {
+      // The client disconnected (we aborted the model request) — the socket is
+      // gone and there's nothing to report, so just stop.
+      if (clientGone) return;
       logger.error({ err, userId }, "ask request failed");
-      res.status(502).json({
-        error: "The assistant is unavailable right now. Please try again shortly.",
-      });
+      const message =
+        "The assistant is unavailable right now. Please try again shortly.";
+      if (!streamStarted) {
+        res.status(502).json({ error: message });
+      } else {
+        send({ type: "error", error: message });
+        res.end();
+      }
     }
   },
 );
