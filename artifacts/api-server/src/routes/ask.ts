@@ -34,6 +34,8 @@ const MAX_ROUNDS = 3; // model<->tool round trips before we force a final answer
 const MAX_TOOL_CALLS = 5; // total tool executions per request
 const MAX_RESULTS = 20; // cap on returned result cards
 const MAX_QUESTION_LEN = 1000;
+const MAX_ANSWER_LEN = 6000; // cap on a prior assistant answer carried in history
+const MAX_HISTORY_MESSAGES = 10; // prior turns (user+assistant) carried as context
 const MAX_TOOL_RESULT_CHARS = 12_000; // cap serialized rows handed back to model
 
 function requireAuth(req: Request, res: Response, next: NextFunction): void {
@@ -66,7 +68,8 @@ Strict rules:
 - Default bargaining unit is teachers unless the user clearly asks about support staff or another unit.
 - Base increase percentages are first-year salary-schedule base increases unless noted.
 - Keep answers concise and factual: a short prose summary (2-5 sentences). Cite specific districts and figures from the tool rows. Do NOT output markdown tables or lists of links — the app shows clickable result cards separately.
-- Plan tool calls efficiently; you have a limited tool budget. Prefer one well-scoped call over many broad ones.`;
+- Plan tool calls efficiently; you have a limited tool budget. Prefer one well-scoped call over many broad ones.
+- This may be a multi-turn conversation. The user can ask follow-up questions that build on the previous answer (e.g. "now only the large ones", "what about 2023?", "how about Cook County?"). Interpret such follow-ups in the context of the conversation so far, carry forward the relevant filters and scope, and re-run the tools with the refined criteria. Never reuse figures from earlier in the conversation from memory — always re-fetch with the tools.`;
 
 function extractText(content: Anthropic.ContentBlock[]): string {
   return content
@@ -74,6 +77,40 @@ function extractText(content: Anthropic.ContentBlock[]): string {
     .map((b) => b.text)
     .join("\n")
     .trim();
+}
+
+// Rebuild prior conversation turns from the (untrusted) client payload into a
+// clean, strictly-alternating user/assistant message list. We only carry plain
+// text turns (the user's questions and the assistant's prose answers) — tool
+// calls are not replayed; the model simply re-runs tools with refined scope.
+// State lives client-side for the session: persistence was deliberately
+// deferred (no conversations/messages tables yet).
+function sanitizeHistory(raw: unknown): Anthropic.MessageParam[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ role: "user" | "assistant"; content: string }> = [];
+  let expected: "user" | "assistant" = "user";
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const role = (item as { role?: unknown }).role;
+    const content = (item as { content?: unknown }).content;
+    if (role !== "user" && role !== "assistant") continue;
+    if (typeof content !== "string") continue;
+    const text = content.trim();
+    if (!text) continue;
+    if (role !== expected) continue; // enforce strict alternation, starting at user
+    const cap = role === "user" ? MAX_QUESTION_LEN : MAX_ANSWER_LEN;
+    out.push({ role, content: text.slice(0, cap) });
+    expected = role === "user" ? "assistant" : "user";
+  }
+  // Keep only the most recent turns, then trim so the slice still starts with a
+  // user turn and ends with an assistant turn (so appending the new question
+  // keeps the user/assistant alternation the API requires).
+  let trimmed = out.slice(-MAX_HISTORY_MESSAGES);
+  if (trimmed.length && trimmed[0].role !== "user") trimmed = trimmed.slice(1);
+  if (trimmed.length && trimmed[trimmed.length - 1].role !== "assistant") {
+    trimmed = trimmed.slice(0, -1);
+  }
+  return trimmed;
 }
 
 router.post(
@@ -97,7 +134,9 @@ router.post(
       return;
     }
 
+    const history = sanitizeHistory(req.body?.history);
     const messages: Anthropic.MessageParam[] = [
+      ...history,
       { role: "user", content: question },
     ];
     const collected: AskResult[] = [];
@@ -126,6 +165,7 @@ router.post(
           latencyMs: Date.now() - started,
           resultCount: collected.length,
           questionLen: question.length,
+          historyMessages: history.length,
         },
         "ask request completed",
       );
