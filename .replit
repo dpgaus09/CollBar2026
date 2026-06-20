@@ -28,6 +28,10 @@ args = "pipeline: IL CBA Crawl"
 task = "workflow.run"
 args = "pipeline: Stored CBA Audit"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "test"
+
 [[workflows.workflow]]
 name = "pipeline: IL Extraction"
 author = "agent"
@@ -60,6 +64,17 @@ outputType = "console"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "bash -c 'cd /home/runner/workspace/pipeline && python3 -u 14_audit_stored_cbas.py --fast --out data/stored_cba_audit_fast.csv && cp data/stored_cba_audit_fast.csv data/stored_cba_audit.csv && python3 -u 14_audit_stored_cbas.py --recheck-from data/stored_cba_audit_fast.csv --out data/stored_cba_audit.csv; echo \"[RECHECK DONE]\"; sleep infinity'"
+
+[[workflows.workflow]]
+name = "test"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server test"
+
+[workflows.workflow.metadata]
+isValidation = true
 
 [agent]
 stack = "PNPM_WORKSPACE"
