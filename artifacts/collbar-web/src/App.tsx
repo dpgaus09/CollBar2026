@@ -13,6 +13,7 @@ import AskVsGotPage from "@/pages/dashboard/ask-vs-got";
 import FinalOffersPage from "@/pages/dashboard/final-offers";
 import AskPage from "@/pages/dashboard/ask";
 import ToolkitPage from "@/pages/dashboard/toolkit";
+import SubmitDocumentsPage from "@/pages/dashboard/submit";
 import ExpirationCalendarPage from "@/pages/expiration-calendar";
 import PeerSetsPage from "@/pages/peer-sets";
 import PlansPage from "@/pages/plans";
@@ -76,6 +77,7 @@ function Router() {
       <Route path="/dashboard/:id/comparables" component={ComparablesPage} />
       <Route path="/dashboard/:id/ask-vs-got" component={AskVsGotPage} />
       <Route path="/dashboard/:id/final-offers" component={FinalOffersPage} />
+      <Route path="/dashboard/:id/submit" component={SubmitDocumentsPage} />
 
       {/* Peer sets */}
       <Route path="/peer-sets" component={PeerSetsPage} />

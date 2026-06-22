@@ -2,7 +2,7 @@ import { Lock } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { useUpgradeLock } from "@/components/upgrade";
 
-export type SubNavTab = "home" | "clauses" | "comparables" | "ask-vs-got" | "final-offers";
+export type SubNavTab = "home" | "clauses" | "comparables" | "ask-vs-got" | "final-offers" | "submit";
 
 // Tabs that require a paid plan. Overview ("home") is always available.
 const PAID_TABS = new Set<SubNavTab>(["clauses", "comparables", "ask-vs-got", "final-offers"]);
@@ -18,6 +18,7 @@ export function DashboardSubNav({ id, active }: { id: string; active: SubNavTab 
     { key: "comparables", label: "Comparables", href: `${base}/comparables` },
     { key: "ask-vs-got", label: "Ask vs Got", href: `${base}/ask-vs-got` },
     { key: "final-offers", label: "Final Offers", href: `${base}/final-offers` },
+    { key: "submit", label: "Submit Docs", href: `${base}/submit` },
   ];
 
   return (

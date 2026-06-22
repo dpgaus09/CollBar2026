@@ -1,4 +1,4 @@
-import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
+import { Router, raw, type IRouter, type Request, type Response, type NextFunction } from "express";
 import { db } from "@workspace/db";
 import { sql, type SQL } from "drizzle-orm";
 import { parseUnit } from "./bargaining-units.js";
@@ -12,6 +12,7 @@ import {
   isCustomerDistrict,
 } from "../lib/dashboard-query.js";
 import { gate, isFree } from "../lib/access.js";
+import { uploadCustomerSubmission, DriveNotConnectedError } from "../lib/google-drive.js";
 
 const router: IRouter = Router();
 
@@ -899,5 +900,126 @@ router.get("/dashboard/acceptance", requireAdmin, async (_req: Request, res: Res
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+// ---------------------------------------------------------------------------
+// POST /api/dashboard/submit-document
+// Customer-contributed document upload. A logged-in district user uploads a
+// single file (their salary schedule or a CBA PDF); the file is forwarded to the
+// admin's Google Drive "CollBar Customer Submissions" folder, organized per
+// district. The submission is ALWAYS attributed to the user's own district from
+// the session — never a client-supplied id — so a user cannot submit for another
+// district. The admin reviews in Drive and loads good files via the admin tool.
+// ---------------------------------------------------------------------------
+
+const SUBMIT_MAX_BYTES = 32 * 1024 * 1024; // 32 MB
+const submitDocBody = raw({ type: () => true, limit: SUBMIT_MAX_BYTES });
+
+const SUBMIT_ALLOWED_EXT: Record<string, string[]> = {
+  salary_schedule: ["pdf", "xlsx", "xls", "csv"],
+  cba: ["pdf"],
+};
+const SUBMIT_EXT_MIME: Record<string, string> = {
+  pdf: "application/pdf",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  xls: "application/vnd.ms-excel",
+  csv: "text/csv",
+};
+
+router.post("/dashboard/submit-document", requireAuth, (req: Request, res: Response) => {
+  submitDocBody(req, res, (err?: unknown) => {
+    if (err) {
+      const status =
+        (err as { status?: number }).status ?? (err as { statusCode?: number }).statusCode;
+      if (status === 413) {
+        res.status(413).json({ error: "File too large (max 32 MB)" });
+      } else {
+        res.status(400).json({ error: "Failed to read upload body" });
+      }
+      return;
+    }
+    handleSubmitDocument(req, res).catch((e) => {
+      console.error("submit-document error:", e);
+      res.status(500).json({ error: "Internal server error" });
+    });
+  });
+});
+
+async function handleSubmitDocument(req: Request, res: Response): Promise<void> {
+  const kind = String(req.query.kind ?? "");
+  if (kind !== "salary_schedule" && kind !== "cba") {
+    res.status(400).json({ error: "kind must be salary_schedule or cba" });
+    return;
+  }
+
+  const rawName = String(req.query.filename ?? "").trim();
+  if (!rawName) {
+    res.status(400).json({ error: "filename is required" });
+    return;
+  }
+  // Keep the base name only; strip path separators and risky characters.
+  const safeName = rawName
+    .replace(/[\\/]/g, "_")
+    .replace(/[^\w.\- ]/g, "_")
+    .slice(0, 180);
+  const ext = (safeName.includes(".") ? safeName.split(".").pop()! : "").toLowerCase();
+  const allowed = SUBMIT_ALLOWED_EXT[kind];
+  if (!allowed.includes(ext)) {
+    res
+      .status(400)
+      .json({ error: `Unsupported file type for ${kind}. Allowed: ${allowed.join(", ")}` });
+    return;
+  }
+
+  const body = req.body as Buffer;
+  if (!Buffer.isBuffer(body) || body.length === 0) {
+    res.status(400).json({ error: "Empty file" });
+    return;
+  }
+
+  const districtId = req.session.userDistrictId ?? null;
+  if (districtId == null) {
+    res
+      .status(400)
+      .json({ error: "Your account isn't linked to a district. Contact your administrator." });
+    return;
+  }
+
+  // District name for human-readable Drive folder labeling (best-effort).
+  let districtName = `District ${districtId}`;
+  try {
+    const r = await db.execute(sql`SELECT name FROM districts WHERE id = ${districtId} LIMIT 1`);
+    const n = (r.rows[0] as { name?: unknown } | undefined)?.name;
+    if (typeof n === "string" && n.trim()) districtName = n.trim();
+  } catch {
+    /* keep fallback label */
+  }
+
+  const uploaderEmail = req.session.userEmail ?? "unknown";
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const kindLabel = kind === "salary_schedule" ? "Salary Schedule" : "CBA";
+  const driveFileName = `${kindLabel} — ${safeName} — ${uploaderEmail} — ${dateStr}`;
+  const mimeType = SUBMIT_EXT_MIME[ext] ?? "application/octet-stream";
+
+  try {
+    const result = await uploadCustomerSubmission({
+      districtId,
+      districtName,
+      fileName: driveFileName,
+      mimeType,
+      content: body,
+    });
+    res.json({ ok: true, fileId: result.fileId, name: result.name });
+  } catch (e) {
+    if (e instanceof DriveNotConnectedError) {
+      res.status(503).json({
+        error:
+          "Document uploads aren't available yet — Google Drive isn't connected. Please contact your administrator.",
+      });
+      return;
+    }
+    console.error("Drive upload failed:", e);
+    res.status(502).json({ error: "Upload to Google Drive failed. Please try again." });
+  }
+}
 
 export default router;
