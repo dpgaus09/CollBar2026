@@ -6,7 +6,7 @@ import {
 } from "recharts";
 import { Lock } from "lucide-react";
 import { useAuth, useLogout } from "@/hooks/use-auth";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, sourceHref } from "@/lib/api";
 import { ProvenanceRow, ProvenanceValue } from "@/components/provenance";
 import { DashboardSubNav } from "@/components/dashboard-subnav";
 import { useUpgradeLock } from "@/components/upgrade";
@@ -458,7 +458,7 @@ function SettlementTable({
               )}
               {s.source_url && (
                 <a
-                  href={s.source_url}
+                  href={sourceHref(s.source_url, s.page_ref) ?? undefined}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-[10px] text-blue-600 hover:text-blue-400"

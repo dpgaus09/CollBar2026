@@ -1,5 +1,6 @@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { sourceHref } from "@/lib/api";
 
 export interface ProvenanceValueProps {
   value: string | number | null | undefined;
@@ -33,10 +34,7 @@ export function ProvenanceValue({
   const unitDisplay = unit ? ` ${unit}` : "";
   const isUnverified = !humanVerified;
   const confNum = confidence != null ? parseFloat(String(confidence)) : null;
-  const pdfLink =
-    sourceUrl && pageRef != null
-      ? `${sourceUrl}#page=${pageRef}`
-      : sourceUrl ?? null;
+  const pdfLink = sourceHref(sourceUrl, pageRef);
 
   const retrievedDisplay = retrievedAt
     ? new Date(retrievedAt).toLocaleDateString("en-US", {

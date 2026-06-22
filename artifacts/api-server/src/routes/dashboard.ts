@@ -11,7 +11,7 @@ import {
   buildWhere,
   isCustomerDistrict,
 } from "../lib/dashboard-query.js";
-import { gate, isFree } from "../lib/access.js";
+import { gate, isFree, UPGRADE_MESSAGE } from "../lib/access.js";
 import { uploadCustomerSubmission, DriveNotConnectedError } from "../lib/google-drive.js";
 
 const router: IRouter = Router();
@@ -342,6 +342,78 @@ router.get("/dashboard/districts/:id/settlements", gate({ ownDistrict: true }), 
       bargainingUnit: unit,
       availableUnits: unitRows.rows,
     });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/dashboard/document?src=upload://...
+// Streams a locally-stored uploaded CBA PDF so its source link renders in the
+// browser. Crawled docs use real http(s) URLs and are linked directly by the
+// client, so only the 'upload://' scheme is served here.
+// ---------------------------------------------------------------------------
+router.get("/dashboard/document", gate(), async (req: Request, res: Response) => {
+  const access = req.access;
+  if (!access) {
+    res.status(401).json({ error: "Authentication required" });
+    return;
+  }
+  const src = typeof req.query.src === "string" ? req.query.src : "";
+  if (!src.startsWith("upload://")) {
+    res.status(400).json({ error: "Unsupported document source" });
+    return;
+  }
+  try {
+    const result = await db.execute(sql`
+      SELECT storage_key, district_id
+      FROM source_documents
+      WHERE source_url = ${src}
+      LIMIT 1
+    `);
+    const row = result.rows[0] as
+      | { storage_key: string | null; district_id: number | null }
+      | undefined;
+    if (!row || !row.storage_key) {
+      res.status(404).json({ error: "Document not found" });
+      return;
+    }
+    // bigint district_id comes back from db.execute as a string; coerce so it
+    // compares correctly against the numeric access.districtId.
+    const docDistrictId = row.district_id == null ? null : Number(row.district_id);
+    // Only serve documents for customer-state (IL) districts.
+    if (docDistrictId == null || !(await isCustomerDistrict(docDistrictId))) {
+      res.status(404).json({ error: "Document not found" });
+      return;
+    }
+    // Access control (mirrors the rest of the dashboard): free customers may
+    // only fetch their OWN district's documents (like gate({ ownDistrict: true })).
+    // Paid customers and admins may fetch any IL district's document, consistent
+    // with the paid Comparables feature which surfaces other districts' source
+    // links. Without this any authenticated session could fetch any IL upload.
+    if (isFree(access) && (access.districtId == null || docDistrictId !== access.districtId)) {
+      res.status(403).json({ error: "FORBIDDEN_DISTRICT", message: UPGRADE_MESSAGE });
+      return;
+    }
+    if (!row.storage_key.startsWith("local:")) {
+      res.status(404).json({ error: "Document not available" });
+      return;
+    }
+    const absPath = row.storage_key.slice("local:".length);
+    // storage_key is a trusted server-written value; still keep this to PDFs.
+    if (!absPath.endsWith(".pdf")) {
+      res.status(404).json({ error: "Document not available" });
+      return;
+    }
+    const { existsSync, createReadStream } = await import("fs");
+    if (!existsSync(absPath)) {
+      res.status(404).json({ error: "Document file missing" });
+      return;
+    }
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", "inline");
+    createReadStream(absPath).pipe(res);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Internal server error" });

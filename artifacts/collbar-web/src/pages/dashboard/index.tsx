@@ -6,7 +6,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useLogout } from "@/hooks/use-auth";
 import { useUpgradeLock } from "@/components/upgrade";
 import { TopNavTools } from "@/components/top-nav-tools";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, sourceHref } from "@/lib/api";
 
 interface District {
   id: number;
@@ -129,7 +129,7 @@ function MinTeacherSalaryCard() {
           <div className="text-slate-600">CGFA · PA 103-515</div>
           {s.sourceUrl && (
             <a
-              href={s.sourceUrl}
+              href={sourceHref(s.sourceUrl) ?? undefined}
               target="_blank"
               rel="noopener noreferrer"
               className="text-blue-400 hover:underline"

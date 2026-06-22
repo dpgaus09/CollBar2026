@@ -760,13 +760,23 @@ def update_extraction_run(cur, run_id: int, status: str, error: Optional[str] = 
     )
 
 
-def resolve_bargaining_unit(c: "ContractData", default_unit: str = "teachers") -> str:
+def resolve_bargaining_unit(
+    c: "ContractData", default_unit: str = "teachers",
+    authoritative_unit: Optional[str] = None,
+) -> str:
     """Resolve a contract's canonical bargaining_unit from the LLM result.
 
-    Precedence: an explicit canonical LLM ``bargaining_unit`` value →
+    When ``authoritative_unit`` is given (the unit a human explicitly chose for a
+    manual upload), it overrides the LLM and classifier — the human's choice is
+    trusted over the model, which routinely misreads non-teacher contracts (e.g.
+    custodial or secretarial units) as 'teachers'.
+
+    Otherwise precedence is: an explicit canonical LLM ``bargaining_unit`` value →
     classifier over the text signals (bargaining_unit text, unit_scope, union
     name, affiliation) → the source document's unit hint (``default_unit``).
     """
+    if authoritative_unit and authoritative_unit.strip().lower() in common.BARGAINING_UNITS:
+        return authoritative_unit.strip().lower()
     llm = _s(c, "bargaining_unit")
     if llm and llm.strip().lower() in common.BARGAINING_UNITS:
         return llm.strip().lower()
@@ -784,10 +794,10 @@ def resolve_bargaining_unit(c: "ContractData", default_unit: str = "teachers") -
 
 def upsert_contract(
     cur, district_id, c: "ContractData", source_doc_id: int,
-    default_unit: str = "teachers",
+    default_unit: str = "teachers", authoritative_unit: Optional[str] = None,
 ) -> Optional[int]:
     """Insert a contract row. Returns the contract id."""
-    bargaining_unit = resolve_bargaining_unit(c, default_unit)
+    bargaining_unit = resolve_bargaining_unit(c, default_unit, authoritative_unit)
     try:
         cur.execute(
             """
@@ -984,17 +994,28 @@ def backfill_contract_units(conn) -> int:
     contracts. Idempotent and conservative: only overrides when the classifier
     finds a real signal (i.e. a non-'other' result that differs from the
     current value), so it never clobbers a more specific value with 'other'.
+
+    Contracts from manual uploads (source_url 'upload://…') are left untouched:
+    their unit is an explicit human choice and must not be re-derived by the
+    text classifier, which can misread non-teacher contracts.
     """
     import psycopg2  # driver is always available where this runs
 
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, unit_scope, union_name, affiliation, bargaining_unit FROM contracts"
+        """
+        SELECT c.id, c.unit_scope, c.union_name, c.affiliation, c.bargaining_unit,
+               sd.source_url
+        FROM contracts c
+        LEFT JOIN source_documents sd ON sd.id = c.source_doc_id
+        """
     )
     rows = cur.fetchall()
     updated = 0
     skipped_conflict = 0
-    for cid, scope, uname, affil, current in rows:
+    for cid, scope, uname, affil, current, src_url in rows:
+        if src_url and src_url.startswith("upload://"):
+            continue
         guess = common.classify_bargaining_unit(scope, uname, affil, default="other")
         if guess == "other" or guess == current:
             continue
@@ -1586,6 +1607,10 @@ def main():
         )
 
         is_html = doc_source_type == "html_contract"
+        # A human explicitly chose the unit for manual uploads (source_url
+        # 'upload://…'); trust it over the LLM, which often mislabels non-teacher
+        # contracts as 'teachers'.
+        is_upload = bool(source_url and source_url.startswith("upload://"))
 
         # --- Step 1 + 2: Resolve source file and extract text ---
         if is_html:
@@ -1746,7 +1771,10 @@ def main():
         doc_provisions = 0
         doc_audit_samples = 0
         for c in contracts_list:
-            contract_id = upsert_contract(cur, district_id, c, source_doc_id, doc_unit)
+            contract_id = upsert_contract(
+                cur, district_id, c, source_doc_id, doc_unit,
+                authoritative_unit=doc_unit if is_upload else None,
+            )
             if contract_id is None:
                 continue
             conn.commit()
