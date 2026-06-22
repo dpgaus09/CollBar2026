@@ -762,10 +762,10 @@ router.get("/admin/review-queue", requireAdminToken, async (req, res) => {
             JOIN contracts c ON cp.contract_id = c.id
             LEFT JOIN source_documents sd ON c.source_doc_id = sd.id
             LEFT JOIN districts d ON c.district_id = d.id
-            WHERE (cp.confidence < 0.8 OR cp.is_audit_sample = true)
+            WHERE cp.confidence < 0.8
               AND NOT cp.human_verified
               AND cp.category = ${category}
-            ORDER BY cp.is_audit_sample DESC, cp.confidence ASC, cp.id
+            ORDER BY cp.confidence ASC, cp.id
             LIMIT ${limit} OFFSET ${offset}
           `
         : sql`
@@ -791,17 +791,17 @@ router.get("/admin/review-queue", requireAdminToken, async (req, res) => {
             JOIN contracts c ON cp.contract_id = c.id
             LEFT JOIN source_documents sd ON c.source_doc_id = sd.id
             LEFT JOIN districts d ON c.district_id = d.id
-            WHERE (cp.confidence < 0.8 OR cp.is_audit_sample = true)
+            WHERE cp.confidence < 0.8
               AND NOT cp.human_verified
-            ORDER BY cp.is_audit_sample DESC, cp.confidence ASC, cp.id
+            ORDER BY cp.confidence ASC, cp.id
             LIMIT ${limit} OFFSET ${offset}
           `,
     );
 
     const countRows = await db.execute(
       category
-        ? sql`SELECT COUNT(*)::int AS n FROM contract_provisions cp WHERE (cp.confidence < 0.8 OR cp.is_audit_sample = true) AND NOT cp.human_verified AND cp.category = ${category}`
-        : sql`SELECT COUNT(*)::int AS n FROM contract_provisions cp WHERE (cp.confidence < 0.8 OR cp.is_audit_sample = true) AND NOT cp.human_verified`,
+        ? sql`SELECT COUNT(*)::int AS n FROM contract_provisions cp WHERE cp.confidence < 0.8 AND NOT cp.human_verified AND cp.category = ${category}`
+        : sql`SELECT COUNT(*)::int AS n FROM contract_provisions cp WHERE cp.confidence < 0.8 AND NOT cp.human_verified`,
     );
     const total = (countRows.rows[0] as { n: number })?.n ?? 0;
 

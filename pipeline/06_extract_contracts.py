@@ -66,7 +66,7 @@ COST_PER_1M_INPUT_TOKENS: float = 0.80
 COST_PER_1M_OUTPUT_TOKENS: float = 4.00
 
 # Fraction of high-confidence provisions flagged per extraction run for human auditing.
-AUDIT_SAMPLE_RATE: float = 0.05
+AUDIT_SAMPLE_RATE: float = 0.0  # Audit sampling disabled: high-confidence provisions are trusted and never enter the review queue. Set > 0 to re-enable.
 
 # Directory for saving raw LLM responses that failed JSON validation
 FAILED_JSON_DIR = Path(__file__).parent / "state" / "failed_json"
@@ -876,6 +876,10 @@ def mark_audit_samples(cur, contract_id: int, sample_rate: float = AUDIT_SAMPLE_
     """
     Mark a random fraction of high-confidence provisions (confidence >= 0.8) as
     audit samples for human spot-checking. Returns the number of provisions flagged.
+
+    Disabled by default (AUDIT_SAMPLE_RATE = 0.0): high-confidence extractions are
+    trusted and never flagged, so they do not enter the admin review queue. Set
+    AUDIT_SAMPLE_RATE > 0 to re-enable spot-check sampling.
     """
     cur.execute(
         """
@@ -887,7 +891,9 @@ def mark_audit_samples(cur, contract_id: int, sample_rate: float = AUDIT_SAMPLE_
     high_conf_ids = [row[0] for row in cur.fetchall()]
     if not high_conf_ids:
         return 0
-    n_sample = max(1, math.ceil(len(high_conf_ids) * sample_rate))
+    n_sample = math.ceil(len(high_conf_ids) * sample_rate)
+    if n_sample <= 0:
+        return 0
     sample_ids = random.sample(high_conf_ids, min(n_sample, len(high_conf_ids)))
     for sid in sample_ids:
         cur.execute(

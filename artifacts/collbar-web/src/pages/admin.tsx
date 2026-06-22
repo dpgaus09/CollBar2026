@@ -1901,7 +1901,7 @@ function ExtractionReportTab() {
           <Metric
             label="Review queue"
             value={data.reviewQueueCount}
-            sub="low-confidence + audit samples"
+            sub="confidence below 80%"
           />
         </div>
       </section>
@@ -1912,7 +1912,7 @@ function ExtractionReportTab() {
         <div className="rounded-lg border border-slate-800 bg-slate-950 p-5">
           <div className="grid grid-cols-3 gap-6 mb-4">
             <div>
-              <p className="text-xs text-slate-500 mb-1">Provisions flagged (5% sample)</p>
+              <p className="text-xs text-slate-500 mb-1">Provisions flagged (historical)</p>
               <p className="text-2xl font-bold font-mono text-slate-200">
                 {data.auditSampleCount.toLocaleString()}
               </p>
@@ -1962,7 +1962,7 @@ function ExtractionReportTab() {
           )}
           {data.auditSampleCount === 0 && (
             <p className="text-xs text-slate-600">
-              No audit samples yet — run 06_extract_contracts.py to populate.
+              Audit sampling is disabled — high-confidence provisions are trusted automatically and never enter the review queue.
             </p>
           )}
         </div>
