@@ -17,6 +17,18 @@ export interface Access {
   active: boolean;
 }
 
+// gate() attaches the freshly-resolved access onto the request so downstream
+// handlers can shape their response by plan (e.g. strip paid-only fields for
+// free customers) without re-reading the database.
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Express {
+    interface Request {
+      access?: Access;
+    }
+  }
+}
+
 // Resolve the caller's CURRENT access from the database rather than the cached
 // session. Enforcement must reflect admin changes (downgrade Pro->Free, change
 // of assigned district, or deactivation) immediately, not only after the
@@ -87,6 +99,7 @@ export function gate(options: GateOptions = {}) {
       res.status(401).json({ error: "Authentication required" });
       return;
     }
+    req.access = access;
     if (isFree(access)) {
       if (options.paid) {
         res.status(403).json({ error: "PAID_FEATURE", message: UPGRADE_MESSAGE });

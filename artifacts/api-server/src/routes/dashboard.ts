@@ -11,7 +11,7 @@ import {
   buildWhere,
   isCustomerDistrict,
 } from "../lib/dashboard-query.js";
-import { gate } from "../lib/access.js";
+import { gate, isFree } from "../lib/access.js";
 
 const router: IRouter = Router();
 
@@ -154,8 +154,53 @@ router.get("/dashboard/districts/:id", gate({ ownDistrict: true }), async (req: 
 
 // ---------------------------------------------------------------------------
 // GET /api/dashboard/districts/:id/provisions
+// Overview data source. Free customers may read this for their OWN district
+// (Overview is free), but the verbatim contract language (clause_excerpt) is the
+// signature content of the paid Key Clauses feature, so it is stripped for free
+// users. The full, browsable clause set lives behind the paid /clauses endpoint.
 // ---------------------------------------------------------------------------
 router.get("/dashboard/districts/:id/provisions", gate({ ownDistrict: true }), async (req: Request, res: Response) => {
+  const districtId = parseInt(String(req.params.id), 10);
+  if (isNaN(districtId)) { res.status(400).json({ error: "Invalid district id" }); return; }
+
+  const VALID = new Set(["compensation","insurance","retirement","leave","workday","evaluation","rif","grievance","other"]);
+  const rawCat = req.query.category ? String(req.query.category) : "";
+  if (rawCat && !VALID.has(rawCat)) { res.status(400).json({ error: "Invalid category" }); return; }
+
+  try {
+    if (!(await isCustomerDistrict(districtId))) { res.status(404).json({ error: "District not found" }); return; }
+    const catCondition = rawCat ? sql`AND cp.category = ${rawCat}` : sql``;
+    const rows = await db.execute(sql`
+      SELECT cp.id, cp.category, cp.provision_key, cp.value_numeric, cp.value_text,
+             cp.unit, cp.clause_excerpt, cp.page_ref, cp.confidence, cp.human_verified,
+             c.id AS contract_id, c.effective_start, c.effective_end,
+             c.source_doc_id, sd.source_url, sd.retrieved_at
+      FROM contract_provisions cp
+      JOIN contracts c ON cp.contract_id = c.id
+      LEFT JOIN source_documents sd ON c.source_doc_id = sd.id
+      WHERE c.district_id = ${districtId}
+      ${catCondition}
+      ORDER BY c.effective_start DESC NULLS LAST, cp.category, cp.provision_key
+      LIMIT 200
+    `);
+    const free = req.access ? isFree(req.access) : false;
+    const provisions = free
+      ? rows.rows.map((r) => ({ ...(r as Record<string, unknown>), clause_excerpt: null }))
+      : rows.rows;
+    res.json({ provisions });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/dashboard/districts/:id/clauses
+// Full, browsable provision set incl. verbatim clause excerpts — the paid Key
+// Clauses feature. Gated paid + own-district so free users cannot reconstruct it
+// via direct API calls.
+// ---------------------------------------------------------------------------
+router.get("/dashboard/districts/:id/clauses", gate({ ownDistrict: true, paid: true }), async (req: Request, res: Response) => {
   const districtId = parseInt(String(req.params.id), 10);
   if (isNaN(districtId)) { res.status(400).json({ error: "Invalid district id" }); return; }
 

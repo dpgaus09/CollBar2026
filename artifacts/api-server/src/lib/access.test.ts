@@ -306,4 +306,66 @@ describe("dashboard routes are wired to the real gate", () => {
     expect(res.status).toBe(403);
     expect(res.body).toEqual({ error: "FORBIDDEN_DISTRICT", message: UPGRADE_MESSAGE });
   });
+
+  // Key Clauses is a paid feature. Its full data endpoint must 403 a free user
+  // even for their OWN district, so the paywall can't be bypassed by direct API.
+  const proUser = { id: 2, role: "district_user", plan: "pro", district_id: 1, active: true };
+
+  it("403 (paid) for a free user hitting their OWN district's /clauses", async () => {
+    sessionUserId = 1;
+    execute.mockReset();
+    execute.mockResolvedValueOnce({ rows: [freeUser] });
+    const res = await request(dashApp).get("/api/dashboard/districts/1/clauses");
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "PAID_FEATURE", message: UPGRADE_MESSAGE });
+  });
+
+  it("200 for a pro user hitting /clauses (full excerpts returned)", async () => {
+    sessionUserId = 2;
+    execute.mockReset();
+    execute
+      .mockResolvedValueOnce({ rows: [proUser] }) // loadAccess
+      .mockResolvedValueOnce({ rows: [{ ok: 1 }] }) // isCustomerDistrict
+      .mockResolvedValueOnce({ rows: [{ id: 9, clause_excerpt: "verbatim clause text" }] });
+    const res = await request(dashApp).get("/api/dashboard/districts/1/clauses");
+    expect(res.status).toBe(200);
+    expect(res.body.provisions[0].clause_excerpt).toBe("verbatim clause text");
+  });
+
+  // The Overview's /provisions stays readable for a free user's own district,
+  // but the verbatim clause text (the paid Key Clauses content) is stripped
+  // while the summary values remain.
+  it("strips clause_excerpt for a free user on /provisions, keeps values", async () => {
+    sessionUserId = 1;
+    execute.mockReset();
+    execute
+      .mockResolvedValueOnce({ rows: [freeUser] }) // loadAccess
+      .mockResolvedValueOnce({ rows: [{ ok: 1 }] }) // isCustomerDistrict
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 9,
+            provision_key: "starting_salary",
+            value_numeric: "40000",
+            clause_excerpt: "verbatim clause text",
+          },
+        ],
+      });
+    const res = await request(dashApp).get("/api/dashboard/districts/1/provisions");
+    expect(res.status).toBe(200);
+    expect(res.body.provisions[0].clause_excerpt).toBeNull();
+    expect(res.body.provisions[0].value_numeric).toBe("40000");
+  });
+
+  it("keeps clause_excerpt for a pro user on /provisions", async () => {
+    sessionUserId = 2;
+    execute.mockReset();
+    execute
+      .mockResolvedValueOnce({ rows: [proUser] }) // loadAccess
+      .mockResolvedValueOnce({ rows: [{ ok: 1 }] }) // isCustomerDistrict
+      .mockResolvedValueOnce({ rows: [{ id: 9, clause_excerpt: "verbatim clause text" }] });
+    const res = await request(dashApp).get("/api/dashboard/districts/1/provisions");
+    expect(res.status).toBe(200);
+    expect(res.body.provisions[0].clause_excerpt).toBe("verbatim clause text");
+  });
 });

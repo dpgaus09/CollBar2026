@@ -50,13 +50,13 @@ export default function ClausesPage() {
   const [search, setSearch] = useState(initialFilters.search);
 
   const { data, isLoading } = useQuery<{ provisions: Provision[] }>({
-    queryKey: [`/api/dashboard/districts/${id}/provisions`],
+    queryKey: [`/api/dashboard/districts/${id}/clauses`],
     queryFn: () =>
-      fetch(apiUrl(`/api/dashboard/districts/${id}/provisions`), { credentials: "include" }).then((r) => {
+      fetch(apiUrl(`/api/dashboard/districts/${id}/clauses`), { credentials: "include" }).then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       }),
-    enabled: !!id,
+    enabled: !!id && !isFree,
   });
 
   useEffect(() => {
