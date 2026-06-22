@@ -3,3 +3,14 @@
 
 # No need to store the pnpm store twice.
 .local
+
+# Version control history — never needed at runtime (~1.6G).
+.git
+
+# Tool/build caches (uv, Playwright browsers, etc.) — regenerable, not needed at runtime (~1.1G).
+.cache
+
+# Crawl/extraction PDF + data artifacts (~1.7G). The production api-server serves structured
+# data from the database; these raw PDFs are dev-side crawl outputs read only by the Python
+# pipeline, which does not run on the autoscale deployment.
+pipeline/data

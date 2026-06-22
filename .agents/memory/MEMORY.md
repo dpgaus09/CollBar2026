@@ -6,6 +6,7 @@
 - [ISBE directory XLS format](isbe-directory-format.md) — sheet "1 Public Dist & Sch"; RCDTS = 9-digit RCD col + 2-digit Type col = 11 digits; filter RecType=='Dist' AND School=='0000'.
 - [IL CBA search fallback](il-cba-search-fallback.md) — Serper (primary) → Google CSE → DuckDuckGo; SERPER_API_KEY now set; run --search-fallback after direct crawl finishes.
 - [Cron requires Reserved VM](cron-reserved-vm.md) — node-cron fires only on Reserved VM; deployment type is set in the Replit Publishing UI (serve="vm" is NOT a valid artifact.toml value).
+- [Deployment image >8 GiB](deployment-image-size.md) — publish rejected for image size; trim .git/.cache/pipeline/data via .replitignore (safe on autoscale: pipeline/PDFs not used at runtime).
 - [ISBE connectivity from repl](isbe-connectivity.md) — isbe.net is unreachable from the sandbox (ConnectTimeoutError); only testable once deployed on a Reserved VM.
 - [Deployment CWD vs dev CWD](deployment-cwd-paths.md) — prod runs API server from workspace root, so process.cwd()+"../../pipeline" breaks ("/home/pipeline"); resolve repo-root paths by walking up.
 - [Dev schema apply + prod publish](drizzle-push-prod-schema.md) — never DDL prod; apply additive cols to dev DB then re-publish. `db push` wants to TRUNCATE contracts — use surgical ALTER instead.
