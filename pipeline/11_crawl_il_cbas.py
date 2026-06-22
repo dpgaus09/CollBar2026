@@ -1469,10 +1469,18 @@ def _load_crawl_state() -> dict:
 
 
 def _save_crawl_state(state: dict):
+    # Atomic write: dump to a per-process temp file then os.replace() into place.
+    # The normal crawl and the --recheck-expiring mode may run concurrently and
+    # both write this JSON; a plain open("w") could interleave and leave a
+    # corrupt file, which _load_crawl_state() would silently discard — wiping all
+    # crawl progress. os.replace() is atomic on POSIX, so a reader always sees a
+    # complete file (worst case last-writer-wins, which self-heals next run).
     IL_CBA_CRAWL_STATE.parent.mkdir(parents=True, exist_ok=True)
     state["last_updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    with open(IL_CBA_CRAWL_STATE, "w") as f:
+    tmp = IL_CBA_CRAWL_STATE.parent / f"{IL_CBA_CRAWL_STATE.name}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
         json.dump(state, f, indent=2)
+    os.replace(tmp, IL_CBA_CRAWL_STATE)
 
 
 # ---------------------------------------------------------------------------
@@ -1593,6 +1601,61 @@ def _count_il_no_url(conn) -> int:
     n = cur.fetchone()[0]
     cur.close()
     return n
+
+
+def _load_expiring_current_contracts(conn, window_days: int,
+                                     target_rcdts: Optional[str] = None) -> list[dict]:
+    """Current contract per (district, bargaining unit, unit scope) whose term
+    has ended or ends within ``window_days`` days, paired with the saved source
+    URL to re-fetch.
+
+    "Current" = the contract with the most recent ``effective_start`` for that
+    district+unit+scope (matching the contracts uniqueness key, so a district
+    that bargains the same unit across multiple scopes has each scope's current
+    contract re-checked). Contracts with an unknown (NULL) ``effective_end`` are excluded:
+    we only re-check when we can actually see the term is expiring/expired, so
+    districts that are well within term — or whose end date we don't know — are
+    left alone (no wasted fetches, no churn). Rows without a saved ``source_url``
+    can't be re-fetched and are likewise excluded.
+    """
+    cur = conn.cursor()
+    params: list = []
+    rcdts_filter = ""
+    if target_rcdts:
+        rcdts_filter = "AND d.state_district_id = %s"
+        params.append(target_rcdts)
+    params.append(window_days)
+    cur.execute(f"""
+        WITH ranked AS (
+            SELECT c.district_id, c.bargaining_unit, c.unit_scope,
+                   c.effective_start, c.effective_end, c.source_doc_id,
+                   sd.source_url, sd.source_type,
+                   d.state_district_id, d.name AS district_name, d.website_url,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY c.district_id, c.bargaining_unit, c.unit_scope
+                       ORDER BY c.effective_start DESC NULLS LAST, c.id DESC
+                   ) AS rn
+            FROM contracts c
+            JOIN districts d ON d.id = c.district_id
+            LEFT JOIN source_documents sd ON sd.id = c.source_doc_id
+            WHERE d.state = 'IL' {rcdts_filter}
+        )
+        SELECT district_id, state_district_id, district_name, website_url,
+               bargaining_unit, unit_scope, effective_start, effective_end,
+               source_doc_id, source_url, source_type
+        FROM ranked
+        WHERE rn = 1
+          AND effective_end IS NOT NULL
+          AND effective_end <= CURRENT_DATE + make_interval(days => %s)
+          AND source_url IS NOT NULL
+        ORDER BY effective_end ASC, district_name
+    """, params)
+    cols = ["district_id", "state_district_id", "district_name", "website_url",
+            "bargaining_unit", "unit_scope", "effective_start", "effective_end",
+            "source_doc_id", "source_url", "source_type"]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    cur.close()
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -2153,6 +2216,140 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
 
 
 # ---------------------------------------------------------------------------
+# Re-check expiring contracts
+# ---------------------------------------------------------------------------
+
+def _record_recheck(state: dict, rcdts: str, unit: str, outcome: str,
+                    row: dict, ts: str):
+    """Record a per-unit re-check outcome in the crawl state for observability,
+    without disturbing the district's existing crawl status."""
+    entry = state["per_district"].get(rcdts)
+    if entry is None:
+        # The district has a stored contract, so 'found' is the accurate status.
+        entry = {"status": "found"}
+        state["per_district"][rcdts] = entry
+    rc = entry.setdefault("recheck", {})
+    rc[unit] = {
+        "outcome":            outcome,
+        "effective_end_seen": str(row.get("effective_end")),
+        "checked_at":         ts,
+    }
+    entry["last_rechecked"] = ts
+
+
+def recheck_expiring(window_days: int = 90, dry_run: bool = False,
+                     target_rcdts: Optional[str] = None,
+                     limit: Optional[int] = None):
+    """Re-fetch the saved source URL of districts whose CURRENT contract is
+    expiring/expired, to pick up a newly-posted successor agreement.
+
+    Efficient policy (per product decision): only districts whose current
+    contract term has ended or ends within ``window_days`` are re-checked, and we
+    re-download the exact saved URL rather than re-running full discovery. If the
+    URL now serves a different file (new content hash) it is stored as a new
+    ``source_document`` and the normal extraction step ingests it as a new
+    contract version; if the bytes are unchanged nothing is stored (no churn).
+    Districts well within term, with an unknown end date, or with no saved URL
+    are skipped entirely.
+    """
+    global _current_district
+    conn = common.get_db_conn()
+    rows = _load_expiring_current_contracts(conn, window_days, target_rcdts)
+    log.info(
+        "IL CBA re-check starting: %d expiring/expired current contract(s) "
+        "(window=%d days, dry_run=%s)",
+        len(rows), window_days, dry_run,
+    )
+
+    state = _load_crawl_state()
+    session = requests.Session()
+    cur = conn.cursor()
+
+    def _ts() -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    checked = new_versions = unchanged = failed = skipped_html = 0
+
+    for row in rows:
+        if limit is not None and checked >= limit:
+            log.info("Re-check limit of %d reached — stopping", limit)
+            break
+
+        rcdts   = row["state_district_id"]
+        name    = row["district_name"]
+        unit    = row["bargaining_unit"]
+        url     = row["source_url"]
+        dist_id = row["district_id"]
+        src_type = row["source_type"] or "pdf"
+        _current_district = {"name": name, "rcdts": rcdts,
+                             "homepage": row.get("website_url")}
+
+        log.info("[RECHECK] %s (%s) unit=%s ends %s → %s",
+                 name, rcdts, unit, row["effective_end"], url)
+        checked += 1
+
+        # HTML-contract pages would need full page-text re-capture; that path is
+        # not supported here (none exist among current expiring contracts).
+        if src_type == "html_contract":
+            log.info("  Skipping html_contract re-check (page re-capture not supported)")
+            skipped_html += 1
+            _record_recheck(state, rcdts, unit, "skipped_html", row, _ts())
+            continue
+
+        cand = {"url": url, "bargaining_unit": unit, "found_via": "recheck_expiring"}
+        # homepage=None: the saved URL was already vetted when first stored, so we
+        # deliberately skip the same-domain guard (some districts host PDFs
+        # off-domain). _store_candidate still verifies %PDF, rejects non-CBA
+        # content, and skips re-storing an unchanged file (per-district hash dedup).
+        status, info = _store_candidate(cur, conn, session, dist_id, cand, None, dry_run)
+
+        if status == "found" and info.get("dry_run"):
+            outcome = "dry_run"
+        elif status == "found":
+            new_versions += 1
+            outcome = "new_version"
+            log.info("  -> NEW version stored (doc_id=%s) — extraction will ingest it",
+                     info.get("doc_id"))
+        elif status == "skip":
+            unchanged += 1
+            outcome = "unchanged"
+            log.info("  -> unchanged (same file still posted)")
+        else:
+            failed += 1
+            outcome = "failed"
+            log.info("  -> re-fetch failed (%s)", info.get("reason", "?"))
+
+        _record_recheck(state, rcdts, unit, outcome, row, _ts())
+
+    if not dry_run:
+        state["il_recheck"] = {
+            "window_days":  window_days,
+            "checked":      checked,
+            "new_versions": new_versions,
+            "unchanged":    unchanged,
+            "failed":       failed,
+            "skipped_html": skipped_html,
+            "ran_at":       _ts(),
+        }
+        _save_crawl_state(state)
+
+    cur.close()
+    conn.close()
+
+    print(f"\n{'='*65}")
+    print(f"IL CBA Re-check (expiring contracts){'  [DRY RUN]' if dry_run else ''}")
+    print(f"{'='*65}")
+    print(f"  Window:                      <= {window_days} days from today")
+    print(f"  Expiring/expired checked:    {checked:>6,}")
+    print(f"  New versions found:          {new_versions:>6,}")
+    print(f"  Unchanged (same file):       {unchanged:>6,}")
+    print(f"  Re-fetch failed:             {failed:>6,}")
+    if skipped_html:
+        print(f"  Skipped (html_contract):     {skipped_html:>6,}")
+    print(f"{'='*65}\n")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -2194,12 +2391,40 @@ if __name__ == "__main__":
             "found, while agendas/minutes are rejected by content. Off by default."
         ),
     )
+    parser.add_argument(
+        "--recheck-expiring", action="store_true",
+        help=(
+            "Re-fetch the saved source URL of districts whose CURRENT contract has "
+            "expired or expires within --recheck-window-days, to pick up a newly "
+            "posted successor agreement. Re-downloads the exact saved URL (not a "
+            "full re-discovery); stores it only if the file changed, otherwise "
+            "leaves the existing contract untouched. Skips districts well within "
+            "term and those with an unknown end date. Does not run the normal "
+            "discovery crawl. Respects --district, --limit, and --dry-run."
+        ),
+    )
+    parser.add_argument(
+        "--recheck-window-days", type=int, default=90,
+        help=(
+            "How many days ahead of today counts as 'expiring' for "
+            "--recheck-expiring (default 90). Already-expired contracts are always "
+            "included."
+        ),
+    )
     args = parser.parse_args()
     LOG_ALL_VIEWERS = args.log_all_viewers
-    crawl(
-        dry_run=args.dry_run,
-        limit=args.limit,
-        target_rcdts=args.district,
-        search_fallback=args.search_fallback,
-        retry_failed=args.retry_failed,
-    )
+    if args.recheck_expiring:
+        recheck_expiring(
+            window_days=args.recheck_window_days,
+            dry_run=args.dry_run,
+            target_rcdts=args.district,
+            limit=args.limit,
+        )
+    else:
+        crawl(
+            dry_run=args.dry_run,
+            limit=args.limit,
+            target_rcdts=args.district,
+            search_fallback=args.search_fallback,
+            retry_failed=args.retry_failed,
+        )
