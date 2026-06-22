@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "gmfP5HpTA1hmXIt40mlnu"
+uri = "file://docs/CBA_RUNBOOK.md"
+type = "text"
+title = "CBA Update & Promotion Runbook"
