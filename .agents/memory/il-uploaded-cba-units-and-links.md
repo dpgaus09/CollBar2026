@@ -36,3 +36,10 @@ links). Auth alone is NOT enough — it lets any session fetch any district's PD
 When comparing the doc's district to the user's, coerce the bigint district_id
 (returned from db.execute as a string) to a number first, or own-district free
 users are wrongly 403'd.
+
+**Regression-prone:** several customer pages render a source-PDF link (overview
+"View source PDF", the Key Clauses preview card, and the full clauses list). EVERY
+one must build its href via the `sourceHref()` helper — never `${source_url}` or
+`${source_url}#page=N` directly. A raw `upload://` href silently opens a blank page
+(no error), so a new link site that forgets the helper looks fine in code review
+but breaks only for uploaded docs at runtime.

@@ -690,7 +690,7 @@ export default function DistrictDashboardPage() {
                     </div>
                     {contract.source_url && (
                       <a
-                        href={contract.source_url}
+                        href={sourceHref(contract.source_url) ?? undefined}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-xs text-blue-500 hover:text-blue-400"
@@ -907,7 +907,7 @@ export default function DistrictDashboardPage() {
                           </blockquote>
                           {p.source_url && (
                             <a
-                              href={p.page_ref ? `${p.source_url}#page=${p.page_ref}` : p.source_url}
+                              href={sourceHref(p.source_url, p.page_ref) ?? undefined}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="text-xs text-blue-500 hover:text-blue-400"

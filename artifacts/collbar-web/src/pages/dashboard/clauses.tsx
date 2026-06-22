@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useParams, useLocation } from "wouter";
 import { useAuth, useLogout } from "@/hooks/use-auth";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, sourceHref } from "@/lib/api";
 import { ProvenanceValue } from "@/components/provenance";
 import { DashboardSubNav } from "@/components/dashboard-subnav";
 import { LockedPage } from "@/components/upgrade";
@@ -132,7 +132,7 @@ export default function ClausesPage() {
 
         <div className="space-y-2">
           {provisions.map((p) => {
-            const pdfUrl = p.source_url && p.page_ref != null ? `${p.source_url}#page=${p.page_ref}` : p.source_url;
+            const pdfUrl = sourceHref(p.source_url, p.page_ref);
             return (
               <div key={p.id} className="rounded-lg border border-slate-800 bg-slate-900 p-4 space-y-2">
                 <div className="flex items-start justify-between gap-4">

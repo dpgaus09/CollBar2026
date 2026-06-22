@@ -6,7 +6,7 @@ import {
   ResponsiveContainer, ReferenceLine, CartesianGrid,
 } from "recharts";
 import { useAuth, useLogout } from "@/hooks/use-auth";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, sourceHref } from "@/lib/api";
 import { ProvenanceValue } from "@/components/provenance";
 import { DashboardSubNav } from "@/components/dashboard-subnav";
 import { LockedPage } from "@/components/upgrade";
@@ -200,7 +200,7 @@ export default function AskVsGotPage() {
                     </td>
                     <td className="px-3 py-2.5">
                       {p.source_url ? (
-                        <a href={p.source_url} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-400">PDF →</a>
+                        <a href={sourceHref(p.source_url, p.page_ref) ?? undefined} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-400">PDF →</a>
                       ) : <span className="text-slate-600">—</span>}
                     </td>
                   </tr>
