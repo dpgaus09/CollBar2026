@@ -1614,6 +1614,8 @@ router.get("/admin/directory-refresh-status", requireAdminToken, async (_req, re
 const MIN_SALARY_SCRIPT = join(PIPELINE_DIR, "17_sync_il_min_salary.py");
 const MIN_SALARY_LOG    = join(PIPELINE_DIR, "logs", "min_salary_sync.log");
 let _minSalaryPid: number | null = null;
+let _minSalaryLastRunAt: Date | null = null;
+let _minSalaryLastStatus: "running" | "success" | "error" | null = null;
 
 export function spawnMinSalarySync(extraArgs: string[] = []): { status: string; pid: number | null } {
   if (_minSalaryPid !== null) {
@@ -1638,6 +1640,12 @@ export function spawnMinSalarySync(extraArgs: string[] = []): { status: string; 
       env: { ...process.env, PYTHONPATH: PIPELINE_DIR },
     },
   );
+  _minSalaryLastRunAt = new Date();
+  _minSalaryLastStatus = "running";
+  child.on("exit", (code) => {
+    _minSalaryLastStatus = code === 0 ? "success" : "error";
+    _minSalaryPid = null;
+  });
   child.unref();
   _minSalaryPid = child.pid ?? null;
   return { status: "started", pid: _minSalaryPid };
@@ -1658,6 +1666,13 @@ router.get("/admin/min-salary-status", requireAdminToken, async (_req, res) => {
   if (_minSalaryPid !== null) {
     try { process.kill(_minSalaryPid, 0); running = true; } catch { _minSalaryPid = null; }
   }
+  if (!running && _minSalaryLastStatus === "running") _minSalaryLastStatus = null;
+
+  let tailLines: string[] = [];
+  try {
+    const content = readFileSync(MIN_SALARY_LOG, "utf8");
+    tailLines = content.split("\n").filter(Boolean).slice(-30);
+  } catch { /* log may not exist yet */ }
 
   try {
     // il_min_teacher_salary is created by app.ts runMigrations() / the Python
@@ -1676,7 +1691,14 @@ router.get("/admin/min-salary-status", requireAdminToken, async (_req, res) => {
       const msg = String(tableErr);
       if (!msg.includes("does not exist") && !msg.includes("relation")) throw tableErr;
     }
-    res.json({ running, pid: _minSalaryPid, latest });
+    res.json({
+      running,
+      pid: _minSalaryPid,
+      latest,
+      tail: tailLines,
+      lastRunAt: _minSalaryLastRunAt?.toISOString() ?? null,
+      lastStatus: running ? "running" : (_minSalaryLastStatus ?? null),
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Internal server error" });

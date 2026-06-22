@@ -151,6 +151,9 @@ interface MinSalaryStatus {
     source_url: string | null;
     updated_at: string | null;
   } | null;
+  tail: string[];
+  lastRunAt: string | null;
+  lastStatus: "running" | "success" | "error" | null;
 }
 
 interface ReviewQueueItem {
@@ -995,9 +998,22 @@ function MinSalaryCard() {
 
   const running = data?.running ?? false;
   const latest = data?.latest ?? null;
+  const lastStatus = data?.lastStatus ?? null;
+  const lastRunAt = data?.lastRunAt ?? null;
+  const tail = data?.tail ?? [];
 
-  const statusColor = running ? "text-amber-400" : latest ? "text-emerald-400" : "text-slate-500";
-  const statusLabel = running ? "running…" : latest ? "loaded" : "never run";
+  const statusColor =
+    running ? "text-amber-400"
+    : lastStatus === "success" ? "text-emerald-400"
+    : lastStatus === "error" ? "text-red-400"
+    : latest ? "text-emerald-400"
+    : "text-slate-500";
+  const statusLabel =
+    running ? "running…"
+    : lastStatus === "success" ? "last run: success"
+    : lastStatus === "error" ? "last run: failed"
+    : latest ? "loaded"
+    : "never run";
 
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-950 p-5 space-y-4">
@@ -1010,9 +1026,11 @@ function MinSalaryCard() {
             <span className={`text-sm font-mono font-medium ${statusColor}`}>{statusLabel}</span>
           </div>
           <div className="text-xs text-slate-500">
-            {latest?.updated_at
-              ? `Last updated: ${new Date(latest.updated_at).toLocaleString()}`
-              : "No certification ingested yet — click Run now"}
+            {lastRunAt
+              ? `Last run: ${new Date(lastRunAt).toLocaleString()}`
+              : latest?.updated_at
+                ? `Last updated: ${new Date(latest.updated_at).toLocaleString()}`
+                : "No certification ingested yet — click Run now"}
           </div>
         </div>
         <button
@@ -1023,6 +1041,12 @@ function MinSalaryCard() {
           {running ? "Running…" : runNow.isPending ? "Starting…" : "Run now"}
         </button>
       </div>
+
+      {lastStatus === "error" && (
+        <div className="rounded border border-red-900/60 bg-red-950/40 px-3 py-2 text-xs text-red-300">
+          ✗ Last sync failed. Check the log below — the scheduled annual run may need attention.
+        </div>
+      )}
 
       {latest && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
@@ -1062,6 +1086,17 @@ function MinSalaryCard() {
         >
           CGFA source document ↗
         </a>
+      )}
+
+      {tail.length > 0 && (
+        <details className="text-xs" open={lastStatus === "error"}>
+          <summary className="cursor-pointer text-slate-500 hover:text-slate-300 select-none">
+            Run log ({tail.length} line{tail.length === 1 ? "" : "s"})
+          </summary>
+          <pre className="mt-2 text-[10px] leading-relaxed text-slate-500 bg-slate-950 border border-slate-800 rounded p-3 max-h-48 overflow-auto whitespace-pre-wrap">
+            {tail.join("\n")}
+          </pre>
+        </details>
       )}
     </div>
   );
