@@ -174,6 +174,8 @@ interface ReviewQueueItem {
   effective_end: string | null;
   source_url: string | null;
   district_name: string | null;
+  source_doc_id: number | string | null;
+  unreadable: boolean;
 }
 
 interface ReviewQueueResponse {
@@ -406,12 +408,13 @@ function useRetryExtractionStatus() {
   });
 }
 
-function useReviewQueue(page: number, category: string) {
+function useReviewQueue(page: number, category: string, unreadable: string) {
   return useQuery<ReviewQueueResponse>({
-    queryKey: ["/api/admin/review-queue", page, category],
+    queryKey: ["/api/admin/review-queue", page, category, unreadable],
     queryFn: () => {
       const params = new URLSearchParams({ page: String(page), limit: "50" });
       if (category) params.set("category", category);
+      if (unreadable) params.set("unreadable", unreadable);
       return fetch(apiUrl(`/api/admin/review-queue?${params}`), { credentials: "include" }).then(
         (r) => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -2176,9 +2179,35 @@ function ReviewQueueTab() {
   const [actionId, setActionId] = useState<number | null>(null);
   const [correcting, setCorrecting] = useState<{ id: number; current: string } | null>(null);
   const [correctedValue, setCorrectedValue] = useState("");
+  const [unreadable, setUnreadable] = useState("");
+  const [selected, setSelected] = useState<Set<number>>(new Set());
 
   const { data: session } = useAdminSession();
-  const { data, isLoading, isError } = useReviewQueue(page, category);
+  const { data, isLoading, isError } = useReviewQueue(page, category, unreadable);
+
+  // Clear any selection whenever the visible set of items changes.
+  useEffect(() => {
+    setSelected(new Set());
+  }, [page, category, unreadable]);
+
+  const pageIds = data?.items.map((i) => i.id) ?? [];
+  const allOnPageSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
+
+  const toggleSelect = (id: number) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const toggleSelectAllOnPage = () =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (pageIds.every((id) => next.has(id))) pageIds.forEach((id) => next.delete(id));
+      else pageIds.forEach((id) => next.add(id));
+      return next;
+    });
 
   const mutation = useMutation({
     mutationFn: async ({
@@ -2211,6 +2240,64 @@ function ReviewQueueTab() {
       setCorrectedValue("");
     },
   });
+
+  const bulkMutation = useMutation({
+    mutationFn: async (payload: { ids?: number[]; sourceDocId?: number }) => {
+      const r = await fetch(apiUrl(`/api/admin/review-queue/bulk-dismiss`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(payload),
+      });
+      if (r.status === 401) {
+        goToLogin();
+        throw new Error("401");
+      }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json() as Promise<{
+        ok: boolean;
+        deleted: number;
+        preserved: number;
+        total: number;
+      }>;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/review-queue"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/extraction-report"] });
+      setSelected(new Set());
+    },
+  });
+
+  const dismissSelected = () => {
+    if (!session?.authenticated) {
+      goToLogin();
+      return;
+    }
+    if (selected.size === 0) return;
+    if (
+      !window.confirm(
+        `Dismiss ${selected.size} selected item(s)? This removes the low-confidence extractions (audit samples are kept and marked as disagree).`,
+      )
+    )
+      return;
+    bulkMutation.mutate({ ids: Array.from(selected) });
+  };
+
+  const dismissDoc = (sourceDocId: number, districtName: string | null) => {
+    if (!session?.authenticated) {
+      goToLogin();
+      return;
+    }
+    if (
+      !window.confirm(
+        `Dismiss ALL low-confidence items from this document${
+          districtName ? ` (${districtName})` : ""
+        }? This removes every remaining low-confidence extraction from that PDF across all pages of the queue.`,
+      )
+    )
+      return;
+    bulkMutation.mutate({ sourceDocId });
+  };
 
   const act = (id: number, action: "approve" | "reject") => {
     if (!session?.authenticated) {
@@ -2262,10 +2349,63 @@ function ReviewQueueTab() {
             ))}
           </select>
         </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-slate-400">Source PDF</label>
+          <select
+            value={unreadable}
+            onChange={(e) => { setUnreadable(e.target.value); setPage(1); }}
+            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-300 focus:outline-none focus:border-blue-500"
+          >
+            <option value="">All documents</option>
+            <option value="only">Unreadable / scanned only</option>
+            <option value="hide">Hide unreadable</option>
+          </select>
+        </div>
         <span className="text-xs text-slate-500 ml-auto">
           {data ? `${data.total.toLocaleString()} items requiring review` : ""}
         </span>
       </div>
+
+      {/* Bulk actions */}
+      {data && data.items.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-800 bg-slate-950 px-4 py-2">
+          <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={allOnPageSelected}
+              onChange={toggleSelectAllOnPage}
+              className="accent-red-600"
+            />
+            Select all on page
+          </label>
+          <button
+            onClick={dismissSelected}
+            disabled={selected.size === 0 || bulkMutation.isPending}
+            className="text-xs px-3 py-1 rounded bg-red-950 hover:bg-red-900 text-red-400 border border-red-900 disabled:opacity-40"
+          >
+            ✗ Dismiss selected ({selected.size})
+          </button>
+          {selected.size > 0 && (
+            <button
+              onClick={() => setSelected(new Set())}
+              className="text-xs px-3 py-1 rounded border border-slate-700 text-slate-400 hover:text-slate-200"
+            >
+              Clear
+            </button>
+          )}
+          {bulkMutation.isPending && (
+            <span className="text-xs text-slate-500 animate-pulse">Dismissing…</span>
+          )}
+          {bulkMutation.data && !bulkMutation.isPending && (
+            <span className="text-xs text-slate-500">
+              Dismissed {bulkMutation.data.total.toLocaleString()} item(s)
+              {bulkMutation.data.preserved > 0
+                ? ` — ${bulkMutation.data.deleted} removed, ${bulkMutation.data.preserved} kept as audit`
+                : ""}
+            </span>
+          )}
+        </div>
+      )}
 
       {isLoading && (
         <div className="flex items-center justify-center py-20 text-slate-500 text-sm animate-pulse">
@@ -2300,9 +2440,24 @@ function ReviewQueueTab() {
                 {/* Header */}
                 <div className="flex items-center justify-between px-4 py-3 bg-slate-900 border-b border-slate-800">
                   <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(item.id)}
+                      onChange={() => toggleSelect(item.id)}
+                      className="accent-red-600"
+                      aria-label="Select item for bulk dismiss"
+                    />
                     <span className="text-xs font-mono text-blue-400">{item.provision_key}</span>
                     <span className="text-xs text-slate-500">{item.category}</span>
                     <ConfidenceBadge value={item.confidence} />
+                    {item.unreadable && (
+                      <span
+                        className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-amber-950 text-amber-400 border border-amber-800"
+                        title="Source PDF is scanned / low-quality OCR — values likely can't be recovered manually"
+                      >
+                        ⚠ UNREADABLE
+                      </span>
+                    )}
                     {item.is_audit_sample && (
                       <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-violet-950 text-violet-400 border border-violet-800">
                         AUDIT
@@ -2404,6 +2559,16 @@ function ReviewQueueTab() {
                     >
                       ✗ Reject
                     </button>
+                    {item.source_doc_id != null && (
+                      <button
+                        onClick={() => dismissDoc(Number(item.source_doc_id), item.district_name)}
+                        disabled={bulkMutation.isPending}
+                        className="ml-auto text-xs px-3 py-1 rounded border border-amber-900 text-amber-400 hover:bg-amber-950/40 disabled:opacity-50"
+                        title="Dismiss every remaining low-confidence item from this same document"
+                      >
+                        Dismiss all from this doc
+                      </button>
+                    )}
                   </div>
                 )}
               </div>

@@ -25,3 +25,12 @@ showing real history instead of fake bulk approvals.
 **How to apply:** do NOT re-add `OR is_audit_sample` to the queue query. To re-enable sampling,
 set AUDIT_SAMPLE_RATE > 0 — but the queue still won't surface samples unless the query is also
 changed back. The frontend "Audit Quality Sampling" card now shows historical counts only.
+
+**Any bulk/queue mutation must keep two invariants in lockstep:** (1) reuse the *exact* queue
+scope guard `confidence < 0.8 AND NOT human_verified` (never widen it — that's the only thing
+keeping verified/high-confidence rows safe), and (2) preserve audit samples by UPDATE
+(`human_verified=true, audit_verdict='disagree'`), never DELETE them — deleting an audit row
+destroys real review history. POST /admin/review-queue/bulk-dismiss does both inside one
+db.transaction so a mixed audit/non-audit dismissal can't partially apply.
+**Why:** the bulk-dismiss feature could otherwise silently erase audit history or touch trusted
+high-confidence rows if a future bulk op forgot either guard.

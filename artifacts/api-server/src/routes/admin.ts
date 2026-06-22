@@ -735,73 +735,92 @@ router.get("/admin/review-queue", requireAdminToken, async (req, res) => {
   }
   const category = rawCategory || null;
 
+  // Optional filter on the OCR "unreadable/scanned" signal derived from the
+  // latest extraction run per source document:
+  //   unreadable=only → only items whose source PDF is flagged low-quality OCR
+  //   unreadable=hide → only items whose source PDF is NOT flagged
+  //   (absent)        → all items
+  const rawUnreadable = req.query.unreadable ? String(req.query.unreadable) : "";
+  if (rawUnreadable && !["only", "hide"].includes(rawUnreadable)) {
+    res.status(400).json({ error: "Invalid unreadable filter. Must be 'only' or 'hide'." });
+    return;
+  }
+  const unreadableFilter = rawUnreadable || null;
+  const needsRunFilter = unreadableFilter !== null;
+
+  // extraction_runs is append-per-attempt, so collapse to the newest run per doc
+  // before trusting the OCR low-quality flag. A doc with no run (legacy / never
+  // OCR'd) is NOT treated as unreadable — COALESCE(..., false).
+  const latestRunCte = sql`
+    latest_run AS (
+      SELECT DISTINCT ON (source_doc_id) source_doc_id, ocr_low_quality
+      FROM extraction_runs
+      ORDER BY source_doc_id, run_at DESC, id DESC
+    )
+  `;
+
+  // Shared WHERE predicate built from validated inputs.
+  const conds: ReturnType<typeof sql>[] = [
+    sql`cp.confidence < 0.8`,
+    sql`NOT cp.human_verified`,
+  ];
+  if (category) conds.push(sql`cp.category = ${category}`);
+  if (unreadableFilter === "only") conds.push(sql`COALESCE(lr.ocr_low_quality, false) = true`);
+  if (unreadableFilter === "hide") conds.push(sql`COALESCE(lr.ocr_low_quality, false) = false`);
+  const whereSql = sql.join(conds, sql` AND `);
+
   try {
-    // Use Drizzle sql template for safe parameterization of user-supplied values
-    const rows = await db.execute(
-      category
+    // Use Drizzle sql template for safe parameterization of user-supplied values.
+    // Each item carries source_doc_id (to act on a whole document) and an
+    // `unreadable` flag (latest-run OCR low-quality) for the review UI.
+    const rows = await db.execute(sql`
+      WITH ${latestRunCte}
+      SELECT
+        cp.id,
+        cp.category,
+        cp.provision_key,
+        cp.value_numeric,
+        cp.value_text,
+        cp.unit,
+        cp.clause_excerpt,
+        cp.page_ref,
+        cp.confidence,
+        cp.is_audit_sample,
+        c.id              AS contract_id,
+        c.source_doc_id,
+        c.union_name,
+        c.unit_scope,
+        c.effective_start,
+        c.effective_end,
+        sd.source_url,
+        d.name            AS district_name,
+        COALESCE(lr.ocr_low_quality, false) AS unreadable
+      FROM contract_provisions cp
+      JOIN contracts c ON cp.contract_id = c.id
+      LEFT JOIN source_documents sd ON c.source_doc_id = sd.id
+      LEFT JOIN districts d ON c.district_id = d.id
+      LEFT JOIN latest_run lr ON lr.source_doc_id = c.source_doc_id
+      WHERE ${whereSql}
+      ORDER BY cp.confidence ASC, cp.id
+      LIMIT ${limit} OFFSET ${offset}
+    `);
+
+    // Count uses the same predicate; only join the run CTE when the filter needs it.
+    const countRows = await db.execute(
+      needsRunFilter
         ? sql`
-            SELECT
-              cp.id,
-              cp.category,
-              cp.provision_key,
-              cp.value_numeric,
-              cp.value_text,
-              cp.unit,
-              cp.clause_excerpt,
-              cp.page_ref,
-              cp.confidence,
-              cp.is_audit_sample,
-              c.id              AS contract_id,
-              c.union_name,
-              c.unit_scope,
-              c.effective_start,
-              c.effective_end,
-              sd.source_url,
-              d.name            AS district_name
+            WITH ${latestRunCte}
+            SELECT COUNT(*)::int AS n
             FROM contract_provisions cp
             JOIN contracts c ON cp.contract_id = c.id
-            LEFT JOIN source_documents sd ON c.source_doc_id = sd.id
-            LEFT JOIN districts d ON c.district_id = d.id
-            WHERE cp.confidence < 0.8
-              AND NOT cp.human_verified
-              AND cp.category = ${category}
-            ORDER BY cp.confidence ASC, cp.id
-            LIMIT ${limit} OFFSET ${offset}
+            LEFT JOIN latest_run lr ON lr.source_doc_id = c.source_doc_id
+            WHERE ${whereSql}
           `
         : sql`
-            SELECT
-              cp.id,
-              cp.category,
-              cp.provision_key,
-              cp.value_numeric,
-              cp.value_text,
-              cp.unit,
-              cp.clause_excerpt,
-              cp.page_ref,
-              cp.confidence,
-              cp.is_audit_sample,
-              c.id              AS contract_id,
-              c.union_name,
-              c.unit_scope,
-              c.effective_start,
-              c.effective_end,
-              sd.source_url,
-              d.name            AS district_name
+            SELECT COUNT(*)::int AS n
             FROM contract_provisions cp
-            JOIN contracts c ON cp.contract_id = c.id
-            LEFT JOIN source_documents sd ON c.source_doc_id = sd.id
-            LEFT JOIN districts d ON c.district_id = d.id
-            WHERE cp.confidence < 0.8
-              AND NOT cp.human_verified
-            ORDER BY cp.confidence ASC, cp.id
-            LIMIT ${limit} OFFSET ${offset}
+            WHERE ${whereSql}
           `,
-    );
-
-    const countRows = await db.execute(
-      category
-        ? sql`SELECT COUNT(*)::int AS n FROM contract_provisions cp WHERE cp.confidence < 0.8 AND NOT cp.human_verified AND cp.category = ${category}`
-        : sql`SELECT COUNT(*)::int AS n FROM contract_provisions cp WHERE cp.confidence < 0.8 AND NOT cp.human_verified`,
     );
     const total = (countRows.rows[0] as { n: number })?.n ?? 0;
 
@@ -988,6 +1007,101 @@ router.patch("/admin/review-queue/:id", requireAdminToken, async (req, res) => {
       );
     }
     res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /admin/review-queue/bulk-dismiss
+// Dismiss (reject) many low-confidence items in one call — by explicit provision
+// ids and/or by an entire source document. Mirrors the single-reject semantics:
+// audit-sample rows are preserved (human_verified=true, audit_verdict='disagree')
+// while ordinary rows are deleted. Only acts on rows still in the review-queue
+// scope (confidence < 0.8 AND NOT human_verified) so verified / high-confidence
+// provisions are never touched.
+// body: { ids?: number[], sourceDocId?: number }
+// ---------------------------------------------------------------------------
+router.post("/admin/review-queue/bulk-dismiss", requireAdminToken, async (req, res) => {
+  const body = (req.body ?? {}) as { ids?: unknown; sourceDocId?: unknown };
+
+  // Validate the explicit provision-id list (if any).
+  let ids: number[] = [];
+  if (body.ids != null) {
+    if (!Array.isArray(body.ids)) {
+      res.status(400).json({ error: "ids must be an array of provision ids" });
+      return;
+    }
+    ids = body.ids.map((v) => Number(v));
+    if (ids.some((n) => !Number.isSafeInteger(n) || n < 1)) {
+      res.status(400).json({ error: "ids must all be positive integers" });
+      return;
+    }
+    if (ids.length > 1000) {
+      res.status(400).json({ error: "Too many ids (max 1000 per call)" });
+      return;
+    }
+  }
+
+  // Validate the optional whole-document target.
+  let sourceDocId: number | null = null;
+  if (body.sourceDocId != null && String(body.sourceDocId) !== "") {
+    const n = Number(body.sourceDocId);
+    if (!Number.isSafeInteger(n) || n < 1) {
+      res.status(400).json({ error: "sourceDocId must be a positive integer" });
+      return;
+    }
+    sourceDocId = n;
+  }
+
+  if (ids.length === 0 && sourceDocId === null) {
+    res.status(400).json({ error: "Provide ids and/or sourceDocId to dismiss" });
+    return;
+  }
+
+  // Selector: which provisions to target (union of the two inputs).
+  const selectors: ReturnType<typeof sql>[] = [];
+  if (sourceDocId !== null) selectors.push(sql`c.source_doc_id = ${sourceDocId}`);
+  if (ids.length) selectors.push(sql`cp.id IN (${sql.join(ids.map((i) => sql`${i}`), sql`, `)})`);
+  const selectorSql = sql.join(selectors, sql` OR `);
+
+  // Queue-scope guard — never alter verified or high-confidence provisions.
+  const scopeSql = sql`cp.confidence < 0.8 AND NOT cp.human_verified`;
+
+  try {
+    const result = await db.transaction(async (tx) => {
+      // Preserve audit samples: mark as disagree instead of deleting.
+      const updated = await tx.execute(sql`
+        UPDATE contract_provisions cp
+        SET human_verified = true, audit_verdict = 'disagree'
+        FROM contracts c
+        WHERE cp.contract_id = c.id
+          AND ${scopeSql}
+          AND cp.is_audit_sample
+          AND (${selectorSql})
+      `);
+      // Delete the ordinary low-confidence junk rows.
+      const deleted = await tx.execute(sql`
+        DELETE FROM contract_provisions cp
+        USING contracts c
+        WHERE cp.contract_id = c.id
+          AND ${scopeSql}
+          AND NOT cp.is_audit_sample
+          AND (${selectorSql})
+      `);
+      return {
+        preserved: (updated as unknown as { rowCount?: number }).rowCount ?? 0,
+        deleted: (deleted as unknown as { rowCount?: number }).rowCount ?? 0,
+      };
+    });
+
+    res.json({
+      ok: true,
+      deleted: result.deleted,
+      preserved: result.preserved,
+      total: result.deleted + result.preserved,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Internal server error" });
