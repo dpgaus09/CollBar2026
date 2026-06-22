@@ -9,10 +9,10 @@ and the two offer PDFs), matches the district, downloads + content-verifies the
 PDFs, stores them in object storage under source_documents (doc_type
 'final_offer'), and upserts one final_offer_postings row per case.
 
-Self-rolling: by default it crawls the current calendar year's page plus a
-small look-back window, so once wired into the nightly cron it picks up new
-cases — and brand-new years — with no code change. A year page that does not
-exist yet (404) is simply skipped.
+Self-rolling: by default it crawls next year's page (lookahead, in case the
+ELRB posts it early), the current calendar year, and a small look-back window,
+so once wired into the nightly cron it picks up new cases — and brand-new years
+— with no code change. A year page that does not exist yet (404) is skipped.
 
 The ELRB year page is server-rendered HTML; the offer PDFs are plain <a href>
 links under /content/dam/.../public-posting/{YYYY}/. URL pattern (predictable):
@@ -462,7 +462,12 @@ def resolve_years(args) -> list[int]:
         return sorted(set(args.year), reverse=True)
     this_year = _dt.date.today().year
     n = max(1, args.years)
-    return [this_year - i for i in range(n)]
+    # Lookahead by one year (the ELRB sometimes posts the next year's page
+    # early) plus the current year and an N-1 look-back window. Year pages that
+    # do not exist yet 404 and are skipped, so the extra year is free.
+    years = {this_year + 1}
+    years.update(this_year - i for i in range(n))
+    return sorted(years, reverse=True)
 
 
 def main() -> None:

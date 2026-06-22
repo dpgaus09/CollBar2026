@@ -406,6 +406,85 @@ def _num(v):
         return None
 
 
+# Minimum normalized length before a fuzzy ratio is trusted, and the ratio at or
+# above which two qualitative positions count as the same (agreed) language.
+_TEXT_ALIGN_MIN_LEN = 16
+_TEXT_ALIGN_RATIO = 0.90
+
+
+def _normalize_text(s) -> str:
+    """Lowercase, keep words/numbers/%/$/./-, and collapse whitespace.
+
+    Side framing words ("board"/"union"/"district"/"proposes"/...) are dropped so
+    that two offers that reproduce the same agreed clause compare as equal even
+    though each PDF frames it from its own side.
+    """
+    import re
+    if not s:
+        return ""
+    s = s.lower()
+    s = re.sub(r"[^a-z0-9%$./\- ]+", " ", s)
+    tokens = [t for t in s.split() if t not in _SIDE_FRAMING_WORDS]
+    return " ".join(tokens)
+
+
+def _digits(s: str):
+    """Ordered list of the numbers embedded in a normalized string."""
+    import re
+    return re.findall(r"\d+(?:\.\d+)?", s or "")
+
+
+_SIDE_FRAMING_WORDS = {
+    "board", "boards", "union", "unions", "district", "districts",
+    "employer", "association", "proposes", "proposal", "proposed",
+    "offer", "offers", "position", "shall", "will",
+}
+
+
+def _text_aligned(a, b) -> bool:
+    """True when two qualitative positions express materially the same term.
+
+    Conservative on purpose: differing embedded numbers (e.g. "3 days" vs
+    "5 days") never align, very short strings are not fuzzily matched, and the
+    fuzzy threshold is high so genuinely different positions stay "diff".
+    """
+    from difflib import SequenceMatcher
+    na, nb = _normalize_text(a), _normalize_text(b)
+    if not na or not nb:
+        return False
+    if _digits(na) != _digits(nb):
+        return False
+    if na == nb:
+        return True
+    if len(na) < _TEXT_ALIGN_MIN_LEN or len(nb) < _TEXT_ALIGN_MIN_LEN:
+        return False
+    return SequenceMatcher(None, na, nb).ratio() >= _TEXT_ALIGN_RATIO
+
+
+def classify_pair(d: dict, u: dict):
+    """Classify a district vs union position pair for one topic.
+
+    Returns ``(status, gap, gap_unit)`` where status is "aligned" or "diff".
+
+    - When both sides give a number in the same unit, alignment is numeric:
+      within the per-unit tolerance is "aligned", otherwise a genuine "diff"
+      (a real numeric gap is never overridden by language similarity).
+    - Otherwise (no comparable numbers — a qualitative topic) the verbatim
+      offer language, then the summary, decide alignment.
+    """
+    dv, uv = d.get("value"), u.get("value")
+    du = (d.get("unit") or "").strip().lower() or None
+    uu = (u.get("unit") or "").strip().lower() or None
+    if dv is not None and uv is not None and du and du == uu:
+        gap = uv - dv
+        tol = ALIGN_TOLERANCE.get(du, 0.0)
+        return ("aligned" if abs(gap) <= tol else "diff"), gap, du
+    if _text_aligned(d.get("raw_text"), u.get("raw_text")) or \
+            _text_aligned(d.get("summary"), u.get("summary")):
+        return "aligned", None, None
+    return "diff", None, None
+
+
 def compute_comparisons(conn, posting_id, case_number, *, dry_run=False) -> int:
     """Pair district vs union items by topic; rebuild final_offer_comparisons.
 
@@ -414,7 +493,7 @@ def compute_comparisons(conn, posting_id, case_number, *, dry_run=False) -> int:
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT id, side, topic, topic_label, summary, numeric_value, numeric_unit
+        SELECT id, side, topic, topic_label, summary, numeric_value, numeric_unit, raw_text
         FROM final_offer_items
         WHERE posting_id = %s
         """,
@@ -422,12 +501,13 @@ def compute_comparisons(conn, posting_id, case_number, *, dry_run=False) -> int:
     )
     rows = cur.fetchall()
     by_topic: dict = {}
-    for (item_id, side, topic, topic_label, summary, numeric_value, numeric_unit) in rows:
+    for (item_id, side, topic, topic_label, summary, numeric_value, numeric_unit, raw_text) in rows:
         slot = by_topic.setdefault(topic, {"label": topic_label})
         slot[side] = {
             "id": item_id,
             "label": topic_label,
             "summary": summary,
+            "raw_text": raw_text,
             "value": _num(numeric_value),
             "unit": (numeric_unit or "").strip().lower() or None,
         }
@@ -440,16 +520,7 @@ def compute_comparisons(conn, posting_id, case_number, *, dry_run=False) -> int:
         u = slot.get("union")
         label = slot.get("label") or (d or u or {}).get("label") if (d or u) else slot.get("label")
         if d and u:
-            dv, uv = d["value"], u["value"]
-            gap = None
-            gap_unit = None
-            status = "diff"
-            if dv is not None and uv is not None and d["unit"] and d["unit"] == u["unit"]:
-                gap = uv - dv
-                gap_unit = d["unit"]
-                tol = ALIGN_TOLERANCE.get(gap_unit, 0.0)
-                if abs(gap) <= tol:
-                    status = "aligned"
+            status, gap, gap_unit = classify_pair(d, u)
             comparisons.append((
                 topic, label, status, d["id"], u["id"],
                 d["summary"], u["summary"], gap, gap_unit,
