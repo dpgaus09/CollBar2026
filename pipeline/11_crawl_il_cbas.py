@@ -2221,16 +2221,21 @@ def crawl(dry_run: bool = False, limit: Optional[int] = None,
 
 def _record_recheck(state: dict, rcdts: str, unit: str, outcome: str,
                     row: dict, ts: str):
-    """Record a per-unit re-check outcome in the crawl state for observability,
-    without disturbing the district's existing crawl status."""
+    """Record a per-(unit, scope) re-check outcome in the crawl state for
+    observability, without disturbing the district's existing crawl status."""
     entry = state["per_district"].get(rcdts)
     if entry is None:
         # The district has a stored contract, so 'found' is the accurate status.
         entry = {"status": "found"}
         state["per_district"][rcdts] = entry
     rc = entry.setdefault("recheck", {})
-    rc[unit] = {
+    # Key by unit AND scope: a district may bargain the same unit across multiple
+    # scopes, each with its own current contract, so a unit-only key would let one
+    # scope's outcome clobber another's.
+    scope = row.get("unit_scope") or "default"
+    rc[f"{unit}::{scope}"] = {
         "outcome":            outcome,
+        "unit_scope":         row.get("unit_scope"),
         "effective_end_seen": str(row.get("effective_end")),
         "checked_at":         ts,
     }
@@ -2414,6 +2419,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     LOG_ALL_VIEWERS = args.log_all_viewers
     if args.recheck_expiring:
+        if args.recheck_window_days < 0:
+            parser.error("--recheck-window-days must be >= 0")
         recheck_expiring(
             window_days=args.recheck_window_days,
             dry_run=args.dry_run,
