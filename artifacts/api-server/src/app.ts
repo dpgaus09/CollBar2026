@@ -191,6 +191,22 @@ async function runMigrations(): Promise<void> {
     `);
 
     logger.info("Migration OK: il_min_teacher_salary ensured");
+
+    // Durable last-run status for background syncs (e.g. the annual IL minimum
+    // teacher salary ingest). One row per sync keyed by name; survives API
+    // server restarts so a failed once-a-year run still flags months later.
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS sync_run_status (
+        sync_name   text PRIMARY KEY,
+        status      text NOT NULL,
+        run_at      timestamptz NOT NULL DEFAULT NOW(),
+        log_ref     text,
+        detail      text,
+        updated_at  timestamptz NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    logger.info("Migration OK: sync_run_status ensured");
   } catch (err) {
     logger.warn({ err }, "Migration failed — will retry on next restart");
     return;

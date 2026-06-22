@@ -26,6 +26,54 @@ def get_db_conn():
     return psycopg2.connect(url)
 
 
+def record_sync_run_status(sync_name, status, log_ref=None, detail=None):
+    """Persist a terminal (success/error) outcome for a background sync.
+
+    Writes one row per sync (keyed by name) to sync_run_status so the admin
+    panel can show the last run's result even after the API server restarts.
+    Best-effort: failures here must never mask the sync's real exit status, so
+    any error is logged and swallowed.
+    """
+    if detail is not None:
+        detail = str(detail)[:2000]
+    try:
+        conn = get_db_conn()
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS sync_run_status (
+                        sync_name   text PRIMARY KEY,
+                        status      text NOT NULL,
+                        run_at      timestamptz NOT NULL DEFAULT NOW(),
+                        log_ref     text,
+                        detail      text,
+                        updated_at  timestamptz NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    INSERT INTO sync_run_status
+                        (sync_name, status, run_at, log_ref, detail, updated_at)
+                    VALUES (%s, %s, NOW(), %s, %s, NOW())
+                    ON CONFLICT (sync_name) DO UPDATE SET
+                        status     = EXCLUDED.status,
+                        run_at     = EXCLUDED.run_at,
+                        log_ref    = EXCLUDED.log_ref,
+                        detail     = EXCLUDED.detail,
+                        updated_at = NOW()
+                    """,
+                    (sync_name, status, log_ref, detail),
+                )
+        finally:
+            conn.close()
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Failed to persist sync_run_status for %s", sync_name
+        )
+
+
 def load_crawl_state() -> dict:
     if CRAWL_STATE_FILE.exists():
         with open(CRAWL_STATE_FILE) as f:

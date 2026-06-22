@@ -43,6 +43,11 @@ DOWNLOAD_RETRIES = 3
 
 MIN_SALARY_DIR = common.DATA_DIR / "il_min_salary"
 
+# Durable run-status key (must match MIN_SALARY_SYNC_NAME in the API server) +
+# a short reference to where the API server tees this script's stdout/stderr.
+SYNC_NAME = "il_min_teacher_salary"
+SYNC_LOG_REF = "pipeline/logs/min_salary_sync.log"
+
 _MONTHS = {
     m: i
     for i, m in enumerate(
@@ -326,21 +331,35 @@ def main():
         )
         status = result["status"]
         if status == "no_change":
-            print(f"Certification for {result['school_year']} unchanged — no update needed.")
+            summary = f"Certification for {result['school_year']} unchanged — no update needed."
+            print(summary)
         elif status == "dry_run":
-            print(
+            summary = (
                 f"Dry-run: {result['school_year']} minimum ${result['new_year_rate']:,} "
                 f"(+{result['percentage_increase']}% over {result['prior_year']} "
                 f"${result['prior_year_rate']:,}), certified {result['certified_date']}."
             )
+            print(summary)
         else:
-            print(
+            summary = (
                 f"Ingested {result['school_year']} minimum ${result['new_year_rate']:,} "
                 f"(+{result['percentage_increase']}% over {result['prior_year']} "
                 f"${result['prior_year_rate']:,}), certified {result['certified_date']}."
             )
+            print(summary)
+        # Persist the outcome so the admin panel still shows it after an API
+        # server restart. A dry-run isn't a real sync, so don't overwrite the
+        # durable status with it.
+        if status != "dry_run":
+            common.record_sync_run_status(
+                SYNC_NAME, "success", log_ref=SYNC_LOG_REF, detail=summary
+            )
     except Exception as exc:
         log.exception("Minimum teacher salary ingest failed: %s", exc)
+        if not args.dry_run:
+            common.record_sync_run_status(
+                SYNC_NAME, "error", log_ref=SYNC_LOG_REF, detail=str(exc)
+            )
         sys.exit(1)
 
 

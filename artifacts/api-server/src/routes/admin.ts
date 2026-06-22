@@ -1613,9 +1613,36 @@ router.get("/admin/directory-refresh-status", requireAdminToken, async (_req, re
 
 const MIN_SALARY_SCRIPT = join(PIPELINE_DIR, "17_sync_il_min_salary.py");
 const MIN_SALARY_LOG    = join(PIPELINE_DIR, "logs", "min_salary_sync.log");
+const MIN_SALARY_SYNC_NAME = "il_min_teacher_salary";
 let _minSalaryPid: number | null = null;
 let _minSalaryLastRunAt: Date | null = null;
 let _minSalaryLastStatus: "running" | "success" | "error" | null = null;
+
+/**
+ * Persist a terminal (success/error) outcome for a background sync so it
+ * survives an API server restart. The Python script writes the same record on
+ * its own completion; this exit-handler write is a fallback for when the script
+ * crashes before it can record its own status. Best-effort — never throws.
+ */
+async function recordSyncRunStatus(
+  syncName: string,
+  status: "success" | "error",
+  logRef: string,
+): Promise<void> {
+  try {
+    await db.execute(sql`
+      INSERT INTO sync_run_status (sync_name, status, run_at, log_ref, updated_at)
+      VALUES (${syncName}, ${status}, NOW(), ${logRef}, NOW())
+      ON CONFLICT (sync_name) DO UPDATE SET
+        status     = EXCLUDED.status,
+        run_at     = EXCLUDED.run_at,
+        log_ref    = EXCLUDED.log_ref,
+        updated_at = NOW()
+    `);
+  } catch (err) {
+    console.error("recordSyncRunStatus failed", err);
+  }
+}
 
 export function spawnMinSalarySync(extraArgs: string[] = []): { status: string; pid: number | null } {
   if (_minSalaryPid !== null) {
@@ -1643,8 +1670,11 @@ export function spawnMinSalarySync(extraArgs: string[] = []): { status: string; 
   _minSalaryLastRunAt = new Date();
   _minSalaryLastStatus = "running";
   child.on("exit", (code) => {
-    _minSalaryLastStatus = code === 0 ? "success" : "error";
+    const finalStatus = code === 0 ? "success" : "error";
+    _minSalaryLastStatus = finalStatus;
+    _minSalaryLastRunAt = new Date();
     _minSalaryPid = null;
+    void recordSyncRunStatus(MIN_SALARY_SYNC_NAME, finalStatus, MIN_SALARY_LOG);
   });
   child.unref();
   _minSalaryPid = child.pid ?? null;
@@ -1691,13 +1721,50 @@ router.get("/admin/min-salary-status", requireAdminToken, async (_req, res) => {
       const msg = String(tableErr);
       if (!msg.includes("does not exist") && !msg.includes("relation")) throw tableErr;
     }
+
+    // Durable last-run outcome — survives API server restarts. The in-memory
+    // values are only authoritative for the live "running" case; otherwise the
+    // persisted row is the source of truth so a past failure still flags after
+    // a restart (this sync only runs once a year).
+    let persistedStatus: "success" | "error" | null = null;
+    let persistedRunAt: string | null = null;
+    let persistedLogRef: string | null = null;
+    try {
+      const rows = await db.execute(sql`
+        SELECT status, run_at, log_ref
+        FROM sync_run_status
+        WHERE sync_name = ${MIN_SALARY_SYNC_NAME}
+        LIMIT 1
+      `);
+      const row = rows.rows[0] as
+        | { status: string; run_at: string | Date; log_ref: string | null }
+        | undefined;
+      if (row) {
+        persistedStatus = row.status === "success" ? "success" : "error";
+        persistedRunAt =
+          row.run_at instanceof Date ? row.run_at.toISOString() : String(row.run_at);
+        persistedLogRef = row.log_ref ?? null;
+      }
+    } catch (tableErr) {
+      const msg = String(tableErr);
+      if (!msg.includes("does not exist") && !msg.includes("relation")) throw tableErr;
+    }
+
+    const lastStatus = running
+      ? "running"
+      : (_minSalaryLastStatus ?? persistedStatus ?? null);
+    const lastRunAt = running
+      ? (_minSalaryLastRunAt?.toISOString() ?? null)
+      : (_minSalaryLastRunAt?.toISOString() ?? persistedRunAt);
+
     res.json({
       running,
       pid: _minSalaryPid,
       latest,
       tail: tailLines,
-      lastRunAt: _minSalaryLastRunAt?.toISOString() ?? null,
-      lastStatus: running ? "running" : (_minSalaryLastStatus ?? null),
+      lastRunAt,
+      lastStatus,
+      lastLogRef: persistedLogRef,
     });
   } catch (err) {
     console.error(err);
