@@ -1,7 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { schedule } from "node-cron";
-import { spawnDirectoryRefresh, spawnExtractionCron, spawnIlCrawl } from "./routes/admin";
+import { spawnDirectoryRefresh, spawnExtractionCron, spawnIlCrawl, spawnMinSalarySync } from "./routes/admin";
 
 const rawPort = process.env["PORT"];
 
@@ -59,3 +59,16 @@ schedule(
   { timezone: "America/Chicago" },
 );
 logger.info("Cron registered: IL CBA crawl at 02:00 America/Chicago on 1st and 15th of each month");
+
+// Annual IL minimum teacher salary sync — 6:00 AM America/Chicago on July 25.
+// CGFA certifies/publishes the statutory minimum by July 20 (PA 103-515); a
+// late-July run picks up the freshly published certification each year.
+schedule(
+  "0 6 25 7 *",
+  () => {
+    logger.info("Cron: starting annual IL minimum teacher salary sync");
+    spawnMinSalarySync();
+  },
+  { timezone: "America/Chicago" },
+);
+logger.info("Cron registered: IL minimum teacher salary sync at 06:00 America/Chicago on July 25");

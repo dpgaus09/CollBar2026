@@ -171,6 +171,26 @@ async function runMigrations(): Promise<void> {
     `);
 
     logger.info("Migration OK: conversations + messages ensured");
+
+    // IL statutory minimum full-time teacher salary (CGFA, PA 103-515).
+    // State-level reference data; one row per certification keyed by school year.
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS il_min_teacher_salary (
+        id                   bigserial PRIMARY KEY,
+        school_year          text NOT NULL UNIQUE,
+        prior_year           text,
+        prior_year_rate      integer,
+        percentage_increase  numeric(6,3),
+        new_year_rate        integer NOT NULL,
+        certified_date       date,
+        source_url           text,
+        file_hash            text,
+        created_at           timestamptz DEFAULT NOW(),
+        updated_at           timestamptz DEFAULT NOW()
+      )
+    `);
+
+    logger.info("Migration OK: il_min_teacher_salary ensured");
   } catch (err) {
     logger.warn({ err }, "Migration failed — will retry on next restart");
     return;

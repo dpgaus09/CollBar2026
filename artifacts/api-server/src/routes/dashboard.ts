@@ -43,6 +43,41 @@ function canAccessDistrict(req: Request, res: Response, next: NextFunction): voi
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/dashboard/min-teacher-salary
+// IL statutory minimum full-time teacher salary (CGFA, PA 103-515). Statewide
+// reference data — IL-only, so it is empty when the customer state is not IL.
+// ---------------------------------------------------------------------------
+router.get("/dashboard/min-teacher-salary", requireAuth, async (_req: Request, res: Response) => {
+  if (CUSTOMER_STATE && CUSTOMER_STATE !== "IL") {
+    res.json({ state: CUSTOMER_STATE, latest: null, history: [] });
+    return;
+  }
+  try {
+    const rows = await db.execute(sql`
+      SELECT school_year          AS "schoolYear",
+             prior_year           AS "priorYear",
+             prior_year_rate      AS "priorYearRate",
+             percentage_increase::float AS "percentageIncrease",
+             new_year_rate        AS "newYearRate",
+             certified_date       AS "certifiedDate",
+             source_url           AS "sourceUrl"
+      FROM il_min_teacher_salary
+      ORDER BY school_year DESC
+    `);
+    const history = rows.rows;
+    res.json({ state: "IL", latest: history[0] ?? null, history });
+  } catch (err) {
+    const msg = String(err);
+    if (msg.includes("does not exist") || msg.includes("relation")) {
+      res.json({ state: "IL", latest: null, history: [] });
+      return;
+    }
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/dashboard/districts
 // ---------------------------------------------------------------------------
 router.get("/dashboard/districts", requireAuth, async (req: Request, res: Response) => {

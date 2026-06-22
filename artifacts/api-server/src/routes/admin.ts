@@ -1608,6 +1608,82 @@ router.get("/admin/directory-refresh-status", requireAdminToken, async (_req, re
 });
 
 // ---------------------------------------------------------------------------
+// IL minimum teacher salary sync — exported spawn helper (cron in index.ts) + routes
+// ---------------------------------------------------------------------------
+
+const MIN_SALARY_SCRIPT = join(PIPELINE_DIR, "17_sync_il_min_salary.py");
+const MIN_SALARY_LOG    = join(PIPELINE_DIR, "logs", "min_salary_sync.log");
+let _minSalaryPid: number | null = null;
+
+export function spawnMinSalarySync(extraArgs: string[] = []): { status: string; pid: number | null } {
+  if (_minSalaryPid !== null) {
+    try {
+      process.kill(_minSalaryPid, 0);
+      return { status: "already_running", pid: _minSalaryPid };
+    } catch {
+      _minSalaryPid = null;
+    }
+  }
+
+  mkdirSync(join(PIPELINE_DIR, "logs"), { recursive: true });
+  const logFd = openSync(MIN_SALARY_LOG, "a");
+
+  const child = spawn(
+    "python3",
+    ["-u", MIN_SALARY_SCRIPT, ...extraArgs],
+    {
+      cwd: PIPELINE_DIR,
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: { ...process.env, PYTHONPATH: PIPELINE_DIR },
+    },
+  );
+  child.unref();
+  _minSalaryPid = child.pid ?? null;
+  return { status: "started", pid: _minSalaryPid };
+}
+
+router.post("/admin/run-min-salary-sync", requireAdminToken, (_req, res) => {
+  try {
+    const result = spawnMinSalarySync();
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+router.get("/admin/min-salary-status", requireAdminToken, async (_req, res) => {
+  let running = false;
+  if (_minSalaryPid !== null) {
+    try { process.kill(_minSalaryPid, 0); running = true; } catch { _minSalaryPid = null; }
+  }
+
+  try {
+    // il_min_teacher_salary is created by app.ts runMigrations() / the Python
+    // script. Return latest: null gracefully if it doesn't exist yet.
+    let latest: Record<string, unknown> | null = null;
+    try {
+      const rows = await db.execute(sql.raw(`
+        SELECT school_year, prior_year, prior_year_rate,
+               percentage_increase::float AS percentage_increase,
+               new_year_rate, certified_date, source_url, updated_at
+        FROM il_min_teacher_salary
+        ORDER BY school_year DESC LIMIT 1
+      `));
+      latest = (rows.rows[0] as Record<string, unknown>) ?? null;
+    } catch (tableErr) {
+      const msg = String(tableErr);
+      if (!msg.includes("does not exist") && !msg.includes("relation")) throw tableErr;
+    }
+    res.json({ running, pid: _minSalaryPid, latest });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Customer management endpoints (users table, role = 'district_user')
 // ---------------------------------------------------------------------------
 

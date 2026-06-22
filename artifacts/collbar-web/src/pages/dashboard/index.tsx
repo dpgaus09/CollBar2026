@@ -64,6 +64,82 @@ function useMyDistrict(districtId: number | null) {
   });
 }
 
+interface MinTeacherSalary {
+  schoolYear: string;
+  priorYear: string | null;
+  priorYearRate: number | null;
+  percentageIncrease: number | null;
+  newYearRate: number;
+  certifiedDate: string | null;
+  sourceUrl: string | null;
+}
+
+function useMinTeacherSalary() {
+  return useQuery<{ state: string; latest: MinTeacherSalary | null; history: MinTeacherSalary[] }>({
+    queryKey: ["/api/dashboard/min-teacher-salary"],
+    queryFn: () =>
+      fetch(apiUrl("/api/dashboard/min-teacher-salary"), { credentials: "include" }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+  });
+}
+
+function MinTeacherSalaryCard() {
+  const { data } = useMinTeacherSalary();
+  const s = data?.latest;
+  if (!s) return null;
+
+  const certified = s.certifiedDate
+    ? new Date(s.certifiedDate).toLocaleDateString("en-US", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      })
+    : null;
+
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="space-y-1">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-sky-400">
+            IL statutory minimum teacher salary
+          </div>
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-bold font-mono text-slate-100 tabular-nums">
+              ${s.newYearRate.toLocaleString()}
+            </span>
+            <span className="text-xs text-slate-400">{s.schoolYear} school year</span>
+          </div>
+          <div className="text-xs text-slate-500">
+            {s.percentageIncrease != null && s.priorYear && s.priorYearRate != null ? (
+              <>
+                +{s.percentageIncrease}% over {s.priorYear} (${s.priorYearRate.toLocaleString()})
+              </>
+            ) : (
+              "Full-time minimum, statewide floor"
+            )}
+          </div>
+        </div>
+        <div className="shrink-0 text-right text-[11px] text-slate-500 leading-5">
+          {certified && <div>Certified {certified}</div>}
+          <div className="text-slate-600">CGFA · PA 103-515</div>
+          {s.sourceUrl && (
+            <a
+              href={s.sourceUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-blue-400 hover:underline"
+            >
+              Source ↗
+            </a>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TopBar() {
   const { email, isAdmin } = useAuth();
   const logout = useLogout();
@@ -181,7 +257,10 @@ export default function DashboardIndexPage() {
         {isLoading ? (
           <div className="text-slate-500 text-sm animate-pulse text-center py-20">Loading…</div>
         ) : (
-          <AdminDistrictPicker search={search} setSearch={setSearch} />
+          <div className="space-y-6">
+            <MinTeacherSalaryCard />
+            <AdminDistrictPicker search={search} setSearch={setSearch} />
+          </div>
         )}
       </main>
     </div>

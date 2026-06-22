@@ -138,6 +138,21 @@ interface DirectoryRefreshStatus {
   } | null;
 }
 
+interface MinSalaryStatus {
+  running: boolean;
+  pid: number | null;
+  latest: {
+    school_year: string;
+    prior_year: string | null;
+    prior_year_rate: number | null;
+    percentage_increase: number | null;
+    new_year_rate: number;
+    certified_date: string | null;
+    source_url: string | null;
+    updated_at: string | null;
+  } | null;
+}
+
 interface ReviewQueueItem {
   id: number;
   category: string;
@@ -331,6 +346,19 @@ function useDirectoryRefreshStatus() {
           return r.json();
         },
       ),
+    refetchInterval: (query) => (query.state.data?.running ? 3_000 : 30_000),
+    retry: false,
+  });
+}
+
+function useMinSalaryStatus() {
+  return useQuery<MinSalaryStatus>({
+    queryKey: ["/api/admin/min-salary-status"],
+    queryFn: () =>
+      fetch(apiUrl("/api/admin/min-salary-status"), { credentials: "include" }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
     refetchInterval: (query) => (query.state.data?.running ? 3_000 : 30_000),
     retry: false,
   });
@@ -946,6 +974,99 @@ function DirectoryRefreshCard() {
   );
 }
 
+function MinSalaryCard() {
+  const queryClient = useQueryClient();
+  const { data, refetch } = useMinSalaryStatus();
+
+  const runNow = useMutation({
+    mutationFn: () =>
+      fetch(apiUrl("/api/admin/run-min-salary-sync"), {
+        method: "POST",
+        credentials: "include",
+      }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/min-salary-status"] });
+      refetch();
+    },
+  });
+
+  const running = data?.running ?? false;
+  const latest = data?.latest ?? null;
+
+  const statusColor = running ? "text-amber-400" : latest ? "text-emerald-400" : "text-slate-500";
+  const statusLabel = running ? "running…" : latest ? "loaded" : "never run";
+
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-950 p-5 space-y-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            {running && (
+              <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+            )}
+            <span className={`text-sm font-mono font-medium ${statusColor}`}>{statusLabel}</span>
+          </div>
+          <div className="text-xs text-slate-500">
+            {latest?.updated_at
+              ? `Last updated: ${new Date(latest.updated_at).toLocaleString()}`
+              : "No certification ingested yet — click Run now"}
+          </div>
+        </div>
+        <button
+          onClick={() => runNow.mutate()}
+          disabled={running || runNow.isPending}
+          className="shrink-0 text-xs px-3 py-1.5 rounded border border-slate-700 hover:border-sky-600 text-slate-400 hover:text-sky-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {running ? "Running…" : runNow.isPending ? "Starting…" : "Run now"}
+        </button>
+      </div>
+
+      {latest && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+          <div className="space-y-0.5">
+            <div className="text-slate-500">School year</div>
+            <div className="text-slate-200 font-mono font-semibold">{latest.school_year}</div>
+          </div>
+          <div className="space-y-0.5">
+            <div className="text-slate-500">Minimum salary</div>
+            <div className="text-slate-200 font-mono font-semibold">
+              ${latest.new_year_rate.toLocaleString()}
+            </div>
+          </div>
+          <div className="space-y-0.5">
+            <div className="text-slate-500">Increase</div>
+            <div className="text-slate-200 font-mono font-semibold">
+              {latest.percentage_increase != null ? `+${latest.percentage_increase}%` : "—"}
+            </div>
+          </div>
+          <div className="space-y-0.5">
+            <div className="text-slate-500">Certified</div>
+            <div className="text-slate-200 font-mono font-semibold">
+              {latest.certified_date
+                ? new Date(latest.certified_date).toLocaleDateString()
+                : "—"}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {latest?.source_url && (
+        <a
+          href={latest.source_url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-xs text-blue-400 hover:underline"
+        >
+          CGFA source document ↗
+        </a>
+      )}
+    </div>
+  );
+}
+
 function ScheduledAutomationsCard() {
   const queryClient = useQueryClient();
   const { data: crawlData, refetch: refetchCrawl } = useIlCrawlStatus();
@@ -1401,13 +1522,26 @@ function CrawlReportTab() {
         <DirectoryRefreshCard />
       </section>
 
+      {/* IL Minimum Teacher Salary */}
+      <section className="space-y-3">
+        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
+          IL Minimum Teacher Salary
+        </h2>
+        <p className="text-xs text-slate-500">
+          Ingests the CGFA-certified statutory minimum full-time teacher salary (PA 103-515),
+          published each July. Runs annually on July 25 at 6 AM Central. SHA-256 deduplicated —
+          an unchanged certification is skipped. Upserts one row per school year.
+        </p>
+        <MinSalaryCard />
+      </section>
+
       {/* Scheduled Automations */}
       <section className="space-y-3">
         <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
           Scheduled Automations
         </h2>
         <p className="text-xs text-slate-500">
-          Three jobs keep the dataset current automatically. All times are America/Chicago
+          Four jobs keep the dataset current automatically. All times are America/Chicago
           (Central), and each job skips its run if a previous one is still in progress:
         </p>
         <ul className="text-xs text-slate-400 space-y-1.5 list-none">
@@ -1422,6 +1556,10 @@ function CrawlReportTab() {
           <li className="flex gap-2">
             <span className="font-mono text-sky-400 whitespace-nowrap">2:00 AM 1st &amp; 15th</span>
             <span>IL CBA Crawl — re-crawls every district website twice a month to discover newly posted contracts.</span>
+          </li>
+          <li className="flex gap-2">
+            <span className="font-mono text-sky-400 whitespace-nowrap">6:00 AM Jul 25</span>
+            <span>IL Minimum Teacher Salary — pulls the new CGFA statutory minimum salary certification once a year.</span>
           </li>
         </ul>
         <div className="rounded-lg border border-amber-800 bg-amber-950/20 p-4 space-y-1">
