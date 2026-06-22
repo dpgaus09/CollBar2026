@@ -3,10 +3,12 @@ import { readFileSync, existsSync, openSync, writeFileSync } from "fs";
 import { mkdirSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { spawn } from "child_process";
-import { createHash } from "node:crypto";
-import { db } from "@workspace/db";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { gunzipSync } from "node:zlib";
+import { db, pool } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import { VALID_BARGAINING_UNITS } from "./bargaining-units.js";
+import { runPromotion } from "../lib/promote.js";
 
 declare module "express-session" {
   interface SessionData {
@@ -1926,6 +1928,90 @@ router.delete("/admin/customers/:id", requireAdminToken, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CBA data promotion (dev -> prod). Accepts a gzipped JSON bundle produced by
+// pipeline/20_export_promotion_bundle.py. Defaults to a dry run; pass
+// ?apply=true to commit. Auth: admin session OR Authorization: Bearer <secret>,
+// where the secret is ADMIN_TOKEN if set, else the existing ADMIN_PASSWORD
+// (so programmatic / cross-environment calls work without a new secret).
+// ---------------------------------------------------------------------------
+function requirePromoteAuth(req: Request, res: Response, next: NextFunction): void {
+  if (req.session.adminAuthenticated) {
+    next();
+    return;
+  }
+  const header = req.headers.authorization ?? "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+  const expected = process.env.ADMIN_TOKEN || process.env.ADMIN_PASSWORD || "";
+  if (expected && token) {
+    const a = createHash("sha256").update(token).digest();
+    const b = createHash("sha256").update(expected).digest();
+    if (timingSafeEqual(a, b)) {
+      next();
+      return;
+    }
+  }
+  res.status(401).json({ error: "Unauthorized: admin login or bearer token required" });
+}
+
+router.post(
+  "/admin/promote",
+  requirePromoteAuth,
+  raw({ type: () => true, limit: "256mb" }),
+  async (req: Request, res: Response) => {
+    try {
+      let buf = req.body as Buffer;
+      if (!Buffer.isBuffer(buf) || buf.length === 0) {
+        res.status(400).json({ error: "Empty request body" });
+        return;
+      }
+      // gunzip if gzip-magic (0x1f 0x8b), otherwise treat as UTF-8 JSON.
+      if (buf.length >= 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
+        buf = gunzipSync(buf);
+      }
+      let bundle: { tables?: Record<string, unknown[]> };
+      try {
+        bundle = JSON.parse(buf.toString("utf8"));
+      } catch {
+        res.status(400).json({ error: "Body is not valid JSON" });
+        return;
+      }
+      if (!bundle || typeof bundle !== "object" || !bundle.tables) {
+        res.status(400).json({ error: "Bundle missing 'tables'" });
+        return;
+      }
+      const dryRun = req.query.apply !== "true";
+      const summary = await runPromotion(pool, bundle as { tables?: Record<string, any[]> }, {
+        dryRun,
+      });
+      res.json(summary);
+    } catch (err) {
+      console.error("Promotion error:", err);
+      res
+        .status(500)
+        .json({ error: err instanceof Error ? err.message : "Promotion failed" });
+    }
+  },
+);
+
+// Recent promotion runs (most recent first).
+router.get("/admin/promotion-runs", requirePromoteAuth, async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, created_at, dry_run, summary FROM promotion_runs
+       ORDER BY created_at DESC LIMIT 25`,
+    );
+    res.json({ runs: rows });
+  } catch (err) {
+    // Table may not exist yet (no apply has run).
+    if (err instanceof Error && /relation .* does not exist/.test(err.message)) {
+      res.json({ runs: [] });
+      return;
+    }
+    res.status(500).json({ error: "Could not load promotion runs" });
   }
 });
 

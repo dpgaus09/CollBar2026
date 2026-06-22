@@ -29,3 +29,4 @@
 - [Non-CBA cleanup confident vs borderline](non-cba-cleanup-split.md) — 16_purge_non_cbas relabels confident not-CBA→non_cba; CBA-named/thin rows HELD to non_cba_review.csv, never bulk-deleted.
 - [Crawler content gate (cba_pdf)](crawler-content-gate.md) — crawler classifies PDF text-layer before storing; reject only readable confident non-CBAs, KEEP inconclusive (scanned CBAs) or you false-reject contracts.
 - [api-server new-route 404 → restart](api-server-new-route-restart.md) — a correct, registered new route 404s when the tsx-watch dev server predates it; restart the API Server workflow before curl-testing.
+- [Promote dev CBA data to prod](promote-dev-to-prod.md) — DEV→PROD copy by natural key (no id copy); contracts key must be 6-tuple or NULL effective_start collides under IS NOT DISTINCT FROM.
