@@ -4,7 +4,7 @@
 Flow:  export dev bundle -> POST dry-run -> print diff -> (with --apply) POST apply.
 
 The bundle is gzipped and POSTed to <base>/api/admin/promote. Authentication uses
-Authorization: Bearer $ADMIN_TOKEN.
+Authorization: Bearer $ADMIN_TOKEN (falls back to $ADMIN_PASSWORD if ADMIN_TOKEN is unset).
 
 Examples:
   # Dry-run against the DEV app itself (idempotency check — expect ~0 inserts):
@@ -79,9 +79,9 @@ def main():
     ap.add_argument("--apply", action="store_true", help="commit after dry-run")
     args = ap.parse_args()
 
-    token = os.environ.get("ADMIN_TOKEN", "")
+    token = os.environ.get("ADMIN_TOKEN", "") or os.environ.get("ADMIN_PASSWORD", "")
     if not token:
-        print("ADMIN_TOKEN env var is required.", file=sys.stderr)
+        print("Set ADMIN_TOKEN (or ADMIN_PASSWORD) in the environment.", file=sys.stderr)
         sys.exit(1)
 
     bundle_path = Path(args.bundle)

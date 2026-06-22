@@ -16,3 +16,4 @@ export * from "./customers";
 export * from "./conversations";
 export * from "./il_min_teacher_salary";
 export * from "./final_offers";
+export * from "./promotions";

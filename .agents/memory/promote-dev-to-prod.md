@@ -41,3 +41,26 @@ one — acceptable for first load; revisit if frequent in-place corrections are 
 NEVER: users, approved_customers, conversations, messages, peer_sets.
 SKIP (cache/staging/log/derived): benchmarks, alerts, cdss_staging, tracker_stats_cache,
 extraction_runs, factfinding_proposals.
+
+## Prod deploy runs `db push-force` — runtime tables MUST be in the Drizzle schema
+The api-server prod run command is `pnpm --filter db push-force && exec node ...`, so every
+deploy reconciles PROD to the Drizzle schema. Any table created only at runtime (the promotion
+bookkeeping `promotion_runs` / `promotion_backups` were created via `CREATE TABLE IF NOT EXISTS`
+in promote.ts) is "unmanaged" and a later `push-force` can drop it (losing audit/backup history)
+or, under a non-TTY, error and BLOCK the deploy.
+**Fix applied:** declared both tables in `lib/db/src/schema/promotions.ts`, mirroring the runtime
+DDL EXACTLY (uuid PK on runs; `promotion_backups` intentionally has NO primary key to match the
+already-populated prod table — adding one would force a destructive ALTER). 
+**Why:** keeps push-force a no-op for them.
+**How to apply:** never leave a runtime-created table out of the Drizzle schema in this repo;
+and keep promotions.ts in lockstep with the CREATE TABLE DDL in promote.ts. Do NOT run
+`db push`/`push-force` against DEV to "test" — it can TRUNCATE the curated source tables.
+
+## How to promote in the future (repeatable)
+First deploy must include the promote endpoint (republish if `/api/admin/promote` 404s on prod).
+Auth is `Authorization: Bearer $ADMIN_TOKEN || $ADMIN_PASSWORD` (ADMIN_TOKEN is unset, so
+ADMIN_PASSWORD is used; it's a shared App Secret available to the prod deployment).
+- Dry-run (shows diff, writes nothing): `cd pipeline && python3 21_promote_to_prod.py --base https://app.collbar.com`
+- Apply after reviewing: add `--apply`.
+The runner exports a fresh dev bundle each run, gzips, POSTs. Re-running is idempotent (keyed
+tables show 0 ins/upd; contract_provisions show equal delete==insert churn by design).
