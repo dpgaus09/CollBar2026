@@ -1,16 +1,17 @@
-import { Lock, Sparkles, Users, Wrench } from "lucide-react";
+import { Lock, Sparkles, UploadCloud, Users, Wrench } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { useUpgradeLock } from "@/components/upgrade";
 
 // ---------------------------------------------------------------------------
-// Shared top-bar tool cluster (Toolkit / Ask AI / Peer Sets).
+// Shared top-bar tool cluster (Toolkit / Ask AI / Peer Sets / Submit Docs).
 //
-// Rendered identically in the dashboard home, district detail, and toolkit top
-// bars so the three can't drift apart. Each tool is a pill-style button with a
-// leading icon. Free customers see Ask AI and Peer Sets greyed with a lock; the
-// click opens the upgrade modal instead of navigating. Visual treatment only —
-// no gating/routing change. A trailing divider separates the cluster from the
-// account area on the right.
+// Rendered identically in the dashboard home, district detail, toolkit, and
+// submit top bars so they can't drift apart. Each tool is a pill-style button
+// with a leading icon. Free customers see Ask AI and Peer Sets greyed with a
+// lock; the click opens the upgrade modal instead of navigating. Submit Docs is
+// not paid-gated and shows only for accounts linked to a district. Visual
+// treatment only — no gating/routing change. A trailing divider separates the
+// cluster from the account area on the right.
 //
 // Responsive: on narrow widths the pill text labels collapse to icon-only
 // (the label is still exposed via the `title` tooltip) so the cluster doesn't
@@ -28,7 +29,7 @@ const PILL_LOCKED =
 const LABEL = "hidden lg:inline";
 
 export function TopNavTools() {
-  const { isFree } = useAuth();
+  const { isFree, districtId } = useAuth();
   const { showUpgrade } = useUpgradeLock();
 
   return (
@@ -82,6 +83,20 @@ export function TopNavTools() {
           >
             <Users className="h-3.5 w-3.5" />
             <span className={LABEL}>Peer Sets</span>
+          </a>
+        )}
+
+        {/* Submit Docs links to the user's OWN district submit page (where
+            uploads are attributed). Hidden for accounts not linked to a
+            district, where document submission is unavailable. */}
+        {districtId != null && (
+          <a
+            href={`${base}dashboard/${districtId}/submit`}
+            title="Submit Docs"
+            className={`${PILL} ${PILL_ACTIVE}`}
+          >
+            <UploadCloud className="h-3.5 w-3.5" />
+            <span className={LABEL}>Submit Docs</span>
           </a>
         )}
       </div>

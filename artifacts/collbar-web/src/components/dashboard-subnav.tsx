@@ -18,7 +18,6 @@ export function DashboardSubNav({ id, active }: { id: string; active: SubNavTab 
     { key: "comparables", label: "Comparables", href: `${base}/comparables` },
     { key: "ask-vs-got", label: "Ask vs Got", href: `${base}/ask-vs-got` },
     { key: "final-offers", label: "Final Offers", href: `${base}/final-offers` },
-    { key: "submit", label: "Submit Docs", href: `${base}/submit` },
   ];
 
   return (
