@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useLocation } from "wouter";
 import { Check, Copy, Lock } from "lucide-react";
 import { useAuth, useLogout } from "@/hooks/use-auth";
+import { TopNavTools } from "@/components/top-nav-tools";
 
 // ---------------------------------------------------------------------------
 // Verbatim master prompt (Task #116). Do not alter numbers, rates, or wording.
@@ -113,6 +114,7 @@ function TopBar() {
         <span className="text-slate-200 text-xs font-medium truncate">Toolkit</span>
       </div>
       <div className="flex items-center gap-4">
+        <TopNavTools />
         {isAdmin && (
           <a
             href={`${import.meta.env.BASE_URL}expiration-calendar`}

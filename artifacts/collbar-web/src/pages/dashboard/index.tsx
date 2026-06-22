@@ -5,6 +5,7 @@ import { Lock } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { useLogout } from "@/hooks/use-auth";
 import { useUpgradeLock } from "@/components/upgrade";
+import { TopNavTools } from "@/components/top-nav-tools";
 import { apiUrl } from "@/lib/api";
 
 interface District {
@@ -153,44 +154,7 @@ function TopBar() {
         <span className="text-slate-600 text-xs">Collective Bargaining Database</span>
       </div>
       <div className="flex items-center gap-4">
-        <a
-          href={`${import.meta.env.BASE_URL}toolkit`}
-          className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
-        >
-          Toolkit
-        </a>
-        {isFree ? (
-          <button
-            onClick={showUpgrade}
-            title="Paid feature"
-            className="text-xs text-slate-600 hover:text-slate-500 cursor-not-allowed flex items-center gap-1"
-          >
-            Ask AI <Lock className="h-3 w-3" />
-          </button>
-        ) : (
-          <a
-            href={`${import.meta.env.BASE_URL}dashboard/ask`}
-            className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
-          >
-            Ask AI
-          </a>
-        )}
-        {isFree ? (
-          <button
-            onClick={showUpgrade}
-            title="Paid feature"
-            className="text-xs text-slate-600 hover:text-slate-500 cursor-not-allowed flex items-center gap-1"
-          >
-            Peer Sets <Lock className="h-3 w-3" />
-          </button>
-        ) : (
-          <a
-            href={`${import.meta.env.BASE_URL}peer-sets`}
-            className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
-          >
-            Peer Sets
-          </a>
-        )}
+        <TopNavTools />
         {isAdmin && (
           <a
             href={`${import.meta.env.BASE_URL}expiration-calendar`}

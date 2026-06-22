@@ -10,6 +10,7 @@ import { apiUrl } from "@/lib/api";
 import { ProvenanceRow, ProvenanceValue } from "@/components/provenance";
 import { DashboardSubNav } from "@/components/dashboard-subnav";
 import { useUpgradeLock } from "@/components/upgrade";
+import { TopNavTools } from "@/components/top-nav-tools";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -252,28 +253,7 @@ function TopBar({ district, id }: { district: DistrictDetail | undefined; id: st
         </span>
       </div>
       <div className="flex items-center gap-4">
-        <a
-          href={`${import.meta.env.BASE_URL}toolkit`}
-          className="text-xs text-slate-500 hover:text-slate-300"
-        >
-          Toolkit
-        </a>
-        {isFree ? (
-          <button
-            onClick={showUpgrade}
-            title="Paid feature"
-            className="text-xs text-slate-600 hover:text-slate-500 cursor-not-allowed flex items-center gap-1"
-          >
-            Peer Sets <Lock className="h-3 w-3" />
-          </button>
-        ) : (
-          <a
-            href={`${import.meta.env.BASE_URL}peer-sets`}
-            className="text-xs text-slate-500 hover:text-slate-300"
-          >
-            Peer Sets
-          </a>
-        )}
+        <TopNavTools />
         {isAdmin && (
           <a
             href={`${import.meta.env.BASE_URL}expiration-calendar`}
