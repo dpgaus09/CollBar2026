@@ -49,6 +49,9 @@ interface ConversationSummary {
 interface StreamingTurn {
   content: string;
   results: AskResult[];
+  // Human-friendly label of the step the assistant is currently running (e.g.
+  // "Looking up settlements…"), shown until the final prose starts streaming.
+  step: string | null;
 }
 
 const EXAMPLE_QUESTIONS = [
@@ -182,7 +185,7 @@ function StreamingAnswer({ turn }: { turn: StreamingTurn }) {
           </div>
         ) : (
           <div className="text-sm text-slate-500 animate-pulse">
-            Searching the database…
+            {turn.step ?? "Searching the database…"}
           </div>
         )}
       </div>
@@ -251,10 +254,11 @@ export default function AskPage() {
       let buffer = "";
       let content = "";
       let results: AskResult[] = [];
+      let step: string | null = null;
       let savedId: number | null = convId;
       let done = false;
 
-      const flush = () => setStreaming({ content, results });
+      const flush = () => setStreaming({ content, results, step });
 
       while (!done) {
         const { value, done: readerDone } = await reader.read();
@@ -278,6 +282,7 @@ export default function AskPage() {
             results?: AskResult[];
             error?: string;
             conversationId?: number;
+            label?: string;
           };
           try {
             evt = JSON.parse(payload);
@@ -286,7 +291,13 @@ export default function AskPage() {
           }
 
           if (evt.type === "token") {
+            // Real prose has started — drop the step indicator so the answer
+            // takes over.
+            step = null;
             content += evt.text ?? "";
+            flush();
+          } else if (evt.type === "step") {
+            step = evt.label ?? null;
             flush();
           } else if (evt.type === "reset") {
             content = "";
@@ -318,7 +329,7 @@ export default function AskPage() {
       return { answer: content || FALLBACK_ANSWER, results, conversationId: savedId };
     },
     onMutate: () => {
-      setStreaming({ content: "", results: [] });
+      setStreaming({ content: "", results: [], step: null });
     },
     onSuccess: (data) => {
       setTurns((prev) => [

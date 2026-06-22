@@ -187,6 +187,17 @@ export const ASK_TOOL_DEFS = [
 
 export const ASK_TOOL_NAMES = new Set(ASK_TOOL_DEFS.map((t) => t.name));
 
+// Plain-English labels for the step indicator the client shows while a tool is
+// running. Keyed by the real tool name so the UI describes the actual work in
+// progress (e.g. "Looking up settlements…") instead of a generic spinner.
+export const ASK_TOOL_LABELS: Record<string, string> = {
+  search_districts: "Searching districts…",
+  search_settlements: "Looking up settlements…",
+  search_provisions: "Checking contract clauses…",
+  get_comparables: "Comparing peer districts…",
+  search_factfinding: "Reviewing fact-finding reports…",
+};
+
 // ---------------------------------------------------------------------------
 // Deep-link builders. Paths are relative to the SPA base; the frontend feeds
 // them straight to wouter's navigation (which is mounted at BASE_URL).

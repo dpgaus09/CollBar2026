@@ -14,6 +14,7 @@ import { logger } from "../lib/logger.js";
 import {
   ASK_TOOL_DEFS,
   ASK_TOOL_NAMES,
+  ASK_TOOL_LABELS,
   executeAskTool,
   type AskResult,
 } from "../lib/ask-tools.js";
@@ -412,6 +413,12 @@ router.post(
           }
           toolCallCount++;
           toolsUsed.push(tu.name);
+
+          // Tell the client which step is running so the live answer area can
+          // show a human-friendly label (e.g. "Looking up settlements…")
+          // instead of the generic spinner while this lookup executes.
+          const stepLabel = ASK_TOOL_LABELS[tu.name];
+          if (stepLabel) send({ type: "step", label: stepLabel });
 
           if (!ASK_TOOL_NAMES.has(tu.name)) {
             toolResults.push({
