@@ -31,3 +31,4 @@
 - [api-server new-route 404 → restart](api-server-new-route-restart.md) — a correct, registered new route 404s when the tsx-watch dev server predates it; restart the API Server workflow before curl-testing.
 - [Promote dev CBA data to prod](promote-dev-to-prod.md) — DEV→PROD copy by natural key (no id copy); contracts key must be 6-tuple or NULL effective_start collides under IS NOT DISTINCT FROM.
 - [Review queue scope + audit sampling](review-queue-audit-sampling.md) — queue = confidence<0.8 AND NOT human_verified only; audit sampling disabled (rate 0); is_audit_sample is historical-only, never gates the queue.
+- [Google Drive connector proxy](drive-connector-proxy.md) — use @replit/connectors-sdk proxy (raw Response), multipart upload via Buffer; SDK installed per-package so run probes from inside artifacts/api-server, not the root sandbox.

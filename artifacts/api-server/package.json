@@ -14,6 +14,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
     "@react-pdf/renderer": "^4.5.1",
+    "@replit/connectors-sdk": "^0.4.1",
     "@swc/helpers": "^0.5.23",
     "@types/bcrypt": "^6.0.0",
     "@types/express-session": "^1.19.0",

@@ -172,6 +172,9 @@ importers:
       '@react-pdf/renderer':
         specifier: ^4.5.1
         version: 4.5.1(react@19.1.0)
+      '@replit/connectors-sdk':
+        specifier: ^0.4.1
+        version: 0.4.1
       '@swc/helpers':
         specifier: ^0.5.23
         version: 0.5.23
@@ -1627,6 +1630,9 @@ packages:
 
   '@react-pdf/types@2.11.1':
     resolution: {integrity: sha512-i9xQgfaDU9QoeNnbp6rltXCWg1huEh195rpOuN8cE4BZ2FuLdQrsIcb2dhFF9aOxXf+XBA6LOSpIW051MDD/bw==}
+
+  '@replit/connectors-sdk@0.4.1':
+    resolution: {integrity: sha512-iw0uy95+Qul8MPc/bBo8hBfYk1wm6RpBZ9sHyCpcA9A9T4zcUT9deSQxdyMyI0w3sv3+5uGmdfq1TpFTMrjD1g==}
 
   '@replit/vite-plugin-cartographer@0.5.21':
     resolution: {integrity: sha512-E5rco8Mov05QDfUOjoim3MVJdDX0/pBYql5Jay3w9cqmU/QOL6cEOUAjsBZPB/V8FEChsk++sZUrcWt1bHaAoQ==}
@@ -4822,6 +4828,8 @@ snapshots:
       '@react-pdf/font': 4.0.8
       '@react-pdf/primitives': 4.3.0
       '@react-pdf/stylesheet': 6.2.1
+
+  '@replit/connectors-sdk@0.4.1': {}
 
   '@replit/vite-plugin-cartographer@0.5.21':
     dependencies:
