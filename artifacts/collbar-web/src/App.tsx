@@ -12,10 +12,12 @@ import ComparablesPage from "@/pages/dashboard/comparables";
 import AskVsGotPage from "@/pages/dashboard/ask-vs-got";
 import FinalOffersPage from "@/pages/dashboard/final-offers";
 import AskPage from "@/pages/dashboard/ask";
+import ToolkitPage from "@/pages/dashboard/toolkit";
 import ExpirationCalendarPage from "@/pages/expiration-calendar";
 import PeerSetsPage from "@/pages/peer-sets";
 import PlansPage from "@/pages/plans";
 import TrackerPage from "@/pages/tracker";
+import { UpgradeLockProvider } from "@/components/upgrade";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -63,6 +65,9 @@ function Router() {
       {/* Auth */}
       <Route path="/login" component={LoginPage} />
 
+      {/* Toolkit (free + paid + admin) */}
+      <Route path="/toolkit" component={ToolkitPage} />
+
       {/* Dashboard */}
       <Route path="/dashboard" component={DashboardIndexPage} />
       <Route path="/dashboard/ask" component={AskPage} />
@@ -91,9 +96,11 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
-        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
-          <Router />
-        </WouterRouter>
+        <UpgradeLockProvider>
+          <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+            <Router />
+          </WouterRouter>
+        </UpgradeLockProvider>
         <Toaster />
       </TooltipProvider>
     </QueryClientProvider>

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { useAuth, useLogout } from "@/hooks/use-auth";
 import { apiUrl } from "@/lib/api";
+import { LockedPage } from "@/components/upgrade";
 
 // ---------------------------------------------------------------------------
 // Types — mirror the /api/dashboard/ask response shape.
@@ -201,7 +202,7 @@ const FALLBACK_ANSWER = "I couldn't find an answer to that question.";
 
 export default function AskPage() {
   const [, setLocation] = useLocation();
-  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const { isAuthenticated, isLoading: authLoading, isFree } = useAuth();
   const queryClient = useQueryClient();
 
   const [question, setQuestion] = useState("");
@@ -400,6 +401,8 @@ export default function AskPage() {
   }, [turns.length, streaming?.content, streaming?.results.length]);
 
   if (authLoading || !isAuthenticated) return null;
+  if (isFree)
+    return <LockedPage feature="Ask AI" backTo="/dashboard" backLabel="← Back to Districts" />;
 
   const submit = (q: string) => {
     const trimmed = q.trim();

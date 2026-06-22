@@ -3,30 +3,19 @@ import {
   type IRouter,
   type Request,
   type Response,
-  type NextFunction,
 } from "express";
 import { db } from "@workspace/db";
 import { sql, type SQL } from "drizzle-orm";
 import React from "react";
 import { parseUnit } from "./bargaining-units.js";
 import { coerceIds } from "../lib/coerce.js";
+import { gate } from "../lib/access.js";
 import { renderToBuffer } from "@react-pdf/renderer";
 import { BoardPacketPDF } from "./pdf-template.js";
 import type { BoardPacketProps, SettlementRow, PeerMedians } from "./pdf-template.js";
 
 const router: IRouter = Router();
 
-// ---------------------------------------------------------------------------
-// Auth middleware
-// ---------------------------------------------------------------------------
-
-function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  if (!req.session.userId) {
-    res.status(401).json({ error: "Authentication required" });
-    return;
-  }
-  next();
-}
 
 // ---------------------------------------------------------------------------
 // Band helper (mirrors dashboard.ts)
@@ -113,7 +102,7 @@ async function ownedPeerSet(
 
 router.get(
   "/peer-sets/preview",
-  requireAuth,
+  gate({ paid: true }),
   async (req: Request, res: Response) => {
     const county = req.query.county ? String(req.query.county) : null;
     const band = req.query.band ? String(req.query.band) : null;
@@ -159,7 +148,7 @@ router.get(
 
 router.get(
   "/peer-sets/districts/search",
-  requireAuth,
+  gate({ paid: true }),
   async (req: Request, res: Response) => {
     const q = String(req.query.q ?? "").trim();
     const state = req.query.state ? String(req.query.state).toUpperCase() : null;
@@ -196,7 +185,7 @@ router.get(
 // GET /api/peer-sets
 // ---------------------------------------------------------------------------
 
-router.get("/peer-sets", requireAuth, async (req: Request, res: Response) => {
+router.get("/peer-sets", gate({ paid: true }), async (req: Request, res: Response) => {
   const userId = req.session.userId!;
   try {
     const rows = await db.execute(sql`
@@ -217,7 +206,7 @@ router.get("/peer-sets", requireAuth, async (req: Request, res: Response) => {
 // POST /api/peer-sets
 // ---------------------------------------------------------------------------
 
-router.post("/peer-sets", requireAuth, async (req: Request, res: Response) => {
+router.post("/peer-sets", gate({ paid: true }), async (req: Request, res: Response) => {
   const userId = req.session.userId!;
   const { name, district_ids = [], filters_json = {} } = req.body as {
     name?: string;
@@ -286,7 +275,7 @@ router.post("/peer-sets", requireAuth, async (req: Request, res: Response) => {
 
 router.get(
   "/peer-sets/:id",
-  requireAuth,
+  gate({ paid: true }),
   async (req: Request, res: Response) => {
     const userId = req.session.userId!;
     const id = parseInt(String(req.params.id), 10);
@@ -304,7 +293,7 @@ router.get(
 
 router.put(
   "/peer-sets/:id",
-  requireAuth,
+  gate({ paid: true }),
   async (req: Request, res: Response) => {
     const userId = req.session.userId!;
     const id = parseInt(String(req.params.id), 10);
@@ -363,7 +352,7 @@ router.put(
 
 router.delete(
   "/peer-sets/:id",
-  requireAuth,
+  gate({ paid: true }),
   async (req: Request, res: Response) => {
     const userId = req.session.userId!;
     const id = parseInt(String(req.params.id), 10);
@@ -387,7 +376,7 @@ router.delete(
 
 router.get(
   "/peer-sets/:id/export/pdf",
-  requireAuth,
+  gate({ paid: true }),
   async (req: Request, res: Response) => {
     const userId = req.session.userId!;
     const id = parseInt(String(req.params.id), 10);

@@ -4,6 +4,8 @@ import { useParams, useLocation } from "wouter";
 import { useAuth, useLogout } from "@/hooks/use-auth";
 import { apiUrl } from "@/lib/api";
 import { ProvenanceValue } from "@/components/provenance";
+import { DashboardSubNav } from "@/components/dashboard-subnav";
+import { LockedPage } from "@/components/upgrade";
 
 interface Provision {
   id: number;
@@ -22,26 +24,6 @@ interface Provision {
 
 const CATEGORIES = ["", "compensation", "insurance", "retirement", "leave", "workday", "evaluation", "rif", "grievance", "other"];
 
-function SubNav({ id, active }: { id: string; active: string }) {
-  const base = `${import.meta.env.BASE_URL}dashboard/${id}`;
-  const tabs = [
-    { key: "home", label: "Overview", href: base },
-    { key: "clauses", label: "Key Clauses", href: `${base}/clauses` },
-    { key: "comparables", label: "Comparables", href: `${base}/comparables` },
-    { key: "ask-vs-got", label: "Ask vs Got", href: `${base}/ask-vs-got` },
-    { key: "final-offers", label: "Final Offers", href: `${base}/final-offers` },
-  ] as const;
-  return (
-    <div className="border-b border-slate-800 px-6 flex -mb-px">
-      {tabs.map((t) => (
-        <a key={t.key} href={t.href} className={`px-4 py-3 text-xs font-medium border-b-2 transition-colors ${active === t.key ? "border-blue-500 text-blue-400" : "border-transparent text-slate-500 hover:text-slate-300"}`}>
-          {t.label}
-        </a>
-      ))}
-    </div>
-  );
-}
-
 function ConfidenceBadge({ v }: { v: string | null }) {
   if (!v) return null;
   const n = parseFloat(v);
@@ -53,7 +35,7 @@ export default function ClausesPage() {
   const params = useParams<{ id: string }>();
   const id = params.id ?? "";
   const [, setLocation] = useLocation();
-  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const { isAuthenticated, isLoading: authLoading, isFree } = useAuth();
   const logout = useLogout();
 
   // Seed filters from deep-link query params (?category=&q=) so a result card
@@ -83,6 +65,10 @@ export default function ClausesPage() {
   }, [authLoading, isAuthenticated, setLocation]);
 
   if (authLoading || !isAuthenticated) return null;
+  if (isFree)
+    return (
+      <LockedPage feature="Key Clauses" backTo={`/dashboard/${id}`} backLabel="← Back to Overview" />
+    );
 
   const provisions = (data?.provisions ?? []).filter((p) => {
     if (category && p.category !== category) return false;
@@ -105,7 +91,7 @@ export default function ClausesPage() {
         </div>
         <button onClick={() => logout.mutate()} className="text-xs text-slate-500 hover:text-red-400">Sign out</button>
       </header>
-      <SubNav id={id} active="clauses" />
+      <DashboardSubNav id={id} active="clauses" />
 
       <main className="max-w-4xl mx-auto px-6 py-8 space-y-6">
         <div className="flex items-center gap-4 flex-wrap">

@@ -21,13 +21,19 @@ export function useAuth() {
     retry: 1,
   });
 
+  const isAuthenticated = data?.authenticated ?? false;
+  const isPro = data?.role === "admin" || data?.plan === "pro";
+
   return {
     user: data,
     isLoading,
-    isAuthenticated: data?.authenticated ?? false,
+    isAuthenticated,
     isAdmin: data?.role === "admin",
     plan: data?.plan ?? "free",
-    isPro: data?.role === "admin" || data?.plan === "pro",
+    isPro,
+    // A free customer: authenticated, not admin, not on the pro plan. Used to
+    // grey/lock paid features in the UI (the server enforces the same limits).
+    isFree: isAuthenticated && !isPro,
     districtId: data?.districtId ?? null,
     email: data?.email,
     refetch,

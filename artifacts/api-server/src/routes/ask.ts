@@ -3,7 +3,6 @@ import {
   type IRouter,
   type Request,
   type Response,
-  type NextFunction,
 } from "express";
 import rateLimit from "express-rate-limit";
 import type Anthropic from "@anthropic-ai/sdk";
@@ -18,6 +17,7 @@ import {
   executeAskTool,
   type AskResult,
 } from "../lib/ask-tools.js";
+import { gate } from "../lib/access.js";
 
 const router: IRouter = Router();
 
@@ -41,14 +41,6 @@ const MAX_ANSWER_LEN = 6000; // cap on a prior assistant answer carried in histo
 const MAX_HISTORY_MESSAGES = 10; // prior turns (user+assistant) carried as context
 const MAX_TOOL_RESULT_CHARS = 12_000; // cap serialized rows handed back to model
 const FALLBACK_ANSWER = "I couldn't find an answer to that question.";
-
-function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  if (!req.session.userId) {
-    res.status(401).json({ error: "Authentication required" });
-    return;
-  }
-  next();
-}
 
 const askLimiter = rateLimit({
   windowMs: 60_000,
@@ -196,7 +188,7 @@ async function persistTurn(args: {
 
 router.post(
   "/dashboard/ask",
-  requireAuth,
+  gate({ paid: true }),
   askLimiter,
   async (req: Request, res: Response) => {
     const started = Date.now();
@@ -484,7 +476,7 @@ router.post(
 // ---------------------------------------------------------------------------
 router.get(
   "/dashboard/conversations",
-  requireAuth,
+  gate({ paid: true }),
   async (req: Request, res: Response) => {
     const userId = req.session.userId as number;
     try {
@@ -519,7 +511,7 @@ router.get(
 // ---------------------------------------------------------------------------
 router.get(
   "/dashboard/conversations/:id",
-  requireAuth,
+  gate({ paid: true }),
   async (req: Request, res: Response) => {
     const userId = req.session.userId as number;
     const id = Number(req.params.id);

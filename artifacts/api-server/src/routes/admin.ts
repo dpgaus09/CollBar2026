@@ -1780,7 +1780,7 @@ router.get("/admin/min-salary-status", requireAdminToken, async (_req, res) => {
 router.get("/admin/customers", requireAdminToken, async (_req, res) => {
   try {
     const rows = await db.execute(sql`
-      SELECT u.id, u.name, u.email, u.active, u.district_id, d.name AS district_name,
+      SELECT u.id, u.name, u.email, u.active, u.plan, u.district_id, d.name AS district_name,
              u.created_at, u.last_sign_in_at,
              (u.password_hash IS NOT NULL) AS has_password
       FROM users u
@@ -1797,11 +1797,12 @@ router.get("/admin/customers", requireAdminToken, async (_req, res) => {
 
 // POST /admin/customers — create a new district user account
 router.post("/admin/customers", requireAdminToken, async (req, res) => {
-  const { name, email, district_id, password } = req.body as {
+  const { name, email, district_id, password, plan } = req.body as {
     name?: string;
     email?: string;
     district_id?: number | null;
     password?: string;
+    plan?: string;
   };
   if (!name?.trim() || !email?.includes("@")) {
     res.status(400).json({ error: "Name and valid email are required" });
@@ -1811,14 +1812,15 @@ router.post("/admin/customers", requireAdminToken, async (req, res) => {
     res.status(400).json({ error: "Password must be at least 8 characters" });
     return;
   }
+  const normalPlan = plan === "pro" ? "pro" : "free";
   const normalEmail = email.toLowerCase().trim();
   const bcrypt = await import("bcrypt");
   const hash = await bcrypt.hash(password, 12);
   try {
     const rows = await db.execute(sql`
       INSERT INTO users (name, email, role, plan, active, district_id, password_hash)
-      VALUES (${name.trim()}, ${normalEmail}, 'district_user', 'free', true, ${district_id ?? null}, ${hash})
-      RETURNING id, name, email, active, district_id, created_at, last_sign_in_at
+      VALUES (${name.trim()}, ${normalEmail}, 'district_user', ${normalPlan}, true, ${district_id ?? null}, ${hash})
+      RETURNING id, name, email, active, plan, district_id, created_at, last_sign_in_at
     `);
     res.json({ customer: rows.rows[0] });
   } catch (err) {
@@ -1839,11 +1841,16 @@ router.patch("/admin/customers/:id", requireAdminToken, async (req, res) => {
     res.status(400).json({ error: "Valid numeric id required" });
     return;
   }
-  const { active, name, district_id } = req.body as {
+  const { active, name, district_id, plan } = req.body as {
     active?: boolean;
     name?: string;
     district_id?: number | null;
+    plan?: string;
   };
+  if (plan !== undefined && plan !== "free" && plan !== "pro") {
+    res.status(400).json({ error: "Plan must be 'free' or 'pro'" });
+    return;
+  }
 
   try {
     if (active !== undefined) {
@@ -1855,8 +1862,11 @@ router.patch("/admin/customers/:id", requireAdminToken, async (req, res) => {
     if (district_id !== undefined) {
       await db.execute(sql`UPDATE users SET district_id = ${district_id ?? null} WHERE id = ${id} AND role = 'district_user'`);
     }
+    if (plan !== undefined) {
+      await db.execute(sql`UPDATE users SET plan = ${plan} WHERE id = ${id} AND role = 'district_user'`);
+    }
     const updated = await db.execute(sql`
-      SELECT id, name, email, active, district_id, created_at, last_sign_in_at,
+      SELECT id, name, email, active, plan, district_id, created_at, last_sign_in_at,
              (password_hash IS NOT NULL) AS has_password
       FROM users WHERE id = ${id} AND role = 'district_user'
     `);

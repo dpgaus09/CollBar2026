@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useParams, useLocation } from "wouter";
 import { useAuth, useLogout } from "@/hooks/use-auth";
 import { apiUrl } from "@/lib/api";
+import { DashboardSubNav } from "@/components/dashboard-subnav";
+import { LockedPage } from "@/components/upgrade";
 
 interface Comparison {
   posting_id: number;
@@ -33,26 +35,6 @@ interface Posting {
   diff_count: number;
   aligned_count: number;
   comparisons: Comparison[];
-}
-
-function SubNav({ id, active }: { id: string; active: string }) {
-  const base = `${import.meta.env.BASE_URL}dashboard/${id}`;
-  const tabs = [
-    { key: "home", label: "Overview", href: base },
-    { key: "clauses", label: "Key Clauses", href: `${base}/clauses` },
-    { key: "comparables", label: "Comparables", href: `${base}/comparables` },
-    { key: "ask-vs-got", label: "Ask vs Got", href: `${base}/ask-vs-got` },
-    { key: "final-offers", label: "Final Offers", href: `${base}/final-offers` },
-  ] as const;
-  return (
-    <div className="border-b border-slate-800 px-6 flex -mb-px">
-      {tabs.map((t) => (
-        <a key={t.key} href={t.href} className={`px-4 py-3 text-xs font-medium border-b-2 transition-colors ${active === t.key ? "border-blue-500 text-blue-400" : "border-transparent text-slate-500 hover:text-slate-300"}`}>
-          {t.label}
-        </a>
-      ))}
-    </div>
-  );
 }
 
 const STATUS_META: Record<Comparison["status"], { label: string; cls: string }> = {
@@ -170,7 +152,7 @@ export default function FinalOffersPage() {
   const params = useParams<{ id: string }>();
   const id = params.id ?? "";
   const [, setLocation] = useLocation();
-  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const { isAuthenticated, isLoading: authLoading, isFree } = useAuth();
   const logout = useLogout();
 
   const { data, isLoading, isError } = useQuery<{ postings: Posting[] }>({
@@ -189,6 +171,10 @@ export default function FinalOffersPage() {
   }, [authLoading, isAuthenticated, setLocation]);
 
   if (authLoading || !isAuthenticated) return null;
+  if (isFree)
+    return (
+      <LockedPage feature="Final Offers" backTo={`/dashboard/${id}`} backLabel="← Back to Overview" />
+    );
 
   const postings = data?.postings ?? [];
 
@@ -198,7 +184,7 @@ export default function FinalOffersPage() {
         <a href={`${import.meta.env.BASE_URL}dashboard/${id}`} className="text-slate-500 hover:text-slate-300 text-xs">← Overview</a>
         <button onClick={() => logout.mutate()} className="text-xs text-slate-500 hover:text-red-400">Sign out</button>
       </header>
-      <SubNav id={id} active="final-offers" />
+      <DashboardSubNav id={id} active="final-offers" />
 
       <main className="max-w-5xl mx-auto px-6 py-8 space-y-6">
         <div>

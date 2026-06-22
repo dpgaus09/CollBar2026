@@ -4,6 +4,8 @@ import { useParams, useLocation } from "wouter";
 import { useAuth, useLogout } from "@/hooks/use-auth";
 import { apiUrl } from "@/lib/api";
 import { ProvenanceValue } from "@/components/provenance";
+import { DashboardSubNav } from "@/components/dashboard-subnav";
+import { LockedPage } from "@/components/upgrade";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -76,34 +78,6 @@ const BAND_LABELS: Record<string, string> = {
 // Sub-nav (shared with district.tsx pattern)
 // ---------------------------------------------------------------------------
 
-function SubNav({ id, active }: { id: string; active: string }) {
-  const base = `${import.meta.env.BASE_URL}dashboard/${id}`;
-  const tabs = [
-    { key: "home", label: "Overview", href: base },
-    { key: "clauses", label: "Key Clauses", href: `${base}/clauses` },
-    { key: "comparables", label: "Comparables", href: `${base}/comparables` },
-    { key: "ask-vs-got", label: "Ask vs Got", href: `${base}/ask-vs-got` },
-    { key: "final-offers", label: "Final Offers", href: `${base}/final-offers` },
-  ] as const;
-  return (
-    <div className="border-b border-slate-800 px-6 flex -mb-px">
-      {tabs.map((t) => (
-        <a
-          key={t.key}
-          href={t.href}
-          className={`px-4 py-3 text-xs font-medium border-b-2 transition-colors ${
-            active === t.key
-              ? "border-blue-500 text-blue-400"
-              : "border-transparent text-slate-500 hover:text-slate-300"
-          }`}
-        >
-          {t.label}
-        </a>
-      ))}
-    </div>
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Formatting helpers
 // ---------------------------------------------------------------------------
@@ -143,7 +117,7 @@ export default function ComparablesPage() {
   const params = useParams<{ id: string }>();
   const id = params.id ?? "";
   const [, setLocation] = useLocation();
-  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const { isAuthenticated, isLoading: authLoading, isFree } = useAuth();
   const logout = useLogout();
 
   // Read filters + peer_set_id from URL search params so a deep link from the
@@ -239,6 +213,10 @@ export default function ComparablesPage() {
   const medians = data?.medians ?? null;
 
   if (authLoading || !isAuthenticated) return null;
+  if (isFree)
+    return (
+      <LockedPage feature="Comparables" backTo={`/dashboard/${id}`} backLabel="← Back to Overview" />
+    );
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-mono">
@@ -256,7 +234,7 @@ export default function ComparablesPage() {
           Sign out
         </button>
       </header>
-      <SubNav id={id} active="comparables" />
+      <DashboardSubNav id={id} active="comparables" />
 
       <main className="max-w-6xl mx-auto px-6 py-8 space-y-5">
 

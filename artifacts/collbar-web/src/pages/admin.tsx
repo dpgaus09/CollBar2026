@@ -2877,6 +2877,7 @@ interface Customer {
   name: string | null;
   email: string;
   active: boolean;
+  plan: string | null;
   district_id: number | null;
   district_name: string | null;
   created_at: string | null;
@@ -2928,6 +2929,7 @@ function CustomersTab() {
   const [newEmail, setNewEmail] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [newDistrictId, setNewDistrictId] = useState<string>("");
+  const [newPlan, setNewPlan] = useState<"free" | "pro">("free");
   const [addDistrictSearch, setAddDistrictSearch] = useState("");
   const [addError, setAddError] = useState("");
   const [adding, setAdding] = useState(false);
@@ -2984,6 +2986,7 @@ function CustomersTab() {
           email: newEmail.trim(),
           password: newPassword,
           district_id: newDistrictId ? Number(newDistrictId) : null,
+          plan: newPlan,
         }),
       });
       const body = (await r.json()) as { customer?: Customer; error?: string };
@@ -2994,6 +2997,7 @@ function CustomersTab() {
         setNewEmail("");
         setNewPassword("");
         setNewDistrictId("");
+        setNewPlan("free");
         setAddDistrictSearch("");
         setShowAdd(false);
         qc.invalidateQueries({ queryKey: ["/api/admin/customers"] });
@@ -3039,6 +3043,16 @@ function CustomersTab() {
       headers: { "Content-Type": "application/json" },
       credentials: "include",
       body: JSON.stringify({ active }),
+    });
+    qc.invalidateQueries({ queryKey: ["/api/admin/customers"] });
+  };
+
+  const togglePlan = async (id: number, plan: "free" | "pro") => {
+    await fetch(apiUrl(`/api/admin/customers/${id}`), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ plan }),
     });
     qc.invalidateQueries({ queryKey: ["/api/admin/customers"] });
   };
@@ -3143,6 +3157,15 @@ function CustomersTab() {
               minLength={8}
               className="flex-1 text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
             />
+            <select
+              value={newPlan}
+              onChange={(e) => setNewPlan(e.target.value as "free" | "pro")}
+              className="text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 focus:outline-none focus:border-blue-500 self-end"
+              title="Plan"
+            >
+              <option value="free">Free</option>
+              <option value="pro">Paid</option>
+            </select>
             <button
               type="submit"
               disabled={adding}
@@ -3176,6 +3199,7 @@ function CustomersTab() {
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Name</th>
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Email</th>
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">District</th>
+                <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Plan</th>
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Status</th>
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Password</th>
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Last sign-in</th>
@@ -3205,6 +3229,19 @@ function CustomersTab() {
                       }`}
                     >
                       {c.district_name ?? "Assign district"}
+                    </button>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <button
+                      onClick={() => togglePlan(c.id, c.plan === "pro" ? "free" : "pro")}
+                      title="Toggle Free / Paid"
+                      className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                        c.plan === "pro"
+                          ? "bg-blue-900/50 text-blue-300 hover:bg-slate-800 hover:text-slate-400"
+                          : "bg-slate-800 text-slate-400 hover:bg-blue-900/50 hover:text-blue-300"
+                      }`}
+                    >
+                      {c.plan === "pro" ? "Paid" : "Free"}
                     </button>
                   </td>
                   <td className="px-4 py-2.5">

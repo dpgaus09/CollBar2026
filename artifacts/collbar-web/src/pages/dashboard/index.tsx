@@ -1,8 +1,10 @@
 import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useLocation } from "wouter";
+import { Lock } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { useLogout } from "@/hooks/use-auth";
+import { useUpgradeLock } from "@/components/upgrade";
 import { apiUrl } from "@/lib/api";
 
 interface District {
@@ -141,7 +143,8 @@ function MinTeacherSalaryCard() {
 }
 
 function TopBar() {
-  const { email, isAdmin } = useAuth();
+  const { email, isAdmin, isFree } = useAuth();
+  const { showUpgrade } = useUpgradeLock();
   const logout = useLogout();
   return (
     <header className="border-b border-slate-800 px-6 py-3 flex items-center justify-between bg-slate-950">
@@ -151,17 +154,43 @@ function TopBar() {
       </div>
       <div className="flex items-center gap-4">
         <a
-          href={`${import.meta.env.BASE_URL}dashboard/ask`}
-          className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
-        >
-          Ask AI
-        </a>
-        <a
-          href={`${import.meta.env.BASE_URL}peer-sets`}
+          href={`${import.meta.env.BASE_URL}toolkit`}
           className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
         >
-          Peer Sets
+          Toolkit
         </a>
+        {isFree ? (
+          <button
+            onClick={showUpgrade}
+            title="Paid feature"
+            className="text-xs text-slate-600 hover:text-slate-500 cursor-not-allowed flex items-center gap-1"
+          >
+            Ask AI <Lock className="h-3 w-3" />
+          </button>
+        ) : (
+          <a
+            href={`${import.meta.env.BASE_URL}dashboard/ask`}
+            className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
+          >
+            Ask AI
+          </a>
+        )}
+        {isFree ? (
+          <button
+            onClick={showUpgrade}
+            title="Paid feature"
+            className="text-xs text-slate-600 hover:text-slate-500 cursor-not-allowed flex items-center gap-1"
+          >
+            Peer Sets <Lock className="h-3 w-3" />
+          </button>
+        ) : (
+          <a
+            href={`${import.meta.env.BASE_URL}peer-sets`}
+            className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
+          >
+            Peer Sets
+          </a>
+        )}
         {isAdmin && (
           <a
             href={`${import.meta.env.BASE_URL}expiration-calendar`}
@@ -194,17 +223,22 @@ function DistrictRow({
   d,
   onClick,
   pinned = false,
+  locked = false,
 }: {
   d: District;
   onClick: () => void;
   pinned?: boolean;
+  locked?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
+      title={locked ? "Paid feature" : undefined}
       className={
         pinned
           ? "w-full flex items-center justify-between px-4 py-3 bg-lime-400/5 hover:bg-lime-400/10 transition-colors text-left rounded-lg border-2 border-lime-400"
+          : locked
+          ? "w-full flex items-center justify-between px-4 py-3 bg-slate-950 text-left border-b border-slate-800/50 last:border-0 opacity-50 cursor-not-allowed"
           : "w-full flex items-center justify-between px-4 py-3 bg-slate-950 hover:bg-slate-900 transition-colors text-left border-b border-slate-800/50 last:border-0"
       }
     >
@@ -216,6 +250,7 @@ function DistrictRow({
               Your district
             </span>
           )}
+          {locked && <Lock className="h-3 w-3 text-slate-500" />}
         </div>
         <div className="text-xs text-slate-500 mt-0.5">
           {d.county ? `${d.county} County` : ""}
@@ -277,7 +312,8 @@ function AdminDistrictPicker({
   const [, setLocation] = useLocation();
   const debouncedSearch = useDebounced(search);
   const { data, isLoading, isError } = useDistricts(debouncedSearch);
-  const { districtId } = useAuth();
+  const { districtId, isFree } = useAuth();
+  const { showUpgrade } = useUpgradeLock();
   const { data: myDistrict } = useMyDistrict(districtId);
 
   const filtered = (data?.districts ?? []).filter((d) => {
@@ -337,7 +373,8 @@ function AdminDistrictPicker({
           <DistrictRow
             key={d.id}
             d={d}
-            onClick={() => setLocation(`/dashboard/${d.id}`)}
+            locked={isFree}
+            onClick={isFree ? showUpgrade : () => setLocation(`/dashboard/${d.id}`)}
           />
         ))}
       </div>

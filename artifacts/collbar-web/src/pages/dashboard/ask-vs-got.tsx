@@ -8,6 +8,8 @@ import {
 import { useAuth, useLogout } from "@/hooks/use-auth";
 import { apiUrl } from "@/lib/api";
 import { ProvenanceValue } from "@/components/provenance";
+import { DashboardSubNav } from "@/components/dashboard-subnav";
+import { LockedPage } from "@/components/upgrade";
 
 interface Proposal {
   id: number;
@@ -23,26 +25,6 @@ interface Proposal {
   human_verified: boolean;
   source_url: string | null;
   retrieved_at: string | null;
-}
-
-function SubNav({ id, active }: { id: string; active: string }) {
-  const base = `${import.meta.env.BASE_URL}dashboard/${id}`;
-  const tabs = [
-    { key: "home", label: "Overview", href: base },
-    { key: "clauses", label: "Key Clauses", href: `${base}/clauses` },
-    { key: "comparables", label: "Comparables", href: `${base}/comparables` },
-    { key: "ask-vs-got", label: "Ask vs Got", href: `${base}/ask-vs-got` },
-    { key: "final-offers", label: "Final Offers", href: `${base}/final-offers` },
-  ] as const;
-  return (
-    <div className="border-b border-slate-800 px-6 flex -mb-px">
-      {tabs.map((t) => (
-        <a key={t.key} href={t.href} className={`px-4 py-3 text-xs font-medium border-b-2 transition-colors ${active === t.key ? "border-blue-500 text-blue-400" : "border-transparent text-slate-500 hover:text-slate-300"}`}>
-          {t.label}
-        </a>
-      ))}
-    </div>
-  );
 }
 
 const CustomTooltip = ({ active, payload }: { active?: boolean; payload?: { payload: { label: string; x: number; y: number } }[] }) => {
@@ -61,7 +43,7 @@ export default function AskVsGotPage() {
   const params = useParams<{ id: string }>();
   const id = params.id ?? "";
   const [, setLocation] = useLocation();
-  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const { isAuthenticated, isLoading: authLoading, isFree } = useAuth();
   const logout = useLogout();
 
   const { data, isLoading } = useQuery<{ proposals: Proposal[] }>({
@@ -80,6 +62,10 @@ export default function AskVsGotPage() {
   }, [authLoading, isAuthenticated, setLocation]);
 
   if (authLoading || !isAuthenticated) return null;
+  if (isFree)
+    return (
+      <LockedPage feature="Ask vs Got" backTo={`/dashboard/${id}`} backLabel="← Back to Overview" />
+    );
 
   const proposals = data?.proposals ?? [];
 
@@ -97,7 +83,7 @@ export default function AskVsGotPage() {
         <a href={`${import.meta.env.BASE_URL}dashboard/${id}`} className="text-slate-500 hover:text-slate-300 text-xs">← Overview</a>
         <button onClick={() => logout.mutate()} className="text-xs text-slate-500 hover:text-red-400">Sign out</button>
       </header>
-      <SubNav id={id} active="ask-vs-got" />
+      <DashboardSubNav id={id} active="ask-vs-got" />
 
       <main className="max-w-4xl mx-auto px-6 py-8 space-y-8">
         <div>

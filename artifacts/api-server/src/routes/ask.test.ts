@@ -30,6 +30,32 @@ vi.mock("@workspace/db", () => ({
   db: { execute, transaction },
 }));
 
+// These tests exercise the Ask route logic for an authenticated paid customer.
+// The real access gate performs its own users-table DB read (loadAccess) which
+// would otherwise consume the scripted execute() queue below; its DB-backed
+// behavior (free 403, inactive/missing 401, own-district scoping) is covered
+// separately in lib/access.test.ts. Here we mock the gate down to the auth
+// check the route tests depend on: 401 without a session, pass-through (paid)
+// otherwise.
+vi.mock("../lib/access.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/access.js")>();
+  return {
+    ...actual,
+    gate: () =>
+      async (
+        req: { session?: { userId?: number } },
+        res: { status: (n: number) => { json: (b: unknown) => void } },
+        next: () => void,
+      ): Promise<void> => {
+        if (!req.session?.userId) {
+          res.status(401).json({ error: "Authentication required" });
+          return;
+        }
+        next();
+      },
+  };
+});
+
 const askRouter = (await import("./ask.js")).default;
 
 // A test-controlled session id. Using distinct ids per scenario keeps the

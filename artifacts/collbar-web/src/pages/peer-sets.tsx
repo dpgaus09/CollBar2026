@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { useAuth, useLogout } from "@/hooks/use-auth";
 import { apiUrl } from "@/lib/api";
+import { LockedPage } from "@/components/upgrade";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -400,7 +401,7 @@ function BuilderModal({
 
 export default function PeerSetsPage() {
   const [, setLocation] = useLocation();
-  const { isAuthenticated, isLoading: authLoading, districtId } = useAuth();
+  const { isAuthenticated, isLoading: authLoading, districtId, isFree } = useAuth();
   const logout = useLogout();
   const qc = useQueryClient();
 
@@ -491,6 +492,8 @@ export default function PeerSetsPage() {
   const baseDistrict = districtId ?? "";
 
   if (authLoading || !isAuthenticated) return null;
+  if (isFree)
+    return <LockedPage feature="Peer Sets" backTo="/dashboard" backLabel="← Back to Districts" />;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-mono">

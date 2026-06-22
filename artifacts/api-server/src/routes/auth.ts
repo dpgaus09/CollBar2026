@@ -193,19 +193,55 @@ router.post("/auth/login", async (req: Request, res: Response) => {
 // ============================================================================
 // GET /api/auth/me — return current session state
 // ============================================================================
-router.get("/auth/me", (req: Request, res: Response) => {
+router.get("/auth/me", async (req: Request, res: Response) => {
   if (!req.session.userId) {
     res.json({ authenticated: false });
     return;
   }
-  res.json({
-    authenticated: true,
-    userId: req.session.userId,
-    role: req.session.userRole,
-    plan: req.session.userPlan ?? "free",
-    districtId: req.session.userDistrictId,
-    email: req.session.userEmail,
-  });
+  // Read the live account so plan/district/active changes made by an admin are
+  // reflected on the client's next poll (not only after re-login), and a
+  // deactivated or deleted account is signed out.
+  try {
+    const rows = await db.execute(sql`
+      SELECT role, plan, district_id, active, email
+      FROM users
+      WHERE id = ${req.session.userId}
+      LIMIT 1
+    `);
+    const u = rows.rows[0] as
+      | { role: unknown; plan: unknown; district_id: unknown; active: unknown; email: unknown }
+      | undefined;
+    if (!u || u.active === false) {
+      req.session.destroy(() => undefined);
+      res.json({ authenticated: false });
+      return;
+    }
+    const role = u.role === "admin" ? "admin" : "district_user";
+    const plan = u.plan === "pro" ? "pro" : "free";
+    const districtId = u.district_id == null ? null : Number(u.district_id);
+    req.session.userRole = role;
+    req.session.userPlan = plan;
+    req.session.userDistrictId = districtId;
+    res.json({
+      authenticated: true,
+      userId: req.session.userId,
+      role,
+      plan,
+      districtId,
+      email: typeof u.email === "string" ? u.email : req.session.userEmail,
+    });
+  } catch {
+    // On a transient DB error, fall back to the cached session rather than
+    // signing the user out.
+    res.json({
+      authenticated: true,
+      userId: req.session.userId,
+      role: req.session.userRole,
+      plan: req.session.userPlan ?? "free",
+      districtId: req.session.userDistrictId,
+      email: req.session.userEmail,
+    });
+  }
 });
 
 // ============================================================================

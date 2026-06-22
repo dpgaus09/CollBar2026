@@ -4,9 +4,12 @@ import { useParams, useLocation } from "wouter";
 import {
   BarChart, Bar, ResponsiveContainer, XAxis, Tooltip as RechartTooltip, ReferenceLine,
 } from "recharts";
+import { Lock } from "lucide-react";
 import { useAuth, useLogout } from "@/hooks/use-auth";
 import { apiUrl } from "@/lib/api";
 import { ProvenanceRow, ProvenanceValue } from "@/components/provenance";
+import { DashboardSubNav } from "@/components/dashboard-subnav";
+import { useUpgradeLock } from "@/components/upgrade";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -229,7 +232,8 @@ function expiryColor(days: number | null): string {
 // ---------------------------------------------------------------------------
 
 function TopBar({ district, id }: { district: DistrictDetail | undefined; id: string }) {
-  const { email, isAdmin } = useAuth();
+  const { email, isAdmin, isFree } = useAuth();
+  const { showUpgrade } = useUpgradeLock();
   const logout = useLogout();
   const [, setLocation] = useLocation();
 
@@ -249,11 +253,27 @@ function TopBar({ district, id }: { district: DistrictDetail | undefined; id: st
       </div>
       <div className="flex items-center gap-4">
         <a
-          href={`${import.meta.env.BASE_URL}peer-sets`}
+          href={`${import.meta.env.BASE_URL}toolkit`}
           className="text-xs text-slate-500 hover:text-slate-300"
         >
-          Peer Sets
+          Toolkit
         </a>
+        {isFree ? (
+          <button
+            onClick={showUpgrade}
+            title="Paid feature"
+            className="text-xs text-slate-600 hover:text-slate-500 cursor-not-allowed flex items-center gap-1"
+          >
+            Peer Sets <Lock className="h-3 w-3" />
+          </button>
+        ) : (
+          <a
+            href={`${import.meta.env.BASE_URL}peer-sets`}
+            className="text-xs text-slate-500 hover:text-slate-300"
+          >
+            Peer Sets
+          </a>
+        )}
         {isAdmin && (
           <a
             href={`${import.meta.env.BASE_URL}expiration-calendar`}
@@ -271,38 +291,6 @@ function TopBar({ district, id }: { district: DistrictDetail | undefined; id: st
         </button>
       </div>
     </header>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Sub-nav
-// ---------------------------------------------------------------------------
-
-function SubNav({ id, active }: { id: string; active: "home" | "clauses" | "comparables" | "ask-vs-got" | "final-offers" }) {
-  const base = `${import.meta.env.BASE_URL}dashboard/${id}`;
-  const tabs = [
-    { key: "home", label: "Overview", href: base },
-    { key: "clauses", label: "Key Clauses", href: `${base}/clauses` },
-    { key: "comparables", label: "Comparables", href: `${base}/comparables` },
-    { key: "ask-vs-got", label: "Ask vs Got", href: `${base}/ask-vs-got` },
-    { key: "final-offers", label: "Final Offers", href: `${base}/final-offers` },
-  ] as const;
-  return (
-    <div className="border-b border-slate-800 px-6 flex -mb-px">
-      {tabs.map((t) => (
-        <a
-          key={t.key}
-          href={t.href}
-          className={`px-4 py-3 text-xs font-medium border-b-2 transition-colors ${
-            active === t.key
-              ? "border-blue-500 text-blue-400"
-              : "border-transparent text-slate-500 hover:text-slate-300"
-          }`}
-        >
-          {t.label}
-        </a>
-      ))}
-    </div>
   );
 }
 
@@ -652,7 +640,7 @@ export default function DistrictDashboardPage() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-mono">
       <TopBar district={district} id={id} />
-      <SubNav id={id} active="home" />
+      <DashboardSubNav id={id} active="home" />
 
       <main className="max-w-5xl mx-auto px-6 py-8 space-y-8">
         {isLoading ? (

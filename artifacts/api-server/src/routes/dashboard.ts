@@ -11,6 +11,7 @@ import {
   buildWhere,
   isCustomerDistrict,
 } from "../lib/dashboard-query.js";
+import { gate } from "../lib/access.js";
 
 const router: IRouter = Router();
 
@@ -29,14 +30,6 @@ function requireAuth(req: Request, res: Response, next: NextFunction): void {
 function requireAdmin(req: Request, res: Response, next: NextFunction): void {
   if (!req.session.userId || req.session.userRole !== "admin") {
     res.status(403).json({ error: "Admin access required" });
-    return;
-  }
-  next();
-}
-
-function canAccessDistrict(req: Request, res: Response, next: NextFunction): void {
-  if (!req.session.userId) {
-    res.status(401).json({ error: "Authentication required" });
     return;
   }
   next();
@@ -110,7 +103,7 @@ router.get("/dashboard/districts", requireAuth, async (req: Request, res: Respon
 // ---------------------------------------------------------------------------
 // GET /api/dashboard/districts/:id
 // ---------------------------------------------------------------------------
-router.get("/dashboard/districts/:id", canAccessDistrict, async (req: Request, res: Response) => {
+router.get("/dashboard/districts/:id", gate({ ownDistrict: true }), async (req: Request, res: Response) => {
   const districtId = parseInt(String(req.params.id), 10);
   if (isNaN(districtId)) { res.status(400).json({ error: "Invalid district id" }); return; }
 
@@ -162,7 +155,7 @@ router.get("/dashboard/districts/:id", canAccessDistrict, async (req: Request, r
 // ---------------------------------------------------------------------------
 // GET /api/dashboard/districts/:id/provisions
 // ---------------------------------------------------------------------------
-router.get("/dashboard/districts/:id/provisions", canAccessDistrict, async (req: Request, res: Response) => {
+router.get("/dashboard/districts/:id/provisions", gate({ ownDistrict: true }), async (req: Request, res: Response) => {
   const districtId = parseInt(String(req.params.id), 10);
   if (isNaN(districtId)) { res.status(400).json({ error: "Invalid district id" }); return; }
 
@@ -196,7 +189,7 @@ router.get("/dashboard/districts/:id/provisions", canAccessDistrict, async (req:
 // ---------------------------------------------------------------------------
 // GET /api/dashboard/districts/:id/settlements
 // ---------------------------------------------------------------------------
-router.get("/dashboard/districts/:id/settlements", canAccessDistrict, async (req: Request, res: Response) => {
+router.get("/dashboard/districts/:id/settlements", gate({ ownDistrict: true }), async (req: Request, res: Response) => {
   const districtId = parseInt(String(req.params.id), 10);
   if (isNaN(districtId)) { res.status(400).json({ error: "Invalid district id" }); return; }
   const unit = parseUnit(req.query.bargainingUnit);
@@ -312,7 +305,7 @@ router.get("/dashboard/districts/:id/settlements", canAccessDistrict, async (req
 // ---------------------------------------------------------------------------
 // GET /api/dashboard/districts/:id/factfinding
 // ---------------------------------------------------------------------------
-router.get("/dashboard/districts/:id/factfinding", canAccessDistrict, async (req: Request, res: Response) => {
+router.get("/dashboard/districts/:id/factfinding", gate({ ownDistrict: true, paid: true }), async (req: Request, res: Response) => {
   const districtId = parseInt(String(req.params.id), 10);
   if (isNaN(districtId)) { res.status(400).json({ error: "Invalid district id" }); return; }
   try {
@@ -341,7 +334,7 @@ router.get("/dashboard/districts/:id/factfinding", canAccessDistrict, async (req
 // metadata, the two posted offer PDFs, and the per-topic comparison (diff /
 // aligned / one-sided) with each side's position and the numeric gap.
 // ---------------------------------------------------------------------------
-router.get("/dashboard/districts/:id/final-offers", canAccessDistrict, async (req: Request, res: Response) => {
+router.get("/dashboard/districts/:id/final-offers", gate({ ownDistrict: true, paid: true }), async (req: Request, res: Response) => {
   const districtId = parseInt(String(req.params.id), 10);
   if (isNaN(districtId)) { res.status(400).json({ error: "Invalid district id" }); return; }
   try {
@@ -404,7 +397,7 @@ router.get("/dashboard/districts/:id/final-offers", canAccessDistrict, async (re
 // ---------------------------------------------------------------------------
 // GET /api/dashboard/medians — dynamic WHERE via sql.join
 // ---------------------------------------------------------------------------
-router.get("/dashboard/medians", requireAuth, async (req: Request, res: Response) => {
+router.get("/dashboard/medians", gate({ ownFilters: true }), async (req: Request, res: Response) => {
   const county = req.query.county ? String(req.query.county) : null;
   const band = req.query.band ? String(req.query.band) : null;
   const yearFrom = req.query.yearFrom ? String(req.query.yearFrom) : null;
@@ -460,7 +453,7 @@ router.get("/dashboard/medians", requireAuth, async (req: Request, res: Response
 // ---------------------------------------------------------------------------
 // GET /api/dashboard/comparables
 // ---------------------------------------------------------------------------
-router.get("/dashboard/comparables", requireAuth, async (req: Request, res: Response) => {
+router.get("/dashboard/comparables", gate({ paid: true }), async (req: Request, res: Response) => {
   const county = req.query.county ? String(req.query.county) : null;
   const band = req.query.band ? String(req.query.band) : null;
   const districtType = req.query.districtType ? String(req.query.districtType) : null;
@@ -693,7 +686,7 @@ router.get("/dashboard/district-types", requireAuth, async (req: Request, res: R
 // county and/or enrollment band. Used to show "vs. county median" context
 // in Insurance, Retirement, and Leave cards.
 // ---------------------------------------------------------------------------
-router.get("/dashboard/provision-medians", requireAuth, async (req: Request, res: Response) => {
+router.get("/dashboard/provision-medians", gate({ ownFilters: true }), async (req: Request, res: Response) => {
   const category = req.query.category ? String(req.query.category) : null;
   const county = req.query.county ? String(req.query.county) : null;
   const band = req.query.band ? String(req.query.band) : null;
