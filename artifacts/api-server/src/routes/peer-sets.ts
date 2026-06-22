@@ -42,34 +42,6 @@ function bandWhereSql(band: string, alias = "d"): SQL | null {
   }
 }
 
-// Build a WHERE predicate for district filters as a parameterized SQL fragment.
-// User-supplied values (county, district_type, valuation bounds) are bound as
-// parameters; the alias prefix is code-controlled (see bandWhereSql).
-function buildDistrictFilters(
-  filters: Record<string, unknown>,
-  alias = "d",
-): SQL | null {
-  const p = sql.raw(alias ? `${alias}.` : "");
-  const parts: SQL[] = [];
-  if (filters.county && typeof filters.county === "string") {
-    parts.push(sql`${p}county = ${filters.county}`);
-  }
-  if (filters.district_type && typeof filters.district_type === "string") {
-    parts.push(sql`${p}district_type = ${filters.district_type}`);
-  }
-  if (filters.band && typeof filters.band === "string") {
-    const b = bandWhereSql(filters.band, alias);
-    if (b) parts.push(b);
-  }
-  if (filters.valuation_min != null) {
-    parts.push(sql`${p}valuation >= ${Number(filters.valuation_min)}`);
-  }
-  if (filters.valuation_max != null) {
-    parts.push(sql`${p}valuation <= ${Number(filters.valuation_max)}`);
-  }
-  return parts.length > 0 ? sql.join(parts, sql` AND `) : null;
-}
-
 // ---------------------------------------------------------------------------
 // Helper — load + own-check for a peer set
 // ---------------------------------------------------------------------------
@@ -393,19 +365,11 @@ router.get(
     const unit = parseUnit(req.query.bargainingUnit ?? req.query.bargaining_unit);
 
     try {
+      // Membership is the peer set's materialized district_ids — the same set
+      // the on-screen Comparables view uses. (filters_json is only the original
+      // creation criteria, already baked into district_ids; re-resolving it here
+      // pulled in extra/out-of-state districts and bloated the packet.)
       const memberIds = (ps.district_ids ?? []).map(Number).filter(Boolean);
-
-      // Also resolve any filter-based districts
-      const filters = ps.filters_json ?? {};
-      const filterSql = buildDistrictFilters(filters, "");
-      if (filterSql) {
-        const fr = await db.execute(
-          sql`SELECT id FROM districts WHERE ${filterSql} ORDER BY id LIMIT 300`,
-        );
-        for (const r of fr.rows as { id: number }[]) {
-          if (!memberIds.includes(Number(r.id))) memberIds.push(Number(r.id));
-        }
-      }
 
       if (memberIds.length === 0) {
         res.status(400).json({ error: "Peer set is empty" });
@@ -447,7 +411,7 @@ router.get(
 
       // Focal district name + state
       let districtName = "District";
-      let districtState = "OH";
+      let districtState = "IL";
       if (districtId) {
         const dr = await db.execute(
           sql`SELECT name, state FROM districts WHERE id = ${districtId} LIMIT 1`,
@@ -455,7 +419,7 @@ router.get(
         if (dr.rows.length > 0) {
           const dr0 = dr.rows[0] as { name: string; state: string };
           districtName = dr0.name;
-          districtState = dr0.state ?? "OH";
+          districtState = dr0.state ?? "IL";
         }
       }
 
@@ -466,8 +430,27 @@ router.get(
         memberIds.includes(Number(s.district_id)),
       );
 
+      // Medians + the trend chart are computed across the full settlement
+      // history (matches the on-screen Comparables medians).
       const medians = computeMedians(peerSettlements);
       const chartData = buildChartData(focalSettlements, peerSettlements);
+
+      // The comparables TABLE shows one row per district — its most recent
+      // settlement. Rendering every district's full history (2,000+ rows) made
+      // react-pdf block the event loop for minutes, so the download never
+      // completed. allSettlements is ordered from_year DESC, so the first row
+      // seen per district is the latest. Focal rows are kept up front.
+      const tableSettlements = (() => {
+        const seen = new Set<number>();
+        const out: SettlementRow[] = [];
+        for (const s of [...focalSettlements, ...allSettlements]) {
+          const did = Number(s.district_id);
+          if (seen.has(did)) continue;
+          seen.add(did);
+          out.push(s);
+        }
+        return out;
+      })();
 
       const props: BoardPacketProps = {
         districtName,
@@ -479,7 +462,7 @@ router.get(
           day: "numeric",
         }),
         focalSettlements,
-        allSettlements,
+        allSettlements: tableSettlements,
         medians,
         chartData,
         bargainingUnit: unit,

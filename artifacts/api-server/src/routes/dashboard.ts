@@ -579,7 +579,6 @@ router.get("/dashboard/comparables", gate({ paid: true }), async (req: Request, 
   const yearTo = req.query.yearTo ? String(req.query.yearTo) : null;
   const state = CUSTOMER_STATE;
   const unit = parseUnit(req.query.bargainingUnit);
-  const format = req.query.format ? String(req.query.format) : "json";
   const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10));
   const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10)));
   const offset = (page - 1) * limit;
@@ -676,31 +675,6 @@ router.get("/dashboard/comparables", gate({ paid: true }), async (req: Request, 
 
     const total = (countRows.rows[0] as { n: number })?.n ?? 0;
     const medians = mediansRows.rows[0] ?? null;
-
-    if (format === "csv") {
-      const rows = dataRows.rows as Record<string, unknown>[];
-      const headers = [
-        "district_name", "county", "district_type", "enrollment",
-        "bargaining_unit",
-        "from_year", "to_year", "base_increase_pct", "year2_pct", "year3_pct",
-        "off_schedule_payment", "insurance_changed", "term_years", "method",
-      ];
-      const csv = [
-        headers.join(","),
-        ...rows.map((r) =>
-          headers
-            .map((h) => {
-              const v = r[h];
-              return v == null ? "" : String(v).includes(",") ? `"${String(v)}"` : String(v);
-            })
-            .join(","),
-        ),
-      ].join("\n");
-      res.setHeader("Content-Type", "text/csv");
-      res.setHeader("Content-Disposition", "attachment; filename=collbar-comparables.csv");
-      res.send(csv);
-      return;
-    }
 
     const med = medians as Record<string, unknown> | null;
     res.json({

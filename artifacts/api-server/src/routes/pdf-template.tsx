@@ -406,7 +406,7 @@ function Cell({
 
 export function BoardPacketPDF({
   districtName,
-  districtState = "OH",
+  districtState = "IL",
   bargainingUnit = "teachers",
   peerSetName,
   generatedAt,
@@ -445,10 +445,13 @@ export function BoardPacketPDF({
         </View>
         <View style={styles.coverBottom}>
           <Text style={styles.coverBottomText}>
-            Ohio K-12 Collective Bargaining Database
+            {districtState === "IL" ? "Illinois" : "Ohio"} K-12 Collective
+            Bargaining Database
           </Text>
           <Text style={styles.coverBottomText}>
-            Data sourced from SERB-filed agreements
+            {districtState === "IL"
+              ? "Data sourced from ISBE-filed agreements"
+              : "Data sourced from SERB-filed agreements"}
           </Text>
         </View>
       </Page>

@@ -204,8 +204,6 @@ export default function ComparablesPage() {
     },
   });
 
-  const csvUrl = `${apiUrl("/api/dashboard/comparables")}?${buildParams({ page: "1" })}&format=csv&limit=10000`;
-
   const pdfUrl = selectedPeerSetId
     ? `${apiUrl(`/api/peer-sets/${selectedPeerSetId}/export/pdf`)}?district_id=${id}`
     : null;
@@ -258,12 +256,6 @@ export default function ComparablesPage() {
                 ↓ Board Packet PDF
               </a>
             )}
-            <a
-              href={csvUrl}
-              className="text-xs px-3 py-1.5 rounded border border-slate-700 text-slate-300 hover:border-slate-500 hover:text-slate-100 transition-colors"
-            >
-              ↓ Export CSV
-            </a>
           </div>
         </div>
 
