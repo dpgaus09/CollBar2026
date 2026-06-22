@@ -134,4 +134,72 @@ describe("ask-tools result cards (grounded, IL rows only)", () => {
     const out = await executeAskTool("search_districts", { query: "Columbus City Ohio" });
     expect(out.results).toEqual([]);
   });
+
+  it("search_final_offers groups topic rows into one case card per posting", async () => {
+    // Two topic rows for the same ELRB case → a single grounded card that
+    // deep-links to the district's final-offers page and counts diff/aligned.
+    execute.mockResolvedValueOnce({
+      rows: [
+        {
+          posting_id: 7,
+          case_number: "2026-IM-0007-C",
+          year: 2026,
+          bargaining_unit: "teachers",
+          union_name: "RFT Local 6",
+          posted_date: null,
+          district_id: 99,
+          district_name: "Rockford SD 205",
+          county: "Winnebago",
+          topic: "salary",
+          topic_label: "Salary / Wages",
+          status: "diff",
+          numeric_gap: "1.0",
+          gap_unit: "percent",
+          district_summary: "Board: 6%",
+          union_summary: "Union: 7%",
+        },
+        {
+          posting_id: 7,
+          case_number: "2026-IM-0007-C",
+          year: 2026,
+          bargaining_unit: "teachers",
+          union_name: "RFT Local 6",
+          posted_date: null,
+          district_id: 99,
+          district_name: "Rockford SD 205",
+          county: "Winnebago",
+          topic: "insurance",
+          topic_label: "Insurance",
+          status: "aligned",
+          numeric_gap: null,
+          gap_unit: null,
+          district_summary: "PPO 80/20",
+          union_summary: "PPO 80/20",
+        },
+      ],
+    });
+    const out = await executeAskTool("search_final_offers", { district_name: "Rockford" });
+    expect(out.results).toHaveLength(1);
+    expect(out.results[0]).toMatchObject({
+      type: "final_offer",
+      id: 99,
+      path: "/dashboard/99/final-offers",
+    });
+    expect((out.data as { diff_count: number; aligned_count: number }[])[0]).toMatchObject({
+      diff_count: 1,
+      aligned_count: 1,
+    });
+  });
+
+  it("search_final_offers anchors its query to IL (no out-of-state leak)", async () => {
+    await executeAskTool("search_final_offers", { topic: "salary", diffs_only: true });
+    expectEveryQueryAnchoredToIL();
+  });
+
+  it("search_final_offers returns no cards for an out-of-state target", async () => {
+    // The SQL is IL-scoped, so an Ohio-targeted lookup matches nothing.
+    execute.mockResolvedValue({ rows: [] });
+    const out = await executeAskTool("search_final_offers", { district_name: "Columbus City Ohio" });
+    expect(out.results).toEqual([]);
+  });
 });

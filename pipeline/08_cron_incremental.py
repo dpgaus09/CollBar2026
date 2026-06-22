@@ -266,6 +266,9 @@ def check_changed_docs(session, conn, records: list, known_docs: dict,
 
 DEFAULT_MAX_DOCS_PER_STATE = 200
 EXTRACT_SCRIPT = Path(__file__).parent / "06_extract_contracts.py"
+# IL ELRB board-vs-union final-offer pipeline (scrape → extract → diff).
+ELRB_SCRAPER_SCRIPT = Path(__file__).parent / "18_crawl_elrb_offers.py"
+FINAL_OFFER_SCRIPT = Path(__file__).parent / "19_extract_final_offers.py"
 
 
 def count_unprocessed_docs(conn, state: str) -> int:
@@ -335,6 +338,56 @@ def run_extraction_for_state(state: str, max_docs: int, dry_run: bool) -> dict:
     except Exception as exc:
         log.error("Extraction for %s failed to launch: %s", state, exc)
         return {"state": state, "returncode": -1, "stdout_tail": "", "stderr_tail": str(exc)}
+
+
+def run_subprocess(label: str, cmd: list, timeout: int = 3600) -> dict:
+    """Run a pipeline subprocess, capturing tails of stdout/stderr.
+
+    Returns a dict with keys: label, returncode, stdout_tail, stderr_tail.
+    """
+    log.info("Launching %s: %s", label, " ".join(cmd))
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        stdout_tail = result.stdout[-3000:] if result.stdout else ""
+        stderr_tail = result.stderr[-3000:] if result.stderr else ""
+        if result.returncode != 0:
+            log.error("%s exited %d.\nSTDERR tail:\n%s", label, result.returncode, stderr_tail)
+        else:
+            log.info("%s completed successfully.", label)
+        return {"label": label, "returncode": result.returncode,
+                "stdout_tail": stdout_tail, "stderr_tail": stderr_tail}
+    except subprocess.TimeoutExpired:
+        log.error("%s timed out after %d s", label, timeout)
+        return {"label": label, "returncode": -1, "stdout_tail": "", "stderr_tail": "TIMEOUT"}
+    except Exception as exc:
+        log.error("%s failed to launch: %s", label, exc)
+        return {"label": label, "returncode": -1, "stdout_tail": "", "stderr_tail": str(exc)}
+
+
+def count_pending_final_offers(conn) -> int:
+    """Count matched ELRB postings still needing extraction or a diff.
+
+    A posting is "pending" if it lacks extracted items for both sides, or has
+    no comparison rows yet. The extractor itself is idempotent (it skips sides
+    already extracted), so this only gates whether it is worth launching.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COUNT(*)
+        FROM final_offer_postings p
+        WHERE p.district_id IS NOT NULL
+          AND (
+              (SELECT COUNT(DISTINCT i.side)
+                 FROM final_offer_items i WHERE i.posting_id = p.id) < 2
+              OR NOT EXISTS (
+                  SELECT 1 FROM final_offer_comparisons c WHERE c.posting_id = p.id)
+          )
+        """
+    )
+    row = cur.fetchone()
+    cur.close()
+    return int(row[0]) if row else 0
 
 
 def main():
@@ -492,6 +545,30 @@ def main():
     else:
         log.info("No unprocessed IL CBA docs — skipping IL extraction.")
 
+    # ── Phase E: IL ELRB board-vs-union final offers ───────────────────────
+    # 1) Scrape the ELRB public-posting pages (current year + lookahead) so new
+    #    cases and the next year's page are picked up with no code change.
+    # 2) Extract each side's per-article positions and recompute the diffs for
+    #    any posting still missing items or comparisons.
+    elrb_result = None
+    final_offer_result = None
+    elrb_cmd = [sys.executable, str(ELRB_SCRAPER_SCRIPT)]
+    if args.dry_run:
+        elrb_cmd.append("--dry-run")
+    elrb_result = run_subprocess("ELRB final-offer scrape", elrb_cmd, timeout=1800)
+
+    pending_final_offers = count_pending_final_offers(conn)
+    log.info("ELRB postings pending extraction/diff: %d", pending_final_offers)
+    if pending_final_offers > 0:
+        fo_cmd = [sys.executable, str(FINAL_OFFER_SCRIPT)]
+        if args.dry_run:
+            fo_cmd.append("--dry-run")
+        final_offer_result = run_subprocess(
+            "ELRB final-offer extract+diff", fo_cmd, timeout=3600
+        )
+    else:
+        log.info("No pending ELRB final offers — skipping extraction+diff.")
+
     conn.close()
 
     print()
@@ -521,6 +598,16 @@ def main():
         print(f"  IL extraction result    : {status:>8}")
     else:
         print(f"  IL extraction           : {'skipped':>8}")
+    print("-" * 60)
+    if elrb_result is not None:
+        status = "OK" if elrb_result["returncode"] == 0 else f"ERR({elrb_result['returncode']})"
+        print(f"  ELRB final-offer scrape : {status:>8}")
+    print(f"  ELRB pending postings   : {pending_final_offers:>8,}")
+    if final_offer_result is not None:
+        status = "OK" if final_offer_result["returncode"] == 0 else f"ERR({final_offer_result['returncode']})"
+        print(f"  ELRB extract+diff result: {status:>8}")
+    else:
+        print(f"  ELRB extract+diff       : {'skipped':>8}")
     print("=" * 60)
     print()
 

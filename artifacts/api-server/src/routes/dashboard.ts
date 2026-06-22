@@ -336,6 +336,72 @@ router.get("/dashboard/districts/:id/factfinding", canAccessDistrict, async (req
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/dashboard/districts/:id/final-offers
+// ELRB board-vs-union final-offer cases for a district: each case's posting
+// metadata, the two posted offer PDFs, and the per-topic comparison (diff /
+// aligned / one-sided) with each side's position and the numeric gap.
+// ---------------------------------------------------------------------------
+router.get("/dashboard/districts/:id/final-offers", canAccessDistrict, async (req: Request, res: Response) => {
+  const districtId = parseInt(String(req.params.id), 10);
+  if (isNaN(districtId)) { res.status(400).json({ error: "Invalid district id" }); return; }
+  try {
+    if (!(await isCustomerDistrict(districtId))) { res.status(404).json({ error: "District not found" }); return; }
+
+    const postingRows = await db.execute(sql`
+      SELECT p.id, p.case_number, p.year, p.bargaining_unit, p.district_name,
+             p.union_name, p.posted_date, p.district_offer_url, p.union_offer_url,
+             p.page_url
+      FROM final_offer_postings p
+      WHERE p.district_id = ${districtId}
+      ORDER BY p.year DESC, p.posted_date DESC NULLS LAST, p.id DESC
+    `);
+
+    const postingIds = postingRows.rows.map((r) => Number((r as Record<string, unknown>).id));
+
+    type Comparison = Record<string, unknown>;
+    const compsByPosting = new Map<number, Comparison[]>();
+    if (postingIds.length > 0) {
+      const compRows = await db.execute(sql`
+        SELECT c.posting_id, c.topic, c.topic_label, c.status,
+               c.numeric_gap, c.gap_unit, c.district_summary, c.union_summary,
+               di.numeric_value AS district_value, di.numeric_unit AS district_unit,
+               di.raw_text AS district_raw,
+               ui.numeric_value AS union_value, ui.numeric_unit AS union_unit,
+               ui.raw_text AS union_raw
+        FROM final_offer_comparisons c
+        LEFT JOIN final_offer_items di ON c.district_item_id = di.id
+        LEFT JOIN final_offer_items ui ON c.union_item_id = ui.id
+        WHERE c.posting_id IN (${sql.join(postingIds.map((i) => sql`${i}`), sql`, `)})
+        ORDER BY c.posting_id,
+          CASE c.status WHEN 'diff' THEN 0 WHEN 'union_only' THEN 1 WHEN 'district_only' THEN 2 ELSE 3 END,
+          c.topic
+      `);
+      for (const row of compRows.rows as Comparison[]) {
+        const pid = Number(row.posting_id);
+        if (!compsByPosting.has(pid)) compsByPosting.set(pid, []);
+        compsByPosting.get(pid)!.push(row);
+      }
+    }
+
+    const postings = postingRows.rows.map((r) => {
+      const row = r as Record<string, unknown>;
+      const comparisons = compsByPosting.get(Number(row.id)) ?? [];
+      return {
+        ...row,
+        diff_count: comparisons.filter((c) => c.status === "diff").length,
+        aligned_count: comparisons.filter((c) => c.status === "aligned").length,
+        comparisons,
+      };
+    });
+
+    res.json({ postings });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/dashboard/medians — dynamic WHERE via sql.join
 // ---------------------------------------------------------------------------
 router.get("/dashboard/medians", requireAuth, async (req: Request, res: Response) => {

@@ -278,13 +278,14 @@ function TopBar({ district, id }: { district: DistrictDetail | undefined; id: st
 // Sub-nav
 // ---------------------------------------------------------------------------
 
-function SubNav({ id, active }: { id: string; active: "home" | "clauses" | "comparables" | "ask-vs-got" }) {
+function SubNav({ id, active }: { id: string; active: "home" | "clauses" | "comparables" | "ask-vs-got" | "final-offers" }) {
   const base = `${import.meta.env.BASE_URL}dashboard/${id}`;
   const tabs = [
     { key: "home", label: "Overview", href: base },
     { key: "clauses", label: "Key Clauses", href: `${base}/clauses` },
     { key: "comparables", label: "Comparables", href: `${base}/comparables` },
     { key: "ask-vs-got", label: "Ask vs Got", href: `${base}/ask-vs-got` },
+    { key: "final-offers", label: "Final Offers", href: `${base}/final-offers` },
   ] as const;
   return (
     <div className="border-b border-slate-800 px-6 flex -mb-px">

@@ -45,7 +45,7 @@ export const sourceDocumentsTable = pgTable(
     ),
     check(
       "source_documents_doc_type_check",
-      sql`${t.docType} IN ('cba_pdf','mou','factfinding_report','wage_settlement_report','cdss_extract','directory','stats','policy_manual','non_cba')`,
+      sql`${t.docType} IN ('cba_pdf','mou','factfinding_report','wage_settlement_report','cdss_extract','directory','stats','policy_manual','non_cba','final_offer')`,
     ),
     check(
       "source_documents_bargaining_unit_check",

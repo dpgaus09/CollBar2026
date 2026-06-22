@@ -207,6 +207,101 @@ async function runMigrations(): Promise<void> {
     `);
 
     logger.info("Migration OK: sync_run_status ensured");
+
+    // -----------------------------------------------------------------------
+    // IL ELRB board-vs-union final offers (Task #112).
+    //
+    // 1. Allow source_documents.doc_type = 'final_offer' (the scraped offer
+    //    PDFs). Adding a value to the IN-list only widens the constraint, so
+    //    every existing row stays valid. DROP/ADD keeps it idempotent.
+    // 2. Create the three final-offer tables (postings / items / comparisons).
+    // -----------------------------------------------------------------------
+    await db.execute(sql`
+      ALTER TABLE source_documents
+        DROP CONSTRAINT IF EXISTS source_documents_doc_type_check
+    `);
+    await db.execute(sql`
+      ALTER TABLE source_documents
+        ADD CONSTRAINT source_documents_doc_type_check
+        CHECK (doc_type IN (
+          'cba_pdf','mou','factfinding_report','wage_settlement_report',
+          'cdss_extract','directory','stats','policy_manual','non_cba',
+          'final_offer'
+        ))
+    `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS final_offer_postings (
+        id                     bigserial PRIMARY KEY,
+        district_id            bigint REFERENCES districts(id),
+        case_number            text NOT NULL,
+        year                   integer NOT NULL,
+        bargaining_unit        text NOT NULL DEFAULT 'teachers',
+        district_name          text,
+        union_name             text,
+        posted_date            timestamptz,
+        district_offer_url     text,
+        union_offer_url        text,
+        district_source_doc_id bigint REFERENCES source_documents(id),
+        union_source_doc_id    bigint REFERENCES source_documents(id),
+        page_url               text,
+        created_at             timestamptz DEFAULT NOW(),
+        updated_at             timestamptz DEFAULT NOW(),
+        CONSTRAINT final_offer_postings_case_number_unique UNIQUE (case_number)
+      )
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS final_offer_postings_district_idx
+        ON final_offer_postings (district_id)
+    `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS final_offer_items (
+        id            bigserial PRIMARY KEY,
+        posting_id    bigint NOT NULL REFERENCES final_offer_postings(id) ON DELETE CASCADE,
+        side          text NOT NULL,
+        topic         text NOT NULL,
+        topic_label   text,
+        summary       text,
+        numeric_value numeric(14,4),
+        numeric_unit  text,
+        raw_text      text,
+        source_doc_id bigint REFERENCES source_documents(id),
+        created_at    timestamptz DEFAULT NOW(),
+        CONSTRAINT final_offer_items_posting_side_topic_unique UNIQUE (posting_id, side, topic),
+        CONSTRAINT final_offer_items_side_check CHECK (side IN ('district','union'))
+      )
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS final_offer_items_posting_idx
+        ON final_offer_items (posting_id)
+    `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS final_offer_comparisons (
+        id               bigserial PRIMARY KEY,
+        posting_id       bigint NOT NULL REFERENCES final_offer_postings(id) ON DELETE CASCADE,
+        topic            text NOT NULL,
+        topic_label      text,
+        status           text NOT NULL,
+        district_item_id bigint REFERENCES final_offer_items(id),
+        union_item_id    bigint REFERENCES final_offer_items(id),
+        district_summary text,
+        union_summary    text,
+        numeric_gap      numeric(14,4),
+        gap_unit         text,
+        created_at       timestamptz DEFAULT NOW(),
+        CONSTRAINT final_offer_comparisons_posting_topic_unique UNIQUE (posting_id, topic),
+        CONSTRAINT final_offer_comparisons_status_check
+          CHECK (status IN ('aligned','diff','district_only','union_only'))
+      )
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS final_offer_comparisons_posting_idx
+        ON final_offer_comparisons (posting_id)
+    `);
+
+    logger.info("Migration OK: final_offer tables ensured");
   } catch (err) {
     logger.warn({ err }, "Migration failed — will retry on next restart");
     return;

@@ -18,6 +18,7 @@
 - [OCR quality flag](ocr-quality-flag.md) — extraction_runs.ocr_confidence/ocr_low_quality (threshold 70); use latest-per-doc; legacy cache has no score (NULL != good).
 - [IL viewer recovery](il-viewer-recovery.md) — manual-review CSV is a crawl side-effect (empty until non-dry-run re-crawl); 13_recover_viewer_cbas.py resolves Box/Issuu/Drive best-effort + --pdf manual ingest.
 - [Board-policy manual purge](policy-manual-purge.md) — non-CBA PRESS manuals stored as cba_pdf; re-label to doc_type 'policy_manual' + purge derived rows; scanned ones caught by URL not OCR.
+- [IL ELRB final-offers pipeline](il-final-offers-pipeline.md) — board-vs-union scrape/extract/diff; doc_type 'final_offer'; IL-scoped reads; cron Phase E is idempotent-by-skip and won't re-extract edited PDFs.
 - [IL min teacher salary ingest](il-min-teacher-salary.md) — CGFA cert filename year N = cert calendar year → effective school year (N+1)-(N+2); annual ingest via 17_sync_il_min_salary.py / admin run-min-salary-sync.
 - [Ask endpoint SSE streaming](ask-sse-streaming.md) — /dashboard/ask streams SSE; model emits preamble before tools so keep the `reset` event; abort stream on req close; no compression or it buffers.
 - [Customer-view state scoping](collbar-customer-state-scoping.md) — customer dashboard is IL-only via CUSTOMER_STATE; per-id child endpoints need their own guard or OH leaks (IDOR); OH kept in DB.

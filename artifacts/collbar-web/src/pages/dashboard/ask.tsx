@@ -13,7 +13,8 @@ type AskResultType =
   | "settlement"
   | "clause"
   | "comparables"
-  | "factfinding";
+  | "factfinding"
+  | "final_offer";
 
 interface AskResult {
   type: AskResultType;
@@ -67,6 +68,7 @@ const TYPE_META: Record<AskResultType, { label: string; badge: string }> = {
   clause: { label: "Clause", badge: "bg-violet-900/40 text-violet-300 border-violet-800" },
   comparables: { label: "Comparables", badge: "bg-emerald-900/40 text-emerald-300 border-emerald-800" },
   factfinding: { label: "Fact-finding", badge: "bg-amber-900/40 text-amber-300 border-amber-800" },
+  final_offer: { label: "Final Offers", badge: "bg-rose-900/40 text-rose-300 border-rose-800" },
 };
 
 // Build an internal SPA link the same way the rest of the app does: BASE_URL

@@ -21,7 +21,8 @@ export type AskResultType =
   | "settlement"
   | "clause"
   | "comparables"
-  | "factfinding";
+  | "factfinding"
+  | "final_offer";
 
 export interface AskResult {
   type: AskResultType;
@@ -183,6 +184,30 @@ export const ASK_TOOL_DEFS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "search_final_offers",
+    description:
+      "Find ELRB interest-arbitration final-offer cases where an Illinois district and its union posted competing 'final offers', then surface where the board and the union still DISAGREE (and where they already agree), topic by topic. Each topic shows the board position, the union position, and the numeric gap (union minus district) when both are quantitative. Use for 'where do Rockford's board and union still disagree?', 'what's the salary gap in the latest final offers?', or 'which districts have open final-offer disputes on insurance?'.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        district_name: { type: "string", description: "Substring match on district name." },
+        county: { type: "string", description: "Exact county name." },
+        topic: {
+          type: "string",
+          enum: [
+            "salary", "insurance", "retirement", "stipends", "leave", "workday",
+            "work_year", "class_size", "evaluation", "grievance", "layoff_rif",
+            "seniority", "term", "other",
+          ],
+          description: "Restrict to one bargaining topic (e.g. 'salary', 'insurance').",
+        },
+        diffs_only: { type: "boolean", description: "If true, only return topics where the sides disagree." },
+        limit: { type: "integer", description: "Max cases (1-10, default 8)." },
+      },
+      additionalProperties: false,
+    },
+  },
 ];
 
 export const ASK_TOOL_NAMES = new Set(ASK_TOOL_DEFS.map((t) => t.name));
@@ -196,6 +221,7 @@ export const ASK_TOOL_LABELS: Record<string, string> = {
   search_provisions: "Checking contract clauses…",
   get_comparables: "Comparing peer districts…",
   search_factfinding: "Reviewing fact-finding reports…",
+  search_final_offers: "Comparing board vs union final offers…",
 };
 
 // ---------------------------------------------------------------------------
@@ -238,6 +264,18 @@ function comparablesPath(
 function factfindingPath(id: number): string {
   return `/dashboard/${id}/ask-vs-got`;
 }
+function finalOffersPath(id: number): string {
+  return `/dashboard/${id}/final-offers`;
+}
+
+// Status labels used in the data handed to the model so it can describe the
+// state of each topic in plain English.
+const FINAL_OFFER_STATUS_LABEL: Record<string, string> = {
+  diff: "still in dispute",
+  aligned: "agreed",
+  district_only: "raised only by the board",
+  union_only: "raised only by the union",
+};
 
 // ---------------------------------------------------------------------------
 // Tool executors
@@ -559,6 +597,126 @@ async function searchFactfinding(input: Input): Promise<ToolOutput> {
   return { data, results };
 }
 
+const FINAL_OFFER_TOPICS = new Set([
+  "salary", "insurance", "retirement", "stipends", "leave", "workday",
+  "work_year", "class_size", "evaluation", "grievance", "layoff_rif",
+  "seniority", "term", "other",
+]);
+
+async function searchFinalOffers(input: Input): Promise<ToolOutput> {
+  const limit = clampLimit(input.limit);
+  const districtName = likePattern(input.district_name);
+  const county = asTrimmedString(input.county);
+  const topicRaw = asTrimmedString(input.topic);
+  const topic = topicRaw && FINAL_OFFER_TOPICS.has(topicRaw.toLowerCase())
+    ? topicRaw.toLowerCase()
+    : null;
+  const diffsOnly = input.diffs_only === true || input.diffs_only === "true";
+
+  const conds: Array<SQL | null> = [
+    sql`d.state = ${CUSTOMER_STATE}`,
+    districtName ? sql`d.name ILIKE ${districtName}` : null,
+    county ? sql`d.county = ${county}` : null,
+    topic ? sql`c.topic = ${topic}` : null,
+    diffsOnly ? sql`c.status = 'diff'` : null,
+  ];
+  const where = buildWhere(conds);
+
+  // One row per (case, topic). We over-fetch comparison rows and group the
+  // top `limit` cases in JS so each card carries its topic-level diffs.
+  const rows = await db.execute(sql`
+    SELECT p.id AS posting_id, p.case_number, p.year, p.bargaining_unit,
+           p.union_name, p.posted_date,
+           d.id AS district_id, d.name AS district_name, d.county,
+           c.topic, c.topic_label, c.status, c.numeric_gap, c.gap_unit,
+           c.district_summary, c.union_summary
+    FROM final_offer_postings p
+    JOIN districts d ON p.district_id = d.id
+    JOIN final_offer_comparisons c ON c.posting_id = p.id
+    WHERE ${where}
+    ORDER BY p.year DESC, p.id DESC,
+      CASE c.status WHEN 'diff' THEN 0 WHEN 'union_only' THEN 1 WHEN 'district_only' THEN 2 ELSE 3 END,
+      c.topic
+  `);
+
+  type Case = {
+    district_id: number;
+    district_name: string;
+    county: string | null;
+    case_number: string | null;
+    year: number | null;
+    bargaining_unit: string | null;
+    union_name: string | null;
+    posted_date: unknown;
+    diff_count: number;
+    aligned_count: number;
+    topics: Array<{
+      topic: string;
+      topic_label: string | null;
+      status: string;
+      status_label: string;
+      numeric_gap: number | null;
+      gap_unit: string | null;
+      district_position: string | null;
+      union_position: string | null;
+    }>;
+  };
+
+  const byPosting = new Map<number, Case>();
+  for (const r of rows.rows as Record<string, unknown>[]) {
+    const pid = Number(r.posting_id);
+    let c = byPosting.get(pid);
+    if (!c) {
+      if (byPosting.size >= limit) continue;
+      c = {
+        district_id: Number(r.district_id),
+        district_name: String(r.district_name),
+        county: (r.county as string) ?? null,
+        case_number: (r.case_number as string) ?? null,
+        year: r.year != null ? Number(r.year) : null,
+        bargaining_unit: (r.bargaining_unit as string) ?? null,
+        union_name: (r.union_name as string) ?? null,
+        posted_date: r.posted_date ?? null,
+        diff_count: 0,
+        aligned_count: 0,
+        topics: [],
+      };
+      byPosting.set(pid, c);
+    }
+    const status = String(r.status);
+    if (status === "diff") c.diff_count++;
+    if (status === "aligned") c.aligned_count++;
+    if (c.topics.length < 14) {
+      c.topics.push({
+        topic: String(r.topic),
+        topic_label: (r.topic_label as string) ?? null,
+        status,
+        status_label: FINAL_OFFER_STATUS_LABEL[status] ?? status,
+        numeric_gap: r.numeric_gap != null ? Number(r.numeric_gap) : null,
+        gap_unit: (r.gap_unit as string) ?? null,
+        district_position: (r.district_summary as string) ?? null,
+        union_position: (r.union_summary as string) ?? null,
+      });
+    }
+  }
+
+  const data = Array.from(byPosting.values());
+  const results: AskResult[] = data.map((c) => {
+    const bits = [
+      c.diff_count > 0 ? `${c.diff_count} open disagreement${c.diff_count !== 1 ? "s" : ""}` : null,
+      c.aligned_count > 0 ? `${c.aligned_count} agreed` : null,
+    ].filter(Boolean);
+    return {
+      type: "final_offer" as const,
+      id: c.district_id,
+      label: `${c.district_name} — board vs union ${c.year ?? ""}`.trim(),
+      snippet: `${c.case_number ? c.case_number + " · " : ""}${bits.join(" · ") || "final offers posted"}`,
+      path: finalOffersPath(c.district_id),
+    };
+  });
+  return { data, results };
+}
+
 export async function executeAskTool(name: string, input: unknown): Promise<ToolOutput> {
   const safeInput = (input && typeof input === "object" ? input : {}) as Input;
   switch (name) {
@@ -572,6 +730,8 @@ export async function executeAskTool(name: string, input: unknown): Promise<Tool
       return getComparables(safeInput);
     case "search_factfinding":
       return searchFactfinding(safeInput);
+    case "search_final_offers":
+      return searchFinalOffers(safeInput);
     default:
       return { data: { error: `Unknown tool: ${name}` }, results: [] };
   }
