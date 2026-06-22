@@ -102,7 +102,7 @@ function TopBar() {
   const [, setLocation] = useLocation();
 
   return (
-    <header className="border-b border-slate-800 px-6 py-3 flex items-center justify-between bg-slate-950">
+    <header className="border-b border-slate-800 px-4 py-3 flex flex-wrap items-center justify-between gap-y-2 bg-slate-950 sm:px-6">
       <div className="flex items-center gap-3 min-w-0">
         <button
           onClick={() => setLocation("/dashboard")}
@@ -113,7 +113,7 @@ function TopBar() {
         <span className="text-slate-700">/</span>
         <span className="text-slate-200 text-xs font-medium truncate">Toolkit</span>
       </div>
-      <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center justify-end gap-2 lg:gap-4">
         <TopNavTools />
         {isAdmin && (
           <a
@@ -123,7 +123,7 @@ function TopBar() {
             Calendar
           </a>
         )}
-        <span className="text-xs text-slate-600">{email}</span>
+        <span className="max-w-[40vw] truncate text-xs text-slate-600 sm:max-w-[12rem] md:max-w-none">{email}</span>
         <button
           onClick={() => logout.mutate()}
           className="text-xs text-slate-500 hover:text-red-400"
