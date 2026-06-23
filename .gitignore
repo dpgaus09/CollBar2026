@@ -56,3 +56,7 @@ pipeline/state/il_cba_crawl.json
 pipeline/state/failed_json/
 pipeline/state/failed_json/
 pipeline/state/ocr_text/
+
+# Never commit uploaded credential spreadsheets (plaintext passwords)
+attached_assets/*password*
+attached_assets/*Sheet1*
