@@ -3574,7 +3574,7 @@ function CustomersTab() {
             </div>
             <div className="text-xs text-slate-400 mt-1">
               Organizations
-              <span className="block text-[10px] text-slate-600">unique districts, 1+ logins each</span>
+              <span className="block text-[10px] text-slate-600">unique districts with an account</span>
             </div>
           </div>
           <div className="rounded-lg border border-emerald-800/60 bg-emerald-950/10 p-3">
@@ -3583,7 +3583,7 @@ function CustomersTab() {
             </div>
             <div className="text-xs text-slate-400 mt-1">
               Paid organizations
-              <span className="block text-[10px] text-slate-600">districts with 1+ paid login</span>
+              <span className="block text-[10px] text-slate-600">districts with 1+ paid customer</span>
             </div>
           </div>
           <div className="rounded-lg border border-slate-700 bg-slate-900 p-3">
