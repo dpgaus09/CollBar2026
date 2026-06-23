@@ -100,14 +100,27 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <UpgradeLockProvider>
-          {/* 2.4.1 Bypass Blocks: first tab stop jumps past nav to content. */}
-          <a href="#main-content" className="skip-link">
+          {/* 2.4.1 Bypass Blocks: first tab stop moves keyboard focus into the
+              current page's <main> landmark (rendered after each page's nav),
+              skipping the repeated navigation. Focus is transferred explicitly
+              because fragment navigation alone is unreliable across browsers. */}
+          <a
+            href="#main-content"
+            className="skip-link"
+            onClick={(e) => {
+              const main = document.querySelector("main");
+              if (main) {
+                e.preventDefault();
+                if (!main.id) main.id = "main-content";
+                main.setAttribute("tabindex", "-1");
+                (main as HTMLElement).focus();
+              }
+            }}
+          >
             Skip to main content
           </a>
           <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
-            <div id="main-content" tabIndex={-1}>
-              <Router />
-            </div>
+            <Router />
           </WouterRouter>
           {/* 3.2.6 Consistent Help: rendered once here so the help affordance
               appears in the same place and DOM order on every page. */}

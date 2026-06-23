@@ -1,18 +1,14 @@
 ---
 name: CollBar web theming & a11y surfaces
-description: Why shadcn theme tokens look broken (red) but don't surface, and where real focusable UI actually lives in collbar-web.
+description: Non-obvious gotchas when doing theme/design/accessibility work in artifacts/collbar-web.
 ---
 
-# CollBar web (artifacts/collbar-web) theming & accessibility surfaces
+# CollBar web (artifacts/collbar-web) theming & a11y gotchas
 
-**The shadcn/Tailwind theme tokens in `src/index.css` are placeholder `red`** (`--background`, `--accent`, `--popover`, `--muted`, `--accent-foreground`, etc., in both `:root` and `.dark`). They are NOT a bug to "fix": the app renders entirely via **hardcoded slate/blue Tailwind utility classes** (e.g. `bg-slate-900`, `text-slate-100`, `bg-blue-700`), so the red tokens never reach the screen.
+- **The shadcn theme tokens in `index.css` are placeholder `red` by design, not a bug.** The app renders entirely via hardcoded slate/blue Tailwind classes, so those tokens never surface. Do NOT "complete" them — it would inject red into the UI. Only `--ring`/`--sidebar-ring` (focus ring) are wired up and safe to change. **Why:** a future agent will otherwise try to fix the red and break the look.
 
-**Only `--ring` / `--sidebar-ring` are real** — set to `199 89% 60%` (sky) and consumed by the global `:focus-visible { outline: 2px solid hsl(var(--ring)) }` rule in `@layer base`. That sky ring has >3:1 contrast on the slate-950/900 dark backgrounds. Touching `--ring` is safe and focus-only; do not "complete" the other tokens unless you intend a full theme — it would surface red.
+- **The sky focus ring (`--ring`) is tuned for the dark slate UI** and is borderline (<3:1) on light backgrounds. The app is dark everywhere except `not-found.tsx` (light, but no focusable elements). If you add a light-background page with interactive controls, the ring needs rework.
 
-**The shadcn `components/ui/*` primitives that depend on `bg-accent`/`bg-background` for focus/hover are dead code** — `dropdown-menu`, `select`, `command`, `context-menu`, `menubar`, `popover`, `hover-card`, plus `checkbox`/`radio-group`/`slider`/`switch` are **not imported anywhere in app code** (verify with `rg "from \"@/components/ui/<name>\"" -g '*.tsx' | rg -v /ui/`). So their bare `outline-none`+red-accent focus fallback and their <24px sizes never reach users. Don't spend a11y effort there.
+- **Skip-link (App.tsx) must focus the page's `<main>`, not an app-shell wrapper.** Each page renders its own single `<main>` *after* its nav, so a wrapper around the whole router does NOT bypass nav. The skip link programmatically focuses `document.querySelector("main")` (sets tabindex=-1 + .focus()) because fragment-only navigation is unreliable. Keep every page's one-and-only `<main>`.
 
-**Real modals are hand-rolled, not shadcn `Dialog`.** For WCAG focus-trapping, the ones that matter are: `components/upgrade.tsx` (`UpgradeModal`), and `pages/peer-sets.tsx` (`BuilderModal` + the delete-confirm). These were rebuilt on `@radix-ui/react-dialog` primitives (Root/Portal/Overlay/Content/Title/Close) using `bg-slate-900` directly — NOT shadcn `DialogContent`, which would apply `bg-background` (=red). `BuilderModal` uses `onInteractOutside preventDefault` to avoid accidental form-data loss; the confirm dialog allows outside-click dismiss.
-
-**Why:** a future agent doing design/theme/a11y work will otherwise either try to "fix" the red tokens (introducing red into the UI) or waste time editing unused `ui/*` primitives instead of the hand-rolled modals that users actually reach.
-
-**How to apply:** for focus/contrast work, edit `--ring` and the `@layer base` rules in `index.css`. For modal/landmark/aria work, edit the page/component files and the hand-rolled modals, not `components/ui/*`. `LockedPage` (upgrade.tsx) is the gated-page render path for free users and must carry the page's single `<main>` landmark.
+- **Real modals are hand-rolled, not shadcn `Dialog`** (UpgradeModal in upgrade.tsx; BuilderModal + delete-confirm in peer-sets.tsx). For focus-trap/Escape/restore work, edit those, built on `@radix-ui/react-dialog` primitives with `bg-slate-900` directly (shadcn `DialogContent` would apply the red `bg-background`). The shadcn `components/ui/*` primitives that rely on accent/background tokens are not imported in app code — don't spend a11y effort there.
