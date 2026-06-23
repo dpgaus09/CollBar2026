@@ -50,7 +50,7 @@ export default function AuthVerifyPage() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+    <main className="min-h-screen bg-slate-950 flex items-center justify-center">
       <div className="text-center space-y-4">
         {status === "verifying" && (
           <>
@@ -81,6 +81,6 @@ export default function AuthVerifyPage() {
           </>
         )}
       </div>
-    </div>
+    </main>
   );
 }

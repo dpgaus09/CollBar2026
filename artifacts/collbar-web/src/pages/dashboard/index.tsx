@@ -303,7 +303,7 @@ function AdminDistrictPicker({
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         placeholder="Search by district name or county…"
-        className="w-full text-sm bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+        className="w-full text-sm bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 placeholder-slate-600 focus:border-blue-500"
       />
 
       {myDistrict && (

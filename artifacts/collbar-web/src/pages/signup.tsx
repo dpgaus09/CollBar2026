@@ -144,7 +144,7 @@ export default function SignupPage() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@district.org"
-                className="w-full text-sm bg-slate-900 border border-slate-700 rounded px-3 py-2.5 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+                className="w-full text-sm bg-slate-900 border border-slate-700 rounded px-3 py-2.5 text-slate-200 placeholder-slate-600 focus:border-blue-500"
               />
             </div>
 
@@ -156,7 +156,7 @@ export default function SignupPage() {
                 id="district"
                 value={districtId}
                 onChange={(e) => setDistrictId(e.target.value)}
-                className="w-full text-sm bg-slate-900 border border-slate-700 rounded px-3 py-2.5 text-slate-200 focus:outline-none focus:border-blue-500"
+                className="w-full text-sm bg-slate-900 border border-slate-700 rounded px-3 py-2.5 text-slate-200 focus:border-blue-500"
               >
                 <option value="">— Select your district —</option>
                 {(districtList?.districts ?? []).map((d) => (

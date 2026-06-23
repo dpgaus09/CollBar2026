@@ -21,7 +21,7 @@ export function DashboardSubNav({ id, active }: { id: string; active: SubNavTab 
   ];
 
   return (
-    <div className="border-b border-slate-800 px-6 flex -mb-px">
+    <nav aria-label="District sections" className="border-b border-slate-800 px-6 flex -mb-px">
       {tabs.map((t) => {
         const locked = isFree && PAID_TABS.has(t.key);
         if (locked) {
@@ -31,10 +31,11 @@ export function DashboardSubNav({ id, active }: { id: string; active: SubNavTab 
               type="button"
               onClick={showUpgrade}
               title="Paid feature"
+              aria-label={`${t.label} (paid feature)`}
               className="px-4 py-3 text-xs font-medium border-b-2 border-transparent text-slate-600 hover:text-slate-500 cursor-not-allowed flex items-center gap-1"
             >
               {t.label}
-              <Lock className="h-3 w-3" />
+              <Lock className="h-3 w-3" aria-hidden="true" />
             </button>
           );
         }
@@ -42,6 +43,7 @@ export function DashboardSubNav({ id, active }: { id: string; active: SubNavTab 
           <a
             key={t.key}
             href={t.href}
+            aria-current={active === t.key ? "page" : undefined}
             className={`px-4 py-3 text-xs font-medium border-b-2 transition-colors ${
               active === t.key
                 ? "border-blue-500 text-blue-400"
@@ -52,6 +54,6 @@ export function DashboardSubNav({ id, active }: { id: string; active: SubNavTab 
           </a>
         );
       })}
-    </div>
+    </nav>
   );
 }

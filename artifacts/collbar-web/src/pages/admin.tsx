@@ -706,19 +706,21 @@ function IlCbaDistrictLogTable() {
       {/* Controls */}
       <div className="flex flex-wrap gap-2 items-center">
         <div className="flex flex-1 min-w-[180px] items-center gap-1 rounded border border-slate-700 bg-slate-950 px-2 py-1">
-          <span className="text-slate-600 text-xs">🔍</span>
+          <span className="text-slate-600 text-xs" aria-hidden="true">🔍</span>
           <input
             type="text"
             value={searchInput}
             onChange={(e) => handleSearchChange(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && applySearch()}
             placeholder="Search district name…"
-            className="flex-1 bg-transparent text-xs text-slate-200 placeholder-slate-600 focus:outline-none"
+            aria-label="Search district name"
+            className="flex-1 bg-transparent text-xs text-slate-200 placeholder-slate-600"
           />
           {searchInput && (
             <button
               onClick={() => { setSearchInput(""); setDebouncedSearch(""); setPage(1); }}
-              className="text-slate-600 hover:text-slate-400 text-xs"
+              aria-label="Clear search"
+              className="inline-flex items-center justify-center min-h-6 min-w-6 text-slate-600 hover:text-slate-400 text-xs"
             >
               ✕
             </button>
@@ -733,7 +735,7 @@ function IlCbaDistrictLogTable() {
         <select
           value={statusFilter}
           onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}
-          className="text-xs bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-300 focus:outline-none focus:border-blue-500"
+          className="text-xs bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-300 focus:border-blue-500"
         >
           {STATUS_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
@@ -2340,7 +2342,7 @@ function ReviewQueueTab() {
           <select
             value={category}
             onChange={(e) => { setCategory(e.target.value); setPage(1); }}
-            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-300 focus:outline-none focus:border-blue-500"
+            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-300 focus:border-blue-500"
           >
             {CATEGORIES.map((c) => (
               <option key={c} value={c}>
@@ -2354,7 +2356,7 @@ function ReviewQueueTab() {
           <select
             value={unreadable}
             onChange={(e) => { setUnreadable(e.target.value); setPage(1); }}
-            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-300 focus:outline-none focus:border-blue-500"
+            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-300 focus:border-blue-500"
           >
             <option value="">All documents</option>
             <option value="only">Unreadable / scanned only</option>
@@ -2513,7 +2515,7 @@ function ReviewQueueTab() {
                       value={correctedValue}
                       onChange={(e) => setCorrectedValue(e.target.value)}
                       placeholder="Enter corrected value"
-                      className="flex-1 text-xs bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-slate-200 focus:outline-none focus:border-blue-500"
+                      className="flex-1 text-xs bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-slate-200 focus:border-blue-500"
                       autoFocus
                     />
                     <button
@@ -2895,7 +2897,7 @@ function AlertsTab() {
           <select
             value={statusFilter}
             onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}
-            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-300 focus:outline-none focus:border-blue-500"
+            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-300 focus:border-blue-500"
           >
             <option value="pending">Pending</option>
             <option value="acknowledged">Acknowledged</option>
@@ -3274,7 +3276,7 @@ function CustomersTab() {
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               required
-              className="flex-1 text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+              className="flex-1 text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:border-blue-500"
             />
             <input
               type="email"
@@ -3282,7 +3284,7 @@ function CustomersTab() {
               value={newEmail}
               onChange={(e) => setNewEmail(e.target.value)}
               required
-              className="flex-1 text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+              className="flex-1 text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:border-blue-500"
             />
           </div>
           <div className="flex gap-3">
@@ -3292,12 +3294,12 @@ function CustomersTab() {
                 placeholder="Filter districts…"
                 value={addDistrictSearch}
                 onChange={(e) => { setAddDistrictSearch(e.target.value); setNewDistrictId(""); }}
-                className="text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+                className="text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:border-blue-500"
               />
               <select
                 value={newDistrictId}
                 onChange={(e) => setNewDistrictId(e.target.value)}
-                className="text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 focus:outline-none focus:border-blue-500"
+                className="text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 focus:border-blue-500"
               >
                 <option value="">— No district —</option>
                 {districts
@@ -3320,12 +3322,12 @@ function CustomersTab() {
               onChange={(e) => setNewPassword(e.target.value)}
               required
               minLength={8}
-              className="flex-1 text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+              className="flex-1 text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:border-blue-500"
             />
             <select
               value={newPlan}
               onChange={(e) => setNewPlan(e.target.value as "free" | "pro")}
-              className="text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 focus:outline-none focus:border-blue-500 self-end"
+              className="text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 focus:border-blue-500 self-end"
               title="Plan"
             >
               <option value="free">Free</option>
@@ -3469,7 +3471,7 @@ function CustomersTab() {
                 onChange={(e) => setNewPw(e.target.value)}
                 required
                 minLength={8}
-                className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+                className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:border-blue-500"
               />
               {pwError && <p className="text-xs text-red-400">{pwError}</p>}
               <div className="flex gap-2">
@@ -3507,13 +3509,13 @@ function CustomersTab() {
                 placeholder="Filter districts…"
                 value={editDistrictSearch}
                 onChange={(e) => { setEditDistrictSearch(e.target.value); setEditDistrictId(""); }}
-                className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+                className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:border-blue-500"
               />
               <select
                 value={editDistrictId}
                 onChange={(e) => setEditDistrictId(e.target.value)}
                 size={6}
-                className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-1 text-slate-200 focus:outline-none focus:border-blue-500"
+                className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-1 text-slate-200 focus:border-blue-500"
               >
                 <option value="">— No district —</option>
                 {districts
@@ -3760,12 +3762,12 @@ function UploadCbaTab() {
               setDistrictSearch(e.target.value);
               setDistrictId("");
             }}
-            className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+            className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:border-blue-500"
           />
           <select
             value={districtId}
             onChange={(e) => setDistrictId(e.target.value)}
-            className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 focus:outline-none focus:border-blue-500"
+            className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 focus:border-blue-500"
           >
             <option value="">— Select a district —</option>
             {districts
@@ -3791,7 +3793,7 @@ function UploadCbaTab() {
             <select
               value={unit}
               onChange={(e) => setUnit(e.target.value)}
-              className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 focus:outline-none focus:border-blue-500"
+              className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 focus:border-blue-500"
             >
               {BARGAINING_UNIT_OPTIONS.map((u) => (
                 <option key={u.value} value={u.value}>
@@ -3809,7 +3811,7 @@ function UploadCbaTab() {
               placeholder="2026-27"
               value={schoolYear}
               onChange={(e) => setSchoolYear(e.target.value)}
-              className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+              className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:border-blue-500"
             />
           </div>
         </div>

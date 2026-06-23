@@ -105,7 +105,7 @@ export default function ClausesPage() {
           <select
             value={category}
             onChange={(e) => setCategory(e.target.value)}
-            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-300 focus:outline-none focus:border-blue-500"
+            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-300 focus:border-blue-500"
           >
             {CATEGORIES.map((c) => (
               <option key={c} value={c}>{c || "All categories"}</option>
@@ -116,7 +116,7 @@ export default function ClausesPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search provisions…"
-            className="flex-1 min-w-40 text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+            className="flex-1 min-w-40 text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-200 placeholder-slate-600 focus:border-blue-500"
           />
         </div>
 

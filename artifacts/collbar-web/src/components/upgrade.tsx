@@ -5,6 +5,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
 import { Lock } from "lucide-react";
 
 // Verbatim upgrade message (Task #116). The server uses the same string in
@@ -43,39 +44,42 @@ export function useUpgradeLock(): UpgradeLockContextValue {
   return ctx;
 }
 
+// Built on Radix Dialog so it gets a focus trap, Escape-to-close, focus
+// restoration to the trigger on close, scroll-locking, and the correct
+// role/aria-modal wiring for free — all required for an accessible modal.
 function UpgradeModal({ onClose }: { onClose: () => void }) {
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-    >
-      <div
-        className="w-full max-w-md rounded-lg border border-slate-700 bg-slate-900 p-6 shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center gap-2 mb-3">
-          <Lock className="h-4 w-4 text-amber-400" />
-          <h2 className="text-sm font-semibold text-slate-100">Paid feature</h2>
-        </div>
-        <p className="text-sm text-slate-300 leading-relaxed">{UPGRADE_MESSAGE}</p>
-        <div className="mt-5 flex justify-end gap-2">
-          <a
-            href="mailto:hello@collbar.com"
-            className="px-3 py-1.5 rounded-md bg-blue-800 text-slate-100 text-xs hover:bg-blue-700 transition-colors border border-blue-700"
-          >
-            Email us
-          </a>
-          <button
-            onClick={onClose}
-            className="px-3 py-1.5 rounded-md bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 transition-colors border border-slate-700"
-          >
-            Close
-          </button>
-        </div>
-      </div>
-    </div>
+    <Dialog.Root open onOpenChange={(o) => { if (!o) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/70 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
+        <Dialog.Content
+          className="fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-lg border border-slate-700 bg-slate-900 p-6 shadow-xl outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95"
+        >
+          <div className="flex items-center gap-2 mb-3">
+            <Lock className="h-4 w-4 text-amber-400" aria-hidden="true" />
+            <Dialog.Title className="text-sm font-semibold text-slate-100">
+              Paid feature
+            </Dialog.Title>
+          </div>
+          <Dialog.Description className="text-sm text-slate-300 leading-relaxed">
+            {UPGRADE_MESSAGE}
+          </Dialog.Description>
+          <div className="mt-5 flex justify-end gap-2">
+            <a
+              href="mailto:hello@collbar.com"
+              className="inline-flex items-center min-h-8 px-3 py-1.5 rounded-md bg-blue-800 text-slate-100 text-xs hover:bg-blue-700 transition-colors border border-blue-700"
+            >
+              Email us
+            </a>
+            <Dialog.Close asChild>
+              <button className="inline-flex items-center min-h-8 px-3 py-1.5 rounded-md bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 transition-colors border border-slate-700">
+                Close
+              </button>
+            </Dialog.Close>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
@@ -97,7 +101,7 @@ export function LockedPage({
   const href = `${base}${backTo.replace(/^\//, "")}`;
 
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-slate-950 px-4">
+    <main className="min-h-screen w-full flex items-center justify-center bg-slate-950 px-4">
       <div className="w-full max-w-md rounded-lg border border-slate-800 bg-slate-900 p-8 text-center">
         <div className="flex items-center justify-center mb-4">
           <div className="rounded-full bg-amber-500/10 border border-amber-500/30 p-3">
@@ -123,6 +127,6 @@ export function LockedPage({
           </a>
         </div>
       </div>
-    </div>
+    </main>
   );
 }

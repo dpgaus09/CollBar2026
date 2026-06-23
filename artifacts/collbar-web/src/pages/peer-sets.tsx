@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { useAuth, useLogout } from "@/hooks/use-auth";
 import { apiUrl } from "@/lib/api";
+import * as Dialog from "@radix-ui/react-dialog";
 import { LockedPage } from "@/components/upgrade";
 
 // ---------------------------------------------------------------------------
@@ -164,20 +165,28 @@ function BuilderModal({
   ];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
-      <div className="bg-slate-900 border border-slate-700 rounded-lg w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl">
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800">
-          <h2 className="text-sm font-bold text-slate-100">
-            {initial ? "Edit Peer Set" : "New Peer Set"}
-          </h2>
-          <button
-            onClick={onClose}
-            className="text-slate-500 hover:text-slate-300 text-lg leading-none"
-          >
-            ×
-          </button>
-        </div>
+    <Dialog.Root open onOpenChange={(o) => { if (!o) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/70" />
+        <Dialog.Content
+          aria-describedby={undefined}
+          onInteractOutside={(e) => e.preventDefault()}
+          className="fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 bg-slate-900 border border-slate-700 rounded-lg w-[calc(100%-2rem)] max-w-2xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl outline-none"
+        >
+          {/* Header */}
+          <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800">
+            <Dialog.Title className="text-sm font-bold text-slate-100">
+              {initial ? "Edit Peer Set" : "New Peer Set"}
+            </Dialog.Title>
+            <Dialog.Close asChild>
+              <button
+                aria-label="Close"
+                className="inline-flex items-center justify-center min-h-6 min-w-6 text-slate-500 hover:text-slate-300 text-lg leading-none"
+              >
+                ×
+              </button>
+            </Dialog.Close>
+          </div>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-5">
           {/* Name */}
@@ -190,7 +199,7 @@ function BuilderModal({
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g. Small Districts — Cuyahoga County"
-              className="w-full text-sm bg-slate-800 border border-slate-700 rounded px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+              className="w-full text-sm bg-slate-800 border border-slate-700 rounded px-3 py-2 text-slate-100 placeholder-slate-600 focus:border-blue-500"
             />
           </div>
 
@@ -219,7 +228,7 @@ function BuilderModal({
               <select
                 value={county}
                 onChange={(e) => setCounty(e.target.value)}
-                className="text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 focus:outline-none focus:border-blue-500"
+                className="text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 focus:border-blue-500"
               >
                 <option value="">All counties</option>
                 {(counties?.counties ?? []).map((c) => (
@@ -232,7 +241,7 @@ function BuilderModal({
               <select
                 value={band}
                 onChange={(e) => setBand(e.target.value)}
-                className="text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 focus:outline-none focus:border-blue-500"
+                className="text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 focus:border-blue-500"
               >
                 {BANDS.map((b) => (
                   <option key={b} value={b}>
@@ -244,7 +253,7 @@ function BuilderModal({
               <select
                 value={districtType}
                 onChange={(e) => setDistrictType(e.target.value)}
-                className="text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 focus:outline-none focus:border-blue-500"
+                className="text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 focus:border-blue-500"
               >
                 <option value="">All types</option>
                 {(dTypes?.districtTypes ?? []).map((t) => (
@@ -278,7 +287,7 @@ function BuilderModal({
                 }}
                 onFocus={() => setShowSearch(true)}
                 placeholder="Search by district name or county…"
-                className="w-full text-xs bg-slate-800 border border-slate-700 rounded px-3 py-2 text-slate-300 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+                className="w-full text-xs bg-slate-800 border border-slate-700 rounded px-3 py-2 text-slate-300 placeholder-slate-600 focus:border-blue-500"
               />
               {showSearch &&
                 searchQ.length >= 2 &&
@@ -390,8 +399,9 @@ function BuilderModal({
             </button>
           </div>
         </div>
-      </div>
-    </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
@@ -645,31 +655,37 @@ export default function PeerSetsPage() {
 
       {/* Delete confirm */}
       {deleteId !== null && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
-          <div className="bg-slate-900 border border-slate-700 rounded-lg p-6 w-80 shadow-2xl">
-            <h3 className="text-sm font-bold text-slate-100 mb-2">
-              Delete peer set?
-            </h3>
-            <p className="text-xs text-slate-400 mb-5">
-              This peer set will be permanently removed.
-            </p>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setDeleteId(null)}
-                className="text-xs px-3 py-1.5 rounded border border-slate-700 text-slate-400"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => deleteMutation.mutate(deleteId)}
-                disabled={deleteMutation.isPending}
-                className="text-xs px-3 py-1.5 rounded bg-red-800 text-white hover:bg-red-700 disabled:opacity-40"
-              >
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
+        <Dialog.Root open onOpenChange={(o) => { if (!o) setDeleteId(null); }}>
+          <Dialog.Portal>
+            <Dialog.Overlay className="fixed inset-0 z-50 bg-black/70" />
+            <Dialog.Content
+              aria-describedby="delete-peer-set-desc"
+              className="fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 bg-slate-900 border border-slate-700 rounded-lg p-6 w-80 shadow-2xl outline-none"
+            >
+              <Dialog.Title className="text-sm font-bold text-slate-100 mb-2">
+                Delete peer set?
+              </Dialog.Title>
+              <Dialog.Description id="delete-peer-set-desc" className="text-xs text-slate-400 mb-5">
+                This peer set will be permanently removed.
+              </Dialog.Description>
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setDeleteId(null)}
+                  className="text-xs px-3 py-1.5 rounded border border-slate-700 text-slate-400"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => deleteMutation.mutate(deleteId)}
+                  disabled={deleteMutation.isPending}
+                  className="text-xs px-3 py-1.5 rounded bg-red-800 text-white hover:bg-red-700 disabled:opacity-40"
+                >
+                  Delete
+                </button>
+              </div>
+            </Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root>
       )}
     </div>
   );

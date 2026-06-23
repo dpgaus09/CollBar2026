@@ -19,6 +19,7 @@ import PeerSetsPage from "@/pages/peer-sets";
 import PlansPage from "@/pages/plans";
 import TrackerPage from "@/pages/tracker";
 import { UpgradeLockProvider } from "@/components/upgrade";
+import { LifeBuoy } from "lucide-react";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -30,7 +31,7 @@ const queryClient = new QueryClient({
 
 function Home() {
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-slate-950">
+    <main className="min-h-screen w-full flex items-center justify-center bg-slate-950">
       <div className="text-center space-y-4">
         <div className="flex items-center justify-center gap-3">
           <div className="w-2 h-2 rounded-full bg-blue-500" />
@@ -50,7 +51,7 @@ function Home() {
           </a>
         </div>
       </div>
-    </div>
+    </main>
   );
 }
 
@@ -99,9 +100,25 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <UpgradeLockProvider>
+          {/* 2.4.1 Bypass Blocks: first tab stop jumps past nav to content. */}
+          <a href="#main-content" className="skip-link">
+            Skip to main content
+          </a>
           <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
-            <Router />
+            <div id="main-content" tabIndex={-1}>
+              <Router />
+            </div>
           </WouterRouter>
+          {/* 3.2.6 Consistent Help: rendered once here so the help affordance
+              appears in the same place and DOM order on every page. */}
+          <a
+            href="mailto:hello@collbar.com"
+            aria-label="Get help — email CollBar support"
+            className="fixed bottom-3 right-3 z-40 inline-flex items-center gap-1.5 min-h-9 rounded-full border border-slate-700 bg-slate-900/95 px-3.5 py-2 text-xs font-medium text-slate-200 shadow-lg hover:bg-slate-800 transition-colors"
+          >
+            <LifeBuoy className="h-4 w-4" aria-hidden="true" />
+            <span>Help</span>
+          </a>
         </UpgradeLockProvider>
         <Toaster />
       </TooltipProvider>

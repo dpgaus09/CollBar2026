@@ -265,7 +265,7 @@ export default function ComparablesPage() {
           <select
             value={selectedPeerSetId}
             onChange={(e) => { setSelectedPeerSetId(e.target.value); setPage(1); }}
-            className="flex-1 text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1 text-slate-300 focus:outline-none focus:border-blue-500"
+            className="flex-1 text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1 text-slate-300 focus:border-blue-500"
           >
             <option value="">— None (show all matching filters) —</option>
             {(peerSetsData?.peerSets ?? []).map((ps) => (
@@ -339,7 +339,7 @@ export default function ComparablesPage() {
           <select
             value={county}
             onChange={(e) => { setCounty(e.target.value); setPage(1); }}
-            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-300 focus:outline-none focus:border-blue-500"
+            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-300 focus:border-blue-500"
           >
             <option value="">All counties</option>
             {(counties?.counties ?? []).map((c) => (
@@ -350,7 +350,7 @@ export default function ComparablesPage() {
           <select
             value={band}
             onChange={(e) => { setBand(e.target.value); setPage(1); }}
-            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-300 focus:outline-none focus:border-blue-500"
+            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-300 focus:border-blue-500"
           >
             {BANDS.map((b) => (
               <option key={b} value={b}>{BAND_LABELS[b]}</option>
@@ -360,7 +360,7 @@ export default function ComparablesPage() {
           <select
             value={districtType}
             onChange={(e) => { setDistrictType(e.target.value); setPage(1); }}
-            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-300 focus:outline-none focus:border-blue-500"
+            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-300 focus:border-blue-500"
           >
             <option value="">All types</option>
             {(dTypes?.districtTypes ?? []).map((t) => (
@@ -373,7 +373,7 @@ export default function ComparablesPage() {
             value={yearFrom}
             onChange={(e) => { setYearFrom(e.target.value); setPage(1); }}
             placeholder="Year from (e.g. 2020)"
-            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-300 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-300 placeholder-slate-600 focus:border-blue-500"
           />
 
           <input
@@ -381,7 +381,7 @@ export default function ComparablesPage() {
             value={yearTo}
             onChange={(e) => { setYearTo(e.target.value); setPage(1); }}
             placeholder="Year to (e.g. 2025)"
-            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-300 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+            className="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-300 placeholder-slate-600 focus:border-blue-500"
           />
         </div>
 
