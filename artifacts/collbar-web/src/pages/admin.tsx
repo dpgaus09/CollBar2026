@@ -3050,6 +3050,7 @@ interface Customer {
   created_at: string | null;
   last_sign_in_at: string | null;
   has_password: boolean;
+  login_count: number;
 }
 
 interface District {
@@ -3195,8 +3196,10 @@ function CustomersTab() {
     const paidOrgIds = new Set<number>();
     let paid = 0;
     let noOrg = 0;
+    let totalLogins = 0;
     for (const c of customers) {
       if (c.plan === "pro") paid++;
+      totalLogins += c.login_count ?? 0;
       if (c.district_id != null) {
         orgIds.add(c.district_id);
         if (c.plan === "pro") paidOrgIds.add(c.district_id);
@@ -3211,8 +3214,42 @@ function CustomersTab() {
       uniqueOrgs: orgIds.size,
       paidOrgs: paidOrgIds.size,
       noOrg,
+      totalLogins,
     };
   }, [data]);
+
+  // Client-side ordering for the customers table. Defaults to most logins first
+  // so the page opens on the "who uses the app most" ranking the admin wants.
+  const [custSort, setCustSort] = useState<{
+    col: "logins" | "last" | "name";
+    dir: "asc" | "desc";
+  }>({ col: "logins", dir: "desc" });
+
+  const sortedCustomers = useMemo(() => {
+    const rows = [...(data?.customers ?? [])];
+    const { col, dir } = custSort;
+    const mul = dir === "asc" ? 1 : -1;
+    rows.sort((a, b) => {
+      if (col === "logins") {
+        const d = (a.login_count ?? 0) - (b.login_count ?? 0);
+        return mul * (d !== 0 ? d : a.email.localeCompare(b.email));
+      }
+      if (col === "last") {
+        const av = a.last_sign_in_at ? Date.parse(a.last_sign_in_at) : 0;
+        const bv = b.last_sign_in_at ? Date.parse(b.last_sign_in_at) : 0;
+        return mul * (av - bv);
+      }
+      return mul * (a.name ?? a.email).localeCompare(b.name ?? b.email);
+    });
+    return rows;
+  }, [data, custSort]);
+
+  const toggleSort = (col: "logins" | "last" | "name") =>
+    setCustSort((s) =>
+      s.col === col
+        ? { col, dir: s.dir === "asc" ? "desc" : "asc" }
+        : { col, dir: col === "name" ? "asc" : "desc" },
+    );
 
   const { data: districtsData } = useQuery<{ districts: District[] }>({
     queryKey: ["/api/dashboard/districts"],
@@ -3512,7 +3549,7 @@ function CustomersTab() {
       </div>
 
       {data && data.customers.length > 0 && (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
           <div className="rounded-lg border border-slate-700 bg-slate-900 p-3">
             <div className="text-2xl font-bold font-mono text-slate-200">
               {stats.total.toLocaleString()}
@@ -3547,6 +3584,15 @@ function CustomersTab() {
             <div className="text-xs text-slate-400 mt-1">
               Paid organizations
               <span className="block text-[10px] text-slate-600">districts with 1+ paid login</span>
+            </div>
+          </div>
+          <div className="rounded-lg border border-slate-700 bg-slate-900 p-3">
+            <div className="text-2xl font-bold font-mono text-slate-200">
+              {stats.totalLogins.toLocaleString()}
+            </div>
+            <div className="text-xs text-slate-400 mt-1">
+              Logins tracked
+              <span className="block text-[10px] text-slate-600">since tracking began</span>
             </div>
           </div>
         </div>
@@ -3804,21 +3850,37 @@ function CustomersTab() {
 
       {data && data.customers.length > 0 && (
         <div className="rounded-lg border border-slate-800 overflow-x-auto">
-          <table className="w-full min-w-[820px] text-xs">
+          <table className="w-full min-w-[900px] text-xs">
             <thead>
               <tr className="border-b border-slate-800 bg-slate-900">
-                <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Name</th>
+                <th
+                  onClick={() => toggleSort("name")}
+                  className="text-left px-4 py-2.5 text-slate-400 font-medium cursor-pointer select-none hover:text-slate-200"
+                >
+                  Name{custSort.col === "name" ? (custSort.dir === "asc" ? " ▲" : " ▼") : ""}
+                </th>
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Email</th>
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">District</th>
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Plan</th>
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Status</th>
                 <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Password</th>
-                <th className="text-left px-4 py-2.5 text-slate-400 font-medium">Last sign-in</th>
+                <th
+                  onClick={() => toggleSort("logins")}
+                  className="text-right px-4 py-2.5 text-slate-400 font-medium cursor-pointer select-none hover:text-slate-200 whitespace-nowrap"
+                >
+                  Logins{custSort.col === "logins" ? (custSort.dir === "asc" ? " ▲" : " ▼") : ""}
+                </th>
+                <th
+                  onClick={() => toggleSort("last")}
+                  className="text-left px-4 py-2.5 text-slate-400 font-medium cursor-pointer select-none hover:text-slate-200 whitespace-nowrap"
+                >
+                  Last sign-in{custSort.col === "last" ? (custSort.dir === "asc" ? " ▲" : " ▼") : ""}
+                </th>
                 <th className="px-4 py-2.5" />
               </tr>
             </thead>
             <tbody>
-              {data.customers.map((c, i) => (
+              {sortedCustomers.map((c, i) => (
                 <tr
                   key={c.id}
                   className={`border-b border-slate-800/50 ${i % 2 === 0 ? "bg-slate-950" : "bg-slate-900/30"}`}
@@ -3878,6 +3940,15 @@ function CustomersTab() {
                     >
                       {c.has_password ? "Change" : "Set password"}
                     </button>
+                  </td>
+                  <td className="px-4 py-2.5 text-right font-mono tabular-nums">
+                    <span
+                      className={
+                        c.login_count > 0 ? "text-slate-200" : "text-slate-600"
+                      }
+                    >
+                      {c.login_count.toLocaleString()}
+                    </span>
                   </td>
                   <td className="px-4 py-2.5 text-slate-500">
                     {c.last_sign_in_at

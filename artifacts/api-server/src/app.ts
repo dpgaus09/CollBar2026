@@ -140,6 +140,22 @@ async function runMigrations(): Promise<void> {
 
     logger.info("Migration OK: users auth columns ensured");
 
+    // One row per successful sign-in. Powers per-customer login counts and the
+    // "rank by activity" view in the admin Customers page. last_sign_in_at on
+    // users still holds the most-recent timestamp; this table holds the history.
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS login_events (
+        id          bigserial PRIMARY KEY,
+        user_id     bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at  timestamptz NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS login_events_user_id_idx ON login_events(user_id)
+    `);
+
+    logger.info("Migration OK: login_events table ensured");
+
     // Persisted "Ask CollBar" conversations (threads survive refresh/re-login).
     await db.execute(sql`
       CREATE TABLE IF NOT EXISTS conversations (

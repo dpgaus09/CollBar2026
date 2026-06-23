@@ -1898,9 +1898,15 @@ router.get("/admin/customers", requireAdminToken, async (_req, res) => {
     const rows = await db.execute(sql`
       SELECT u.id, u.name, u.email, u.active, u.plan, u.district_id, d.name AS district_name,
              u.created_at, u.last_sign_in_at,
-             (u.password_hash IS NOT NULL) AS has_password
+             (u.password_hash IS NOT NULL) AS has_password,
+             COALESCE(le.login_count, 0)::int AS login_count
       FROM users u
       LEFT JOIN districts d ON d.id = u.district_id
+      LEFT JOIN (
+        SELECT user_id, COUNT(*)::int AS login_count
+        FROM login_events
+        GROUP BY user_id
+      ) le ON le.user_id = u.id
       WHERE u.role = 'district_user'
       ORDER BY u.created_at DESC
     `);

@@ -160,6 +160,16 @@ router.post("/auth/login", async (req: Request, res: Response) => {
       WHERE id = ${user.id}
     `);
 
+    // Record the sign-in for per-customer login analytics. Best-effort: a
+    // tracking failure must never block a valid user from signing in.
+    try {
+      await db.execute(sql`
+        INSERT INTO login_events (user_id) VALUES (${user.id})
+      `);
+    } catch (trackErr) {
+      console.error("Failed to record login_event:", trackErr);
+    }
+
     // Regenerate session to prevent session fixation
     req.session.regenerate((err) => {
       if (err) {
