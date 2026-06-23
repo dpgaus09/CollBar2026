@@ -35,23 +35,45 @@ export class DriveNotConnectedError extends Error {
   }
 }
 
+// Minimal shape of the fetch-like Response the connector proxy returns.
+interface ProxyResponse {
+  ok: boolean;
+  status: number;
+  headers: { get(name: string): string | null };
+  text: () => Promise<string>;
+}
+
 /**
- * Run a Drive API request through the connector proxy. Throws a
- * DriveNotConnectedError for auth/connection problems (so callers can surface a
- * "not connected" message) and a generic Error for other API failures.
+ * Low-level call through the connector proxy. Returns the raw response so
+ * callers can inspect status and headers (needed for resumable uploads, which
+ * rely on a 308 status and a Location header). Throws DriveNotConnectedError
+ * only when the SDK itself can't find usable credentials.
+ */
+async function driveProxy(
+  connectors: ReplitConnectors,
+  path: string,
+  options: Record<string, unknown> = {},
+): Promise<ProxyResponse> {
+  try {
+    return (await connectors.proxy("google-drive", path, options as never)) as never;
+  } catch (e) {
+    // The SDK throws when there is no usable connection/credentials.
+    throw new DriveNotConnectedError((e as Error)?.message);
+  }
+}
+
+/**
+ * Run a Drive API request through the connector proxy and parse its JSON body.
+ * Throws a DriveNotConnectedError for auth/connection problems (so callers can
+ * surface a "not connected" message) and a generic Error for other API
+ * failures.
  */
 async function driveApi(
   connectors: ReplitConnectors,
   path: string,
   options: Record<string, unknown> = {},
 ): Promise<any> {
-  let res: { ok: boolean; status: number; text: () => Promise<string> };
-  try {
-    res = (await connectors.proxy("google-drive", path, options as never)) as never;
-  } catch (e) {
-    // The SDK throws when there is no usable connection/credentials.
-    throw new DriveNotConnectedError((e as Error)?.message);
-  }
+  const res = await driveProxy(connectors, path, options);
   const text = await res.text();
   if (!res.ok) {
     if (res.status === 401 || res.status === 403) {
@@ -112,6 +134,75 @@ async function ensureFolder(
   return createFolder(connectors, name, parentId);
 }
 
+// Google-issued resumable session URIs always live under *.googleapis.com.
+// We PUT file bytes directly to that host (not through the proxy), so validate
+// the URI before making the request as defense-in-depth against SSRF.
+const GOOGLE_UPLOAD_HOST = /^https:\/\/[a-z0-9.-]+\.googleapis\.com\//i;
+
+/**
+ * Upload file bytes via Google's resumable protocol.
+ *
+ * The session is OPENED through the connector proxy (which injects OAuth), but
+ * the file bytes are PUT DIRECTLY to the Google-issued session URI, bypassing
+ * the proxy. This is required: the connector proxy caps request bodies at ~1 MB
+ * (returns 413 above that) and blocks partial/resumable continuation chunks
+ * (returns 403), so real-world files can't be sent through it. The session URI
+ * is a one-time capability that authorizes the upload on its own, so the direct
+ * PUT needs no Authorization header. Returns the created file's metadata.
+ */
+async function uploadResumable(
+  connectors: ReplitConnectors,
+  parentId: string,
+  submission: CustomerSubmission,
+): Promise<{ id: string; name: string; webViewLink?: string | null }> {
+  const total = submission.content.length;
+  const mimeType = submission.mimeType || "application/octet-stream";
+
+  // 1. Open the resumable session through the proxy (needs OAuth). Google
+  //    returns the upload URI in the Location response header.
+  const initRes = await driveProxy(
+    connectors,
+    "/upload/drive/v3/files?uploadType=resumable&fields=id,name,webViewLink",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=UTF-8",
+        "X-Upload-Content-Type": mimeType,
+        "X-Upload-Content-Length": String(total),
+      },
+      body: JSON.stringify({ name: submission.fileName, parents: [parentId] }),
+    },
+  );
+  if (initRes.status === 401 || initRes.status === 403) {
+    throw new DriveNotConnectedError(`Google Drive auth failed (HTTP ${initRes.status})`);
+  }
+  if (!initRes.ok) {
+    const t = await initRes.text();
+    throw new Error(`Google Drive API error (HTTP ${initRes.status}): ${t.slice(0, 300)}`);
+  }
+  const sessionUri = initRes.headers.get("location") || initRes.headers.get("Location");
+  await initRes.text().catch(() => undefined); // drain the init response body
+  if (!sessionUri || !GOOGLE_UPLOAD_HOST.test(sessionUri)) {
+    throw new Error("Google Drive did not return a valid resumable upload session URI");
+  }
+
+  // 2. PUT the full content directly to the Google session URI (no proxy, so no
+  //    body-size limit). A single request is fine for our 32 MB cap.
+  const res = await fetch(sessionUri, {
+    method: "PUT",
+    headers: {
+      "Content-Type": mimeType,
+      "Content-Length": String(total),
+    },
+    body: submission.content,
+  });
+  const txt = await res.text();
+  if (!res.ok) {
+    throw new Error(`Google Drive upload failed (HTTP ${res.status}): ${txt.slice(0, 300)}`);
+  }
+  return JSON.parse(txt);
+}
+
 /**
  * Upload a single customer document into the per-district subfolder of the
  * "CollBar Customer Submissions" Drive folder.
@@ -129,25 +220,7 @@ export async function uploadCustomerSubmission(
     .slice(0, 120);
   const districtFolderId = await ensureFolder(connectors, safeDistrict, rootId);
 
-  const boundary = "collbar_boundary_" + Date.now() + "_" + Math.random().toString(36).slice(2);
-  const meta = JSON.stringify({ name: submission.fileName, parents: [districtFolderId] });
-  const body = Buffer.concat([
-    Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n`),
-    Buffer.from(meta),
-    Buffer.from(`\r\n--${boundary}\r\nContent-Type: ${submission.mimeType}\r\n\r\n`),
-    submission.content,
-    Buffer.from(`\r\n--${boundary}--\r\n`),
-  ]);
-
-  const uploaded = await driveApi(
-    connectors,
-    "/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink",
-    {
-      method: "POST",
-      headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
-      body,
-    },
-  );
+  const uploaded = await uploadResumable(connectors, districtFolderId, submission);
 
   return {
     fileId: uploaded.id,
