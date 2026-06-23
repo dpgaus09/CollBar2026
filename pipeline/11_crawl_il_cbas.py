@@ -32,6 +32,7 @@ import shutil
 import signal
 import sys
 import time
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -2242,9 +2243,98 @@ def _record_recheck(state: dict, rcdts: str, unit: str, outcome: str,
     entry["last_rechecked"] = ts
 
 
+def _is_expired(effective_end) -> bool:
+    """True if a contract's term has already ended (strictly before today).
+
+    The re-check window includes contracts that expire *soon* (within
+    window_days); the re-discovery fallback only fires for ones that have
+    actually lapsed, since a successor is only expected once the term is over.
+    """
+    if effective_end is None:
+        return False
+    d = effective_end
+    if isinstance(d, datetime):
+        d = d.date()
+    try:
+        return d < date.today()
+    except TypeError:
+        return False
+
+
+def _rediscover_for_expired(cur, conn, session, row: dict,
+                            search_fallback: bool, dry_run: bool) -> int:
+    """Re-run the existing per-district discovery for an expired district whose
+    saved URL yielded no newer deal, to catch a successor agreement that was
+    posted at a NEW URL (the saved-URL re-fetch can't see it).
+
+    Reuses ``_crawl_district`` (and, when ``search_fallback`` is set,
+    ``_search_fallback``) exactly as the normal crawl does, then runs every
+    candidate through ``_store_candidate``. A relocated/changed file is stored
+    as a new ``source_document`` (and the extraction step ingests it as a new
+    contract version); a file identical to one already stored is dropped by the
+    per-district hash dedup, so re-finding the old URL causes no churn.
+
+    Returns the number of new versions stored.
+    """
+    rcdts    = row["state_district_id"]
+    name     = row["district_name"]
+    homepage = row.get("website_url")
+    dist_id  = row["district_id"]
+
+    dist = {
+        "id":                dist_id,
+        "name":              name,
+        "website_url":       homepage,
+        "state_district_id": rcdts,
+    }
+
+    candidates: list[dict] = []
+    if homepage:
+        # Same per-district watchdog the normal crawl uses, so a hung district
+        # can't stall the whole re-check run.
+        signal.signal(signal.SIGALRM, _district_timeout_handler)
+        signal.alarm(DISTRICT_TIMEOUT)
+        try:
+            candidates = _crawl_district(session, homepage, dry_run)
+        except TimeoutError:
+            log.warning("  [REDISCOVER] %s exceeded %ds — skipping", name, DISTRICT_TIMEOUT)
+            return 0
+        finally:
+            signal.alarm(0)
+
+    if not candidates and search_fallback:
+        log.info("  [REDISCOVER] %s — trying search-engine fallback",
+                 "direct crawl found nothing" if homepage else "no website URL")
+        candidates = _search_fallback(dist, session)
+
+    if not candidates:
+        log.info("  [REDISCOVER] no candidates found for %s", name)
+        return 0
+
+    new_versions = 0
+    for cand in candidates:
+        status, info = _store_candidate(
+            cur, conn, session, dist_id, cand, homepage, dry_run,
+        )
+        if status == "found" and info.get("dry_run"):
+            log.info("  [REDISCOVER] [DRY-RUN] would store: %s", cand.get("url"))
+        elif status == "found":
+            new_versions += 1
+            log.info("  [REDISCOVER] -> NEW version stored (doc_id=%s) via %s",
+                     info.get("doc_id"), cand.get("found_via", "?"))
+        elif status == "skip":
+            log.info("  [REDISCOVER] candidate unchanged/duplicate: %s", cand.get("url"))
+        else:
+            log.info("  [REDISCOVER] candidate failed (%s): %s",
+                     info.get("reason", "?"), cand.get("url"))
+    return new_versions
+
+
 def recheck_expiring(window_days: int = 90, dry_run: bool = False,
                      target_rcdts: Optional[str] = None,
-                     limit: Optional[int] = None):
+                     limit: Optional[int] = None,
+                     rediscover: bool = False,
+                     search_fallback: bool = False):
     """Re-fetch the saved source URL of districts whose CURRENT contract is
     expiring/expired, to pick up a newly-posted successor agreement.
 
@@ -2256,6 +2346,14 @@ def recheck_expiring(window_days: int = 90, dry_run: bool = False,
     contract version; if the bytes are unchanged nothing is stored (no churn).
     Districts well within term, with an unknown end date, or with no saved URL
     are skipped entirely.
+
+    Re-discovery fallback (``rediscover=True``, off by default to preserve the
+    efficient policy): when the saved URL yields "unchanged" or "failed" for a
+    district whose contract has *already expired*, fall back to the existing
+    per-district discovery (``_crawl_district``, and ``_search_fallback`` when
+    ``search_fallback=True``) so a successor agreement posted at a NEW URL is
+    still found. Any newly discovered file flows through the same store ->
+    extraction path as a new contract version.
     """
     global _current_district
     conn = common.get_db_conn()
@@ -2274,6 +2372,7 @@ def recheck_expiring(window_days: int = 90, dry_run: bool = False,
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     checked = new_versions = unchanged = failed = skipped_html = 0
+    rediscover_attempted = rediscover_new = 0
 
     for row in rows:
         if limit is not None and checked >= limit:
@@ -2326,15 +2425,39 @@ def recheck_expiring(window_days: int = 90, dry_run: bool = False,
 
         _record_recheck(state, rcdts, unit, outcome, row, _ts())
 
+        # Re-discovery fallback: the saved URL only catches in-place replacements.
+        # When it had no newer deal ("unchanged"/"failed") AND the contract has
+        # already lapsed, re-run discovery to catch a successor posted at a NEW
+        # URL. Gated behind --recheck-rediscover so the efficient default stands.
+        # (In dry-run the saved-URL fetch reports "dry_run", so allow that too to
+        # let users preview what re-discovery would attempt.)
+        if (rediscover and _is_expired(row.get("effective_end"))
+                and outcome in ("unchanged", "failed", "dry_run")):
+            log.info("  [RECHECK] %s expired (%s) with no newer deal at saved URL "
+                     "— re-discovering for a relocated successor", name,
+                     row.get("effective_end"))
+            rediscover_attempted += 1
+            rd_new = _rediscover_for_expired(
+                cur, conn, session, row, search_fallback, dry_run,
+            )
+            if rd_new:
+                rediscover_new += rd_new
+                new_versions += rd_new
+                _record_recheck(state, rcdts, unit, "rediscovered_new_version",
+                                row, _ts())
+
     if not dry_run:
         state["il_recheck"] = {
-            "window_days":  window_days,
-            "checked":      checked,
-            "new_versions": new_versions,
-            "unchanged":    unchanged,
-            "failed":       failed,
-            "skipped_html": skipped_html,
-            "ran_at":       _ts(),
+            "window_days":          window_days,
+            "checked":              checked,
+            "new_versions":         new_versions,
+            "unchanged":            unchanged,
+            "failed":               failed,
+            "skipped_html":         skipped_html,
+            "rediscover":           rediscover,
+            "rediscover_attempted": rediscover_attempted,
+            "rediscover_new":       rediscover_new,
+            "ran_at":               _ts(),
         }
         _save_crawl_state(state)
 
@@ -2351,6 +2474,9 @@ def recheck_expiring(window_days: int = 90, dry_run: bool = False,
     print(f"  Re-fetch failed:             {failed:>6,}")
     if skipped_html:
         print(f"  Skipped (html_contract):     {skipped_html:>6,}")
+    if rediscover:
+        print(f"  Re-discovery attempted:      {rediscover_attempted:>6,}")
+        print(f"  Re-discovery new versions:   {rediscover_new:>6,}")
     print(f"{'='*65}\n")
 
 
@@ -2416,6 +2542,17 @@ if __name__ == "__main__":
             "included."
         ),
     )
+    parser.add_argument(
+        "--recheck-rediscover", action="store_true",
+        help=(
+            "With --recheck-expiring: when the saved URL yields no newer deal "
+            "('unchanged'/'failed') for a district whose contract has ALREADY "
+            "expired, fall back to the normal per-district discovery to catch a "
+            "successor posted at a NEW URL. Off by default to preserve the "
+            "efficient saved-URL-only policy. Combine with --search-fallback to "
+            "also use search-engine discovery in the fallback."
+        ),
+    )
     args = parser.parse_args()
     LOG_ALL_VIEWERS = args.log_all_viewers
     if args.recheck_expiring:
@@ -2426,6 +2563,8 @@ if __name__ == "__main__":
             dry_run=args.dry_run,
             target_rcdts=args.district,
             limit=args.limit,
+            rediscover=args.recheck_rediscover,
+            search_fallback=args.search_fallback,
         )
     else:
         crawl(

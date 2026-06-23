@@ -12,8 +12,16 @@ URL** — not full discovery. Same bytes are dropped by per-district file-hash d
 (no churn); changed bytes are stored as a new source document so the normal
 extraction step ingests them as a new contract version. Districts well within term,
 with NULL `effective_end`, or with no saved URL are skipped.
-**Known blind spot:** this never catches a successor posted at a NEW URL (only the
-saved URL is fetched). Re-discovery fallback for that is deliberately out of scope.
+**Former blind spot, now addressed:** the saved-URL-only fetch never catches a
+successor posted at a NEW URL. Opt-in re-discovery fallback (`--recheck-rediscover`)
+fixes this: when the saved URL gives "unchanged"/"failed" AND the contract has
+*already* lapsed (strictly before today, not just within the window), it re-runs the
+existing `_crawl_district` (+ `_search_fallback` when `--search-fallback` is also
+set) and stores any relocated/changed file via the same `_store_candidate` path.
+Off by default so the efficient saved-URL-only policy stands. In `--dry-run` the
+saved-URL fetch reports outcome "dry_run", so the fallback also fires on that to let
+users preview discovery — but discovery itself does real network crawls, so dry-run
+still hits district sites (unreachable from the sandbox).
 
 ## Durable constraint 1 — the crawl-state JSON must be written atomically
 Write via temp file + `os.replace`, never a plain truncating `open("w")`.
