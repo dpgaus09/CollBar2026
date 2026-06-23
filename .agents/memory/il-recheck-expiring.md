@@ -44,3 +44,17 @@ unit) alone collapses them and under-counts the expiring set.
 **How to apply:** include `unit_scope` in any "latest contract per district unit"
 selection, and key any per-district recheck/result map by (unit, scope) too, or one
 scope's outcome clobbers another's.
+
+## Surfacing rediscovery to users (district view)
+The "rediscovered_new_version" recheck outcome is surfaced on the district detail
+page as an "auto-refreshed from a relocated source" badge with the recheck date and
+a link to the new URL. Derived purely from the crawl-state JSON — no scraping.
+**Why:** the rediscovered file is stored as the *newest* version, so it becomes the
+**current** contract for its (unit, scope). That means the new web address is simply
+the current contract's `source_url`; the only extra fact needed from crawl-state is
+the `checked_at` date and that the outcome was a rediscovery.
+**How to apply:** match a contract to its recheck record with key
+`${bargaining_unit}::${unit_scope ?? "default"}` (mirror the crawler's
+`_record_recheck` key exactly, including the "default" scope fallback). The reader
+lives in api-server `lib/crawl-state.ts`; it re-implements `resolvePipelineDir` (same
+walk-up logic as routes/admin.ts) because that path resolver is not exported.

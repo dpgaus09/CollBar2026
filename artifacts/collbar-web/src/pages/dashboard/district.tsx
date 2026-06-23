@@ -36,6 +36,7 @@ interface DistrictDetail {
     daysUntilExpiration: number | null;
     source_url: string | null;
     source_doc_id: number | null;
+    rediscovered: { checkedAt: string | null; sourceUrl: string | null } | null;
   } | null;
 }
 
@@ -697,6 +698,34 @@ export default function DistrictDashboardPage() {
                       >
                         View source PDF →
                       </a>
+                    )}
+                    {contract.rediscovered && (
+                      <div className="mt-2 inline-flex items-start gap-2 rounded-md border border-emerald-800/60 bg-emerald-950/40 px-2.5 py-1.5 text-xs text-emerald-300">
+                        <span aria-hidden className="mt-0.5">↻</span>
+                        <span>
+                          Auto-refreshed from a relocated source
+                          {contract.rediscovered.checkedAt
+                            ? ` on ${new Date(contract.rediscovered.checkedAt).toLocaleDateString("en-US", {
+                                month: "short",
+                                day: "numeric",
+                                year: "numeric",
+                              })}`
+                            : ""}
+                          {contract.rediscovered.sourceUrl && (
+                            <>
+                              {" — "}
+                              <a
+                                href={sourceHref(contract.rediscovered.sourceUrl) ?? undefined}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="underline hover:text-emerald-200"
+                              >
+                                new web address
+                              </a>
+                            </>
+                          )}
+                        </span>
+                      </div>
                     )}
                   </div>
                   <div className="text-center">

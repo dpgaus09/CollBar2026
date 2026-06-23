@@ -13,6 +13,7 @@ import {
 } from "../lib/dashboard-query.js";
 import { gate, isFree, UPGRADE_MESSAGE } from "../lib/access.js";
 import { uploadCustomerSubmission, DriveNotConnectedError } from "../lib/google-drive.js";
+import { getRediscoveriesForDistrict, rediscoveryKey } from "../lib/crawl-state.js";
 
 const router: IRouter = Router();
 
@@ -110,7 +111,7 @@ router.get("/dashboard/districts/:id", gate({ ownDistrict: true }), async (req: 
 
   try {
     const distRows = await db.execute(sql`
-      SELECT id, name, county, district_type, enrollment, state, avg_teacher_salary, valuation, website_url, updated_at
+      SELECT id, name, county, district_type, enrollment, state, avg_teacher_salary, valuation, website_url, updated_at, state_district_id
       FROM districts
       WHERE id = ${districtId} AND state = ${CUSTOMER_STATE}
     `);
@@ -119,10 +120,11 @@ router.get("/dashboard/districts/:id", gate({ ownDistrict: true }), async (req: 
     const district = distRows.rows[0] as {
       id: number; name: string; county: string | null; district_type: string | null;
       enrollment: number | null; state: string; avg_teacher_salary: string | null; updated_at: string;
+      state_district_id: string | null;
     };
 
     const contractRows = await db.execute(sql`
-      SELECT c.id, c.union_name, c.affiliation, c.unit_scope,
+      SELECT c.id, c.union_name, c.affiliation, c.unit_scope, c.bargaining_unit,
              c.effective_start, c.effective_end, c.term_years,
              c.has_reopener, c.reopener_terms,
              c.source_doc_id, sd.source_url
@@ -133,13 +135,29 @@ router.get("/dashboard/districts/:id", gate({ ownDistrict: true }), async (req: 
       LIMIT 5
     `);
 
+    // Surface contracts that were auto-refreshed from a relocated successor URL
+    // (the crawler's "rediscovered_new_version" recheck outcome). Derived purely
+    // from existing crawl-state — no scraping. The rediscovered file is stored as
+    // the newest version, so it becomes the current contract for its unit/scope;
+    // we attach the recheck date and let the existing source_url show the new URL.
+    const rediscoveries = getRediscoveriesForDistrict(district.state_district_id);
+
     const contracts = (contractRows.rows as {
       id: number; union_name: string | null; effective_start: string | null;
       effective_end: string | null; term_years: string | null;
       has_reopener: boolean | null; source_url: string | null;
-      unit_scope: string | null; affiliation: string | null;
+      unit_scope: string | null; affiliation: string | null; bargaining_unit: string | null;
       source_doc_id: number | null; reopener_terms: string | null;
-    }[]).map((c) => ({ ...c, daysUntilExpiration: daysUntil(c.effective_end) }));
+    }[]).map((c) => {
+      const rd = rediscoveries[rediscoveryKey(c.bargaining_unit, c.unit_scope)];
+      return {
+        ...c,
+        daysUntilExpiration: daysUntil(c.effective_end),
+        rediscovered: rd
+          ? { checkedAt: rd.checkedAt, sourceUrl: c.source_url }
+          : null,
+      };
+    });
 
     res.json({
       ...coerceId(district),
