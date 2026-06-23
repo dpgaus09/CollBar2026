@@ -263,3 +263,6 @@ doc_id,district_id,district_name,state,school_year,bargaining_unit,classificatio
 801,10492,Proviso Twp HSD 209,IL,,custodial_maintenance,needs-OCR,insufficient_text (0 chars),https://www.pths209.org/fs/resource-manager/view/7047cf35-b59b-49b7-b4fa-63166864d308
 805,11613,Gardner CCSD 72C,IL,,teachers,needs-OCR,insufficient_text (0 chars),https://www.ggs72.org/vimages/shared/vnews/stories/60b8d3ac01f00/Section%205%20(PERSONNEL).pdf
 830,11065,Elmwood CUSD 322,IL,,teachers,needs-OCR,insufficient_text (0 chars),upload://district-11065/teachers/Elmwood_CBA_2023-26__4.26.23_.pdf
+834,10988,Edwardsville CUSD 7,IL,,teachers,needs-OCR,insufficient_text (0 chars),upload://district-10988/teachers/EEA2025-2027Contract.pdf
+835,10988,Edwardsville CUSD 7,IL,,custodial_maintenance,needs-OCR,insufficient_text (0 chars),upload://district-10988/custodial_maintenance/ESSPAContract.pdf
+836,10988,Edwardsville CUSD 7,IL,,secretarial_clerical,needs-OCR,insufficient_text (0 chars),upload://district-10988/secretarial_clerical/SecretaryContract.pdf
