@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useHealthCheck } from "@workspace/api-client-react";
 import { useLocation } from "wouter";
@@ -3187,6 +3187,33 @@ function CustomersTab() {
     retry: false,
   });
 
+  // Summary counts for the panel at the top of the page. The /admin/customers
+  // endpoint returns every account (no LIMIT), so these are exact.
+  const stats = useMemo(() => {
+    const customers = data?.customers ?? [];
+    const orgIds = new Set<number>();
+    const paidOrgIds = new Set<number>();
+    let paid = 0;
+    let noOrg = 0;
+    for (const c of customers) {
+      if (c.plan === "pro") paid++;
+      if (c.district_id != null) {
+        orgIds.add(c.district_id);
+        if (c.plan === "pro") paidOrgIds.add(c.district_id);
+      } else {
+        noOrg++;
+      }
+    }
+    return {
+      total: customers.length,
+      paid,
+      free: customers.length - paid,
+      uniqueOrgs: orgIds.size,
+      paidOrgs: paidOrgIds.size,
+      noOrg,
+    };
+  }, [data]);
+
   const { data: districtsData } = useQuery<{ districts: District[] }>({
     queryKey: ["/api/dashboard/districts"],
     queryFn: () =>
@@ -3483,6 +3510,47 @@ function CustomersTab() {
           </button>
         </div>
       </div>
+
+      {data && data.customers.length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          <div className="rounded-lg border border-slate-700 bg-slate-900 p-3">
+            <div className="text-2xl font-bold font-mono text-slate-200">
+              {stats.total.toLocaleString()}
+            </div>
+            <div className="text-xs text-slate-400 mt-1">Customers (logins)</div>
+          </div>
+          <div className="rounded-lg border border-emerald-800 bg-emerald-950/20 p-3">
+            <div className="text-2xl font-bold font-mono text-emerald-400">
+              {stats.paid.toLocaleString()}
+            </div>
+            <div className="text-xs text-slate-400 mt-1">Paid customers</div>
+          </div>
+          <div className="rounded-lg border border-slate-700 bg-slate-900 p-3">
+            <div className="text-2xl font-bold font-mono text-slate-300">
+              {stats.free.toLocaleString()}
+            </div>
+            <div className="text-xs text-slate-400 mt-1">Free customers</div>
+          </div>
+          <div className="rounded-lg border border-blue-800 bg-blue-950/20 p-3">
+            <div className="text-2xl font-bold font-mono text-blue-400">
+              {stats.uniqueOrgs.toLocaleString()}
+            </div>
+            <div className="text-xs text-slate-400 mt-1">
+              Organizations
+              <span className="block text-[10px] text-slate-600">unique districts, 1+ logins each</span>
+            </div>
+          </div>
+          <div className="rounded-lg border border-emerald-800/60 bg-emerald-950/10 p-3">
+            <div className="text-2xl font-bold font-mono text-emerald-300">
+              {stats.paidOrgs.toLocaleString()}
+            </div>
+            <div className="text-xs text-slate-400 mt-1">
+              Paid organizations
+              <span className="block text-[10px] text-slate-600">districts with 1+ paid login</span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showBulk && (
         <div className="rounded-lg border border-emerald-800/50 bg-emerald-950/10 p-5 space-y-4">
