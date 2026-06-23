@@ -1950,6 +1950,309 @@ router.post("/admin/customers", requireAdminToken, async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// POST /admin/bulk-import-customers — load a CSV of paying district contacts as
+// district_user accounts, all marked plan='pro' + active=true. Idempotent by
+// email (re-running updates in place). ROE rows are skipped; rows missing an
+// email or password are skipped and reported. District is matched by RCDTS
+// 9-digit prefix against districts.state_district_id (IL), falling back to a
+// district-name match.
+// ---------------------------------------------------------------------------
+
+const MAX_CSV_BYTES = 32 * 1024 * 1024; // 32 MB
+const uploadCsvBody = raw({ type: () => true, limit: MAX_CSV_BYTES });
+
+/** RFC4180-ish CSV parser: handles quoted fields, embedded commas/quotes, and
+ *  newlines inside quotes. Returns an array of string[] rows. */
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let field = "";
+  let row: string[] = [];
+  let inQuotes = false;
+  let i = 0;
+  // Strip a leading UTF-8 BOM if present.
+  if (text.charCodeAt(0) === 0xfeff) i = 1;
+  const pushField = () => {
+    row.push(field);
+    field = "";
+  };
+  const pushRow = () => {
+    pushField();
+    rows.push(row);
+    row = [];
+  };
+  for (; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += c;
+      }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ",") {
+      pushField();
+    } else if (c === "\n") {
+      pushRow();
+    } else if (c === "\r") {
+      // swallow; the following \n (or its absence) ends the row
+      if (text[i + 1] !== "\n") pushRow();
+    } else {
+      field += c;
+    }
+  }
+  // Flush a trailing field/row if the file doesn't end with a newline.
+  if (field.length > 0 || row.length > 0) pushRow();
+  return rows;
+}
+
+/** Run an async mapper over items with a bounded concurrency. */
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const idx = next++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, items.length) }, worker);
+  await Promise.all(workers);
+  return results;
+}
+
+interface SkippedRow {
+  row: number;
+  district: string;
+  email: string;
+  reason: string;
+}
+interface UnmatchedRow {
+  row: number;
+  district: string;
+  email: string;
+  rcdts: string;
+}
+
+async function handleBulkImportCustomers(req: Request, res: Response): Promise<void> {
+  const buf = req.body as Buffer;
+  if (!Buffer.isBuffer(buf) || buf.length === 0) {
+    res.status(400).json({ error: "No CSV file received" });
+    return;
+  }
+
+  const grid = parseCsv(buf.toString("utf8"));
+  if (grid.length < 2) {
+    res.status(400).json({ error: "CSV has no data rows" });
+    return;
+  }
+
+  // Map header names (case-insensitive, trimmed) to column indexes.
+  const header = grid[0].map((h) => h.trim().toLowerCase());
+  const col = (name: string) => header.indexOf(name.toLowerCase());
+  const iEntity = col("Entity Type");
+  const iDistrict = col("District");
+  const iRcdts = col("RCDTS");
+  const iName = col("Administrator");
+  const iEmail = col("Email");
+  const iPassword = col("Password");
+  if (iEntity < 0 || iEmail < 0 || iPassword < 0) {
+    res.status(400).json({
+      error:
+        "CSV is missing required columns. Expected at least 'Entity Type', 'Email', and 'Password'.",
+    });
+    return;
+  }
+
+  // Load all IL districts once for in-memory matching.
+  const distRows = await db.execute(sql`
+    SELECT id, name, state_district_id FROM districts WHERE state = 'IL'
+  `);
+  const byPrefix = new Map<string, number>();
+  const byName = new Map<string, number>();
+  for (const r of distRows.rows as {
+    id: number | string;
+    name: string;
+    state_district_id: string;
+  }[]) {
+    const id = Number(r.id);
+    const sid = String(r.state_district_id ?? "");
+    if (sid.length >= 9) {
+      const prefix = sid.slice(0, 9);
+      if (!byPrefix.has(prefix)) byPrefix.set(prefix, id);
+    }
+    const nameKey = (r.name ?? "").trim().toLowerCase();
+    if (nameKey && !byName.has(nameKey)) byName.set(nameKey, id);
+  }
+
+  const ALLOWED_ENTITY = new Set(["district", "district (add'l contact)"]);
+
+  // First pass: validate rows and resolve districts (no hashing yet).
+  interface Candidate {
+    rowNum: number;
+    district: string;
+    email: string;
+    name: string;
+    password: string;
+    districtId: number | null;
+    rcdts: string;
+  }
+  const candidates: Candidate[] = [];
+  const skipped: SkippedRow[] = [];
+  const unmatchedDistrict: UnmatchedRow[] = [];
+
+  for (let r = 1; r < grid.length; r++) {
+    const cells = grid[r];
+    // Skip completely blank lines.
+    if (cells.every((c) => c.trim() === "")) continue;
+    const rowNum = r + 1; // 1-based, accounting for header
+    const entity = (cells[iEntity] ?? "").trim().toLowerCase();
+    const districtName = iDistrict >= 0 ? (cells[iDistrict] ?? "").trim() : "";
+    const email = (cells[iEmail] ?? "").trim().toLowerCase();
+    const password = cells[iPassword] ?? "";
+    const rcdts = iRcdts >= 0 ? (cells[iRcdts] ?? "").trim() : "";
+    const name = iName >= 0 ? (cells[iName] ?? "").trim() : "";
+
+    if (!ALLOWED_ENTITY.has(entity)) {
+      skipped.push({
+        row: rowNum,
+        district: districtName,
+        email,
+        reason: entity ? `entity type "${cells[iEntity].trim()}"` : "missing entity type",
+      });
+      continue;
+    }
+    if (!email || !email.includes("@")) {
+      skipped.push({ row: rowNum, district: districtName, email, reason: "no email" });
+      continue;
+    }
+    if (!password.trim()) {
+      skipped.push({ row: rowNum, district: districtName, email, reason: "no password" });
+      continue;
+    }
+
+    // Resolve district: RCDTS 9-digit prefix first, then district-name match.
+    let districtId: number | null = null;
+    if (rcdts) {
+      const padded = rcdts.length < 9 ? rcdts.padStart(9, "0") : rcdts.slice(0, 9);
+      districtId = byPrefix.get(padded) ?? byPrefix.get(rcdts) ?? null;
+    }
+    if (districtId == null && districtName) {
+      districtId = byName.get(districtName.toLowerCase()) ?? null;
+    }
+
+    candidates.push({
+      rowNum,
+      district: districtName,
+      email,
+      name: name || email.split("@")[0],
+      password,
+      districtId,
+      rcdts,
+    });
+  }
+
+  // Hash all passwords with bounded concurrency (bcrypt releases the event
+  // loop via the thread pool, so a few in flight at once is much faster than
+  // serial while staying well-behaved).
+  const bcrypt = await import("bcrypt");
+  const hashes = await mapLimit(candidates, 8, (c) => bcrypt.hash(c.password, 12));
+
+  let created = 0;
+  let updated = 0;
+  for (let k = 0; k < candidates.length; k++) {
+    const c = candidates[k];
+    const hash = hashes[k];
+    try {
+      const result = await db.execute(sql`
+        INSERT INTO users (name, email, role, plan, active, district_id, password_hash)
+        VALUES (${c.name}, ${c.email}, 'district_user', 'pro', true, ${c.districtId}, ${hash})
+        ON CONFLICT (email) DO UPDATE SET
+          name = EXCLUDED.name,
+          district_id = COALESCE(EXCLUDED.district_id, users.district_id),
+          plan = 'pro',
+          active = true,
+          password_hash = EXCLUDED.password_hash,
+          failed_login_count = 0,
+          lockout_until = NULL
+        WHERE users.role = 'district_user'
+        RETURNING (xmax = 0) AS inserted
+      `);
+      if (result.rows.length === 0) {
+        // Conflict on a non-district_user (e.g. an admin) — left untouched.
+        skipped.push({
+          row: c.rowNum,
+          district: c.district,
+          email: c.email,
+          reason: "email belongs to a non-customer account",
+        });
+        continue;
+      }
+      const inserted = (result.rows[0] as { inserted: boolean }).inserted;
+      if (inserted) created++;
+      else updated++;
+      // Only report rows that were actually imported but couldn't be linked to
+      // a district — so the admin can fix exactly those accounts.
+      if (c.districtId == null) {
+        unmatchedDistrict.push({
+          row: c.rowNum,
+          district: c.district,
+          email: c.email,
+          rcdts: c.rcdts,
+        });
+      }
+    } catch (err) {
+      console.error(`Bulk import row ${c.rowNum} (${c.email}) failed:`, err);
+      skipped.push({
+        row: c.rowNum,
+        district: c.district,
+        email: c.email,
+        reason: "database error",
+      });
+    }
+  }
+
+  res.json({
+    ok: true,
+    total: grid.length - 1,
+    created,
+    updated,
+    skippedCount: skipped.length,
+    unmatchedCount: unmatchedDistrict.length,
+    skipped,
+    unmatchedDistrict,
+  });
+}
+
+router.post("/admin/bulk-import-customers", requireAdminToken, (req, res) => {
+  uploadCsvBody(req, res, (err?: unknown) => {
+    if (err) {
+      const status =
+        (err as { status?: number }).status ?? (err as { statusCode?: number }).statusCode;
+      if (status === 413) {
+        res.status(413).json({ error: "CSV too large (max 32 MB)" });
+      } else {
+        res.status(400).json({ error: "Failed to read upload body" });
+      }
+      return;
+    }
+    handleBulkImportCustomers(req, res).catch((e) => {
+      console.error("Bulk import error:", e);
+      if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
+    });
+  });
+});
+
 // PATCH /admin/customers/:id — update name, district, or active status
 router.patch("/admin/customers/:id", requireAdminToken, async (req, res) => {
   const id = parseInt(String(req.params.id), 10);

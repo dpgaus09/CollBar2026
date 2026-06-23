@@ -3059,6 +3059,31 @@ interface District {
   county: string | null;
 }
 
+interface BulkImportSkippedRow {
+  row: number;
+  district: string;
+  email: string;
+  reason: string;
+}
+
+interface BulkImportUnmatchedRow {
+  row: number;
+  district: string;
+  email: string;
+  rcdts: string;
+}
+
+interface BulkImportResult {
+  ok: boolean;
+  total: number;
+  created: number;
+  updated: number;
+  skippedCount: number;
+  unmatchedCount: number;
+  skipped: BulkImportSkippedRow[];
+  unmatchedDistrict: BulkImportUnmatchedRow[];
+}
+
 function CustomersTab() {
   const { data: session } = useAdminSession();
   const isAuthenticated = session?.authenticated === true;
@@ -3111,6 +3136,46 @@ function CustomersTab() {
   const [editDistrictSearch, setEditDistrictSearch] = useState("");
   const [districtSaving, setDistrictSaving] = useState(false);
   const [districtError, setDistrictError] = useState("");
+
+  // --- Bulk import ---
+  const [showBulk, setShowBulk] = useState(false);
+  const [bulkFile, setBulkFile] = useState<File | null>(null);
+  const [bulkImporting, setBulkImporting] = useState(false);
+  const [bulkError, setBulkError] = useState("");
+  const [bulkResult, setBulkResult] = useState<BulkImportResult | null>(null);
+  const bulkInputRef = useRef<HTMLInputElement>(null);
+
+  const handleBulkImport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBulkError("");
+    setBulkResult(null);
+    if (!bulkFile) {
+      setBulkError("Choose a CSV file to import.");
+      return;
+    }
+    setBulkImporting(true);
+    try {
+      const r = await fetch(apiUrl("/api/admin/bulk-import-customers"), {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "text/csv" },
+        body: bulkFile,
+      });
+      const body = (await r.json()) as BulkImportResult & { error?: string };
+      if (!r.ok || !body.ok) {
+        setBulkError(body.error ?? `Import failed (HTTP ${r.status})`);
+      } else {
+        setBulkResult(body);
+        setBulkFile(null);
+        if (bulkInputRef.current) bulkInputRef.current.value = "";
+        qc.invalidateQueries({ queryKey: ["/api/admin/customers"] });
+      }
+    } catch {
+      setBulkError("Network error during import.");
+    } finally {
+      setBulkImporting(false);
+    }
+  };
 
   const handleSetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -3256,13 +3321,170 @@ function CustomersTab() {
             Manage customer accounts. Set a password when adding, or use "Change" to reset later.
           </p>
         </div>
-        <button
-          onClick={() => setShowAdd((v) => !v)}
-          className="text-xs px-3 py-1.5 rounded border border-slate-600 text-slate-300 hover:border-blue-500 hover:text-blue-300 transition-colors"
-        >
-          {showAdd ? "Cancel" : "+ Add customer"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowBulk((v) => !v)}
+            className="text-xs px-3 py-1.5 rounded border border-slate-600 text-slate-300 hover:border-emerald-500 hover:text-emerald-300 transition-colors"
+          >
+            {showBulk ? "Cancel import" : "Bulk import customers"}
+          </button>
+          <button
+            onClick={() => setShowAdd((v) => !v)}
+            className="text-xs px-3 py-1.5 rounded border border-slate-600 text-slate-300 hover:border-blue-500 hover:text-blue-300 transition-colors"
+          >
+            {showAdd ? "Cancel" : "+ Add customer"}
+          </button>
+        </div>
       </div>
+
+      {showBulk && (
+        <div className="rounded-lg border border-emerald-800/50 bg-emerald-950/10 p-5 space-y-4">
+          <div className="space-y-1.5">
+            <h3 className="text-xs font-semibold text-emerald-300 uppercase tracking-widest">
+              Bulk import customers
+            </h3>
+            <p className="text-xs text-slate-500 leading-relaxed">
+              Upload the district contacts CSV. Every <span className="text-slate-300">District</span>{" "}
+              and <span className="text-slate-300">District (add&apos;l contact)</span> row is created
+              or updated as a paid (<span className="text-slate-300">Pro</span>), active account using
+              the email + password from the sheet, linked to its district by RCDTS. ROE rows and rows
+              missing an email or password are skipped and listed below. Re-uploading the same file is
+              safe — existing people are updated in place.
+            </p>
+          </div>
+
+          <form onSubmit={handleBulkImport} className="space-y-3">
+            <input
+              ref={bulkInputRef}
+              type="file"
+              accept=".csv,text/csv"
+              onChange={(e) => {
+                setBulkFile(e.target.files?.[0] ?? null);
+                setBulkResult(null);
+                setBulkError("");
+              }}
+              className="block w-full text-xs text-slate-300 file:mr-3 file:py-2 file:px-4 file:rounded file:border-0 file:text-xs file:font-medium file:bg-emerald-800 file:text-emerald-100 hover:file:bg-emerald-700 file:cursor-pointer"
+            />
+            {bulkFile && (
+              <p className="text-[11px] text-slate-500">
+                {bulkFile.name} · {(bulkFile.size / 1024).toFixed(0)} KB
+              </p>
+            )}
+            {bulkError && (
+              <div className="rounded border border-red-800 bg-red-950/30 px-3 py-2 text-xs text-red-300">
+                {bulkError}
+              </div>
+            )}
+            <button
+              type="submit"
+              disabled={bulkImporting || !bulkFile}
+              className="text-xs px-4 py-2 rounded bg-emerald-700 hover:bg-emerald-600 text-white disabled:opacity-50 transition-colors"
+            >
+              {bulkImporting ? "Importing… (this can take 1–2 minutes)" : "Import CSV"}
+            </button>
+            {bulkImporting && (
+              <p className="text-[11px] text-slate-500 animate-pulse">
+                Hashing passwords and writing accounts — please keep this tab open.
+              </p>
+            )}
+          </form>
+
+          {bulkResult && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="rounded-lg border border-emerald-800 bg-emerald-950/20 p-3">
+                  <div className="text-2xl font-bold font-mono text-emerald-400">
+                    {bulkResult.created.toLocaleString()}
+                  </div>
+                  <div className="text-xs text-slate-400 mt-1">Accounts created</div>
+                </div>
+                <div className="rounded-lg border border-blue-800 bg-blue-950/20 p-3">
+                  <div className="text-2xl font-bold font-mono text-blue-400">
+                    {bulkResult.updated.toLocaleString()}
+                  </div>
+                  <div className="text-xs text-slate-400 mt-1">Accounts updated</div>
+                </div>
+                <div className="rounded-lg border border-amber-800 bg-amber-950/20 p-3">
+                  <div className="text-2xl font-bold font-mono text-amber-400">
+                    {bulkResult.skippedCount.toLocaleString()}
+                  </div>
+                  <div className="text-xs text-slate-400 mt-1">Rows skipped</div>
+                </div>
+                <div className="rounded-lg border border-slate-700 bg-slate-900 p-3">
+                  <div className="text-2xl font-bold font-mono text-slate-300">
+                    {bulkResult.unmatchedCount.toLocaleString()}
+                  </div>
+                  <div className="text-xs text-slate-400 mt-1">No district matched</div>
+                </div>
+              </div>
+
+              {bulkResult.skipped.length > 0 && (
+                <div className="space-y-1.5">
+                  <h4 className="text-xs font-semibold text-amber-300">
+                    Skipped rows ({bulkResult.skipped.length})
+                  </h4>
+                  <div className="max-h-56 overflow-auto rounded border border-slate-800">
+                    <table className="w-full text-[11px]">
+                      <thead className="sticky top-0 bg-slate-900 text-slate-500">
+                        <tr>
+                          <th className="text-left px-2 py-1 font-medium">Row</th>
+                          <th className="text-left px-2 py-1 font-medium">District</th>
+                          <th className="text-left px-2 py-1 font-medium">Email</th>
+                          <th className="text-left px-2 py-1 font-medium">Reason</th>
+                        </tr>
+                      </thead>
+                      <tbody className="text-slate-400">
+                        {bulkResult.skipped.map((s) => (
+                          <tr key={`s-${s.row}`} className="border-t border-slate-800/60">
+                            <td className="px-2 py-1 font-mono">{s.row}</td>
+                            <td className="px-2 py-1">{s.district || "—"}</td>
+                            <td className="px-2 py-1 font-mono">{s.email || "—"}</td>
+                            <td className="px-2 py-1">{s.reason}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {bulkResult.unmatchedDistrict.length > 0 && (
+                <div className="space-y-1.5">
+                  <h4 className="text-xs font-semibold text-slate-300">
+                    Imported but no district matched ({bulkResult.unmatchedDistrict.length})
+                  </h4>
+                  <p className="text-[11px] text-slate-500">
+                    These accounts were created/updated with full access but have no district linked —
+                    set their district manually below.
+                  </p>
+                  <div className="max-h-56 overflow-auto rounded border border-slate-800">
+                    <table className="w-full text-[11px]">
+                      <thead className="sticky top-0 bg-slate-900 text-slate-500">
+                        <tr>
+                          <th className="text-left px-2 py-1 font-medium">Row</th>
+                          <th className="text-left px-2 py-1 font-medium">District (sheet)</th>
+                          <th className="text-left px-2 py-1 font-medium">Email</th>
+                          <th className="text-left px-2 py-1 font-medium">RCDTS</th>
+                        </tr>
+                      </thead>
+                      <tbody className="text-slate-400">
+                        {bulkResult.unmatchedDistrict.map((u) => (
+                          <tr key={`u-${u.row}`} className="border-t border-slate-800/60">
+                            <td className="px-2 py-1 font-mono">{u.row}</td>
+                            <td className="px-2 py-1">{u.district || "—"}</td>
+                            <td className="px-2 py-1 font-mono">{u.email || "—"}</td>
+                            <td className="px-2 py-1 font-mono">{u.rcdts || "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {showAdd && (
         <form
