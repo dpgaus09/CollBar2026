@@ -1,0 +1,32 @@
+Act as an expert Full-Stack Software Engineer and Digital Accessibility Specialist. I need you to implement, test, and enforce WCAG 2.2 Level AA compliance across my SaaS application. 
+
+Please systematically review and refactor our frontend codebase, component architecture, and user flows to strictly align with the following WCAG 2.2 directives:
+
+1. KEYBOARD NAVIGATION & FOCUS APPEARANCE (Criteria 2.4.11 / 2.4.12 / 2.4.13)
+- Ensure all interactive elements (buttons, inputs, links, dropdowns) are focusable using standard keyboard controls (Tab, Shift+Tab, Enter, Space, Arrow keys).
+- Never suppress focus outlines (do not use `outline: none` without a visible fallback).
+- Implement highly visible focus indicators with a minimum 3:1 contrast ratio against the background and adjacent colors.
+- Ensure the focus indicator is not hidden or obscured by sticky headers, footers, or overlays.
+- Add a functional "Skip to Main Content" link at the very top of the DOM.
+
+2. COGNITIVE ACCESSIBILITY & LOGINS (Criteria 3.3.7 / 3.3.8 / 3.3.9)
+- Redundant Entry: For multi-step forms (like checkout, onboarding, or multi-field settings), ensure data previously entered by the user autofills or is available for selection. Do not force them to re-type it.
+- Accessible Authentication: Ensure login and registration flows do not rely on cognitive function tests (e.g., solving math puzzles, memorizing strings, or retyping dynamic CAPTCHAs). If multi-factor authentication (MFA) is used, ensure copying/pasting authorization codes is completely supported.
+
+3. POINTER & TOUCH INTERACTIONS (Criteria 2.5.7 / 2.5.8)
+- Target Size (Minimum): Ensure all interactive touch targets (buttons, icons, menu items) are at least 24x24 CSS pixels, or have enough surrounding spacing to equal a 24px diameter circle.
+- Dragging Movements: If the app uses drag-and-drop features (like Kanban boards, reordering lists, or sliders), provide a single-pointer alternative click/tap interface (e.g., up/down arrow buttons or move menus).
+
+4. CONSISTENT HELP & UI PATTERNS (Criterion 3.2.6)
+- If the application provides help mechanisms (e.g., a "Contact Support" button, a help desk link, or a chatbot widget), ensure they are located in the exact same relative visual and DOM order across all pages.
+
+5. GENERAL PERCEIVABILITY & ROBUSTNESS (Core WCAG Foundations)
+- Ensure all images and icon buttons have meaningful alt text or explicit `aria-label` attributes.
+- Maintain a minimum 4.5:1 text color contrast ratio for standard text and 3:1 for large text.
+- Use explicit semantic HTML tags (`<main>`, `<nav>`, `<header>`, `<button>`, `<input>`) instead of generic nested generic divs.
+- Manage focus trapping explicitly within modal dialogs, slide-out panels, and dropdown menus so focus cannot escape into the background page while open.
+
+DEVELOPMENT WORKFLOW RULES:
+1. Explain your plan before modifying files.
+2. If you introduce a library for accessibility or focus management, use reliable, standard options (e.g., Radix UI primitives, React Aria, or Headless UI if applicable).
+3. Do not break existing application state, backend APIs, or visual themes.
