@@ -3084,6 +3084,91 @@ interface BulkImportResult {
   unmatchedDistrict: BulkImportUnmatchedRow[];
 }
 
+// Max rows per request. The import is sent in sequential batches so each
+// request finishes well within the deployment's request timeout — a single
+// large upload (CPU-bound bcrypt hashing) would otherwise be aborted by the
+// proxy. This bounds the bcrypt work (and thus the duration) per request.
+const BULK_BATCH_SIZE = 100;
+// Max serialized bytes per request body. The API server's global json() parser
+// has a 100kb default limit; staying under it keeps wide/long sheets from being
+// rejected with a 413 before the route handler runs. Whichever cap (rows or
+// bytes) is reached first ends the batch.
+const BULK_BATCH_MAX_BYTES = 90_000;
+
+// Splits data rows into batches bounded by both BULK_BATCH_SIZE (rows) and
+// BULK_BATCH_MAX_BYTES (serialized size). Each batch records the 0-based index
+// of its first row so the caller can derive the spreadsheet line number.
+function buildBulkBatches(
+  header: string[],
+  dataRows: string[][],
+): { rows: string[][]; startIndex: number }[] {
+  const envelope = JSON.stringify(header).length + 64; // {header, rows:[], startRow}
+  const batches: { rows: string[][]; startIndex: number }[] = [];
+  let i = 0;
+  while (i < dataRows.length) {
+    const startIndex = i;
+    const rows: string[][] = [];
+    let bytes = envelope;
+    while (i < dataRows.length && rows.length < BULK_BATCH_SIZE) {
+      const rowBytes = JSON.stringify(dataRows[i]).length + 1;
+      // Always include at least one row, even if a single row is oversized.
+      if (rows.length > 0 && bytes + rowBytes > BULK_BATCH_MAX_BYTES) break;
+      bytes += rowBytes;
+      rows.push(dataRows[i]);
+      i++;
+    }
+    batches.push({ rows, startIndex });
+  }
+  return batches;
+}
+
+/** RFC4180-ish CSV parser mirroring the server: handles quoted fields, embedded
+ *  commas/quotes, and newlines inside quotes. Returns an array of string[] rows. */
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let field = "";
+  let row: string[] = [];
+  let inQuotes = false;
+  let i = 0;
+  if (text.charCodeAt(0) === 0xfeff) i = 1; // strip leading UTF-8 BOM
+  const pushField = () => {
+    row.push(field);
+    field = "";
+  };
+  const pushRow = () => {
+    pushField();
+    rows.push(row);
+    row = [];
+  };
+  for (; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += c;
+      }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ",") {
+      pushField();
+    } else if (c === "\n") {
+      pushRow();
+    } else if (c === "\r") {
+      if (text[i + 1] !== "\n") pushRow();
+    } else {
+      field += c;
+    }
+  }
+  if (field.length > 0 || row.length > 0) pushRow();
+  return rows;
+}
+
 function CustomersTab() {
   const { data: session } = useAdminSession();
   const isAuthenticated = session?.authenticated === true;
@@ -3143,37 +3228,99 @@ function CustomersTab() {
   const [bulkImporting, setBulkImporting] = useState(false);
   const [bulkError, setBulkError] = useState("");
   const [bulkResult, setBulkResult] = useState<BulkImportResult | null>(null);
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
   const bulkInputRef = useRef<HTMLInputElement>(null);
 
   const handleBulkImport = async (e: React.FormEvent) => {
     e.preventDefault();
     setBulkError("");
     setBulkResult(null);
+    setBulkProgress(null);
     if (!bulkFile) {
       setBulkError("Choose a CSV file to import.");
       return;
     }
     setBulkImporting(true);
     try {
-      const r = await fetch(apiUrl("/api/admin/bulk-import-customers"), {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "text/csv" },
-        body: bulkFile,
-      });
-      const body = (await r.json()) as BulkImportResult & { error?: string };
-      if (!r.ok || !body.ok) {
-        setBulkError(body.error ?? `Import failed (HTTP ${r.status})`);
-      } else {
-        setBulkResult(body);
-        setBulkFile(null);
-        if (bulkInputRef.current) bulkInputRef.current.value = "";
-        qc.invalidateQueries({ queryKey: ["/api/admin/customers"] });
+      const grid = parseCsv(await bulkFile.text());
+      if (grid.length < 2) {
+        setBulkError("CSV has no data rows.");
+        return;
       }
+      const header = grid[0];
+      const dataRows = grid.slice(1);
+      const total = dataRows.length;
+
+      // Accumulate results across batches into the shape the results panel uses.
+      const agg: BulkImportResult = {
+        ok: true,
+        total,
+        created: 0,
+        updated: 0,
+        skippedCount: 0,
+        unmatchedCount: 0,
+        skipped: [],
+        unmatchedDistrict: [],
+      };
+      setBulkProgress({ done: 0, total });
+
+      const batches = buildBulkBatches(header, dataRows);
+      let processed = 0; // rows fully handled by completed batches
+      for (const { rows, startIndex } of batches) {
+        const r = await fetch(apiUrl("/api/admin/bulk-import-customers"), {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          // startRow is the 1-based spreadsheet line of the first row in this
+          // batch (header is line 1), so reported row numbers match the file.
+          body: JSON.stringify({ header, rows, startRow: startIndex + 2 }),
+        });
+        // Parse defensively: a 413/502/504 from the proxy or body parser is not
+        // guaranteed to be JSON, and an unguarded r.json() would throw and hide
+        // the partial-progress message below.
+        const raw = await r.text();
+        let body: {
+          ok?: boolean;
+          error?: string;
+          created?: number;
+          updated?: number;
+          skipped?: BulkImportSkippedRow[];
+          unmatchedDistrict?: BulkImportUnmatchedRow[];
+        } = {};
+        try {
+          body = raw ? JSON.parse(raw) : {};
+        } catch {
+          body = {};
+        }
+        if (!r.ok || !body.ok) {
+          agg.skippedCount = agg.skipped.length;
+          agg.unmatchedCount = agg.unmatchedDistrict.length;
+          if (agg.created + agg.updated + agg.skipped.length > 0) setBulkResult(agg);
+          setBulkError(
+            `${body.error ?? `Import failed (HTTP ${r.status})`} — ` +
+              `${processed.toLocaleString()} of ${total.toLocaleString()} processed before stopping.`,
+          );
+          return;
+        }
+        agg.created += body.created ?? 0;
+        agg.updated += body.updated ?? 0;
+        if (body.skipped?.length) agg.skipped.push(...body.skipped);
+        if (body.unmatchedDistrict?.length) agg.unmatchedDistrict.push(...body.unmatchedDistrict);
+        processed += rows.length;
+        setBulkProgress({ done: processed, total });
+      }
+
+      agg.skippedCount = agg.skipped.length;
+      agg.unmatchedCount = agg.unmatchedDistrict.length;
+      setBulkResult(agg);
+      setBulkFile(null);
+      if (bulkInputRef.current) bulkInputRef.current.value = "";
+      qc.invalidateQueries({ queryKey: ["/api/admin/customers"] });
     } catch {
       setBulkError("Network error during import.");
     } finally {
       setBulkImporting(false);
+      setBulkProgress(null);
     }
   };
 
@@ -3380,11 +3527,18 @@ function CustomersTab() {
               disabled={bulkImporting || !bulkFile}
               className="text-xs px-4 py-2 rounded bg-emerald-700 hover:bg-emerald-600 text-white disabled:opacity-50 transition-colors"
             >
-              {bulkImporting ? "Importing… (this can take 1–2 minutes)" : "Import CSV"}
+              {bulkImporting
+                ? bulkProgress
+                  ? `Importing… ${bulkProgress.done.toLocaleString()} / ${bulkProgress.total.toLocaleString()}`
+                  : "Preparing…"
+                : "Import CSV"}
             </button>
             {bulkImporting && (
               <p className="text-[11px] text-slate-500 animate-pulse">
-                Hashing passwords and writing accounts — please keep this tab open.
+                Importing in batches — please keep this tab open.
+                {bulkProgress
+                  ? ` ${bulkProgress.done.toLocaleString()} of ${bulkProgress.total.toLocaleString()} rows processed.`
+                  : ""}
               </p>
             )}
           </form>

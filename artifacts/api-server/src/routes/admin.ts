@@ -1,4 +1,4 @@
-import { Router, raw, type IRouter, type Request, type Response, type NextFunction } from "express";
+import { Router, raw, json, type IRouter, type Request, type Response, type NextFunction } from "express";
 import { readFileSync, existsSync, openSync, writeFileSync } from "fs";
 import { mkdirSync } from "fs";
 import { join, dirname, resolve } from "path";
@@ -1961,6 +1961,7 @@ router.post("/admin/customers", requireAdminToken, async (req, res) => {
 
 const MAX_CSV_BYTES = 32 * 1024 * 1024; // 32 MB
 const uploadCsvBody = raw({ type: () => true, limit: MAX_CSV_BYTES });
+const uploadJsonBody = json({ limit: MAX_CSV_BYTES });
 
 /** RFC4180-ish CSV parser: handles quoted fields, embedded commas/quotes, and
  *  newlines inside quotes. Returns an array of string[] rows. */
@@ -2044,37 +2045,41 @@ interface UnmatchedRow {
   rcdts: string;
 }
 
-async function handleBulkImportCustomers(req: Request, res: Response): Promise<void> {
-  const buf = req.body as Buffer;
-  if (!Buffer.isBuffer(buf) || buf.length === 0) {
-    res.status(400).json({ error: "No CSV file received" });
-    return;
-  }
+const ALLOWED_ENTITY = new Set(["district", "district (add'l contact)"]);
 
-  const grid = parseCsv(buf.toString("utf8"));
-  if (grid.length < 2) {
-    res.status(400).json({ error: "CSV has no data rows" });
-    return;
-  }
+interface ColumnMap {
+  iEntity: number;
+  iDistrict: number;
+  iRcdts: number;
+  iName: number;
+  iEmail: number;
+  iPassword: number;
+}
 
-  // Map header names (case-insensitive, trimmed) to column indexes.
-  const header = grid[0].map((h) => h.trim().toLowerCase());
+/** Map header names (case-insensitive, trimmed) to column indexes. Returns null
+ *  if a required column ('Entity Type', 'Email', 'Password') is missing. */
+function mapColumns(headerRow: string[]): ColumnMap | null {
+  const header = headerRow.map((h) => String(h ?? "").trim().toLowerCase());
   const col = (name: string) => header.indexOf(name.toLowerCase());
-  const iEntity = col("Entity Type");
-  const iDistrict = col("District");
-  const iRcdts = col("RCDTS");
-  const iName = col("Administrator");
-  const iEmail = col("Email");
-  const iPassword = col("Password");
-  if (iEntity < 0 || iEmail < 0 || iPassword < 0) {
-    res.status(400).json({
-      error:
-        "CSV is missing required columns. Expected at least 'Entity Type', 'Email', and 'Password'.",
-    });
-    return;
-  }
+  const map: ColumnMap = {
+    iEntity: col("Entity Type"),
+    iDistrict: col("District"),
+    iRcdts: col("RCDTS"),
+    iName: col("Administrator"),
+    iEmail: col("Email"),
+    iPassword: col("Password"),
+  };
+  if (map.iEntity < 0 || map.iEmail < 0 || map.iPassword < 0) return null;
+  return map;
+}
 
-  // Load all IL districts once for in-memory matching.
+interface DistrictLookups {
+  byPrefix: Map<string, number>;
+  byName: Map<string, number>;
+}
+
+/** Load all IL districts once for in-memory matching (RCDTS prefix + name). */
+async function loadDistrictLookups(): Promise<DistrictLookups> {
   const distRows = await db.execute(sql`
     SELECT id, name, state_district_id FROM districts WHERE state = 'IL'
   `);
@@ -2094,10 +2099,30 @@ async function handleBulkImportCustomers(req: Request, res: Response): Promise<v
     const nameKey = (r.name ?? "").trim().toLowerCase();
     if (nameKey && !byName.has(nameKey)) byName.set(nameKey, id);
   }
+  return { byPrefix, byName };
+}
 
-  const ALLOWED_ENTITY = new Set(["district", "district (add'l contact)"]);
+interface ProcessResult {
+  created: number;
+  updated: number;
+  skipped: SkippedRow[];
+  unmatchedDistrict: UnmatchedRow[];
+}
 
-  // First pass: validate rows and resolve districts (no hashing yet).
+/** Validate, district-match, hash, and upsert a set of CSV data rows. `startLine`
+ *  is the 1-based spreadsheet line number of the first row in `dataRows` (the
+ *  header is line 1, so the first data row is line 2). Processing is stateless so
+ *  a large import can be split into batches that each finish within the
+ *  deployment's request timeout. */
+async function processDataRows(
+  cols: ColumnMap,
+  dataRows: string[][],
+  startLine: number,
+  lookups: DistrictLookups,
+): Promise<ProcessResult> {
+  const { iEntity, iDistrict, iRcdts, iName, iEmail, iPassword } = cols;
+  const { byPrefix, byName } = lookups;
+
   interface Candidate {
     rowNum: number;
     district: string;
@@ -2111,24 +2136,24 @@ async function handleBulkImportCustomers(req: Request, res: Response): Promise<v
   const skipped: SkippedRow[] = [];
   const unmatchedDistrict: UnmatchedRow[] = [];
 
-  for (let r = 1; r < grid.length; r++) {
-    const cells = grid[r];
+  for (let j = 0; j < dataRows.length; j++) {
+    const cells = dataRows[j] ?? [];
     // Skip completely blank lines.
-    if (cells.every((c) => c.trim() === "")) continue;
-    const rowNum = r + 1; // 1-based, accounting for header
-    const entity = (cells[iEntity] ?? "").trim().toLowerCase();
-    const districtName = iDistrict >= 0 ? (cells[iDistrict] ?? "").trim() : "";
-    const email = (cells[iEmail] ?? "").trim().toLowerCase();
-    const password = cells[iPassword] ?? "";
-    const rcdts = iRcdts >= 0 ? (cells[iRcdts] ?? "").trim() : "";
-    const name = iName >= 0 ? (cells[iName] ?? "").trim() : "";
+    if (cells.every((c) => String(c ?? "").trim() === "")) continue;
+    const rowNum = startLine + j; // 1-based spreadsheet line number
+    const entity = String(cells[iEntity] ?? "").trim().toLowerCase();
+    const districtName = iDistrict >= 0 ? String(cells[iDistrict] ?? "").trim() : "";
+    const email = String(cells[iEmail] ?? "").trim().toLowerCase();
+    const password = String(cells[iPassword] ?? "");
+    const rcdts = iRcdts >= 0 ? String(cells[iRcdts] ?? "").trim() : "";
+    const name = iName >= 0 ? String(cells[iName] ?? "").trim() : "";
 
     if (!ALLOWED_ENTITY.has(entity)) {
       skipped.push({
         row: rowNum,
         district: districtName,
         email,
-        reason: entity ? `entity type "${cells[iEntity].trim()}"` : "missing entity type",
+        reason: entity ? `entity type "${entity}"` : "missing entity type",
       });
       continue;
     }
@@ -2222,25 +2247,96 @@ async function handleBulkImportCustomers(req: Request, res: Response): Promise<v
     }
   }
 
+  return { created, updated, skipped, unmatchedDistrict };
+}
+
+async function handleBulkImportCustomers(req: Request, res: Response): Promise<void> {
+  const ct = String(req.headers["content-type"] || "");
+
+  // Batch mode: the client parses the CSV and POSTs JSON batches of rows so each
+  // request finishes well within the deployment's request timeout. Hashing is
+  // CPU-bound (bcrypt), so a single huge upload can exceed the proxy timeout and
+  // be aborted mid-flight.
+  if (ct.includes("application/json")) {
+    const payload = (req.body ?? {}) as {
+      header?: unknown;
+      rows?: unknown;
+      startRow?: unknown;
+    };
+    if (!Array.isArray(payload.header) || !Array.isArray(payload.rows)) {
+      res.status(400).json({ error: "Batch must include 'header' and 'rows' arrays" });
+      return;
+    }
+    const cols = mapColumns(payload.header as string[]);
+    if (!cols) {
+      res.status(400).json({
+        error:
+          "CSV is missing required columns. Expected at least 'Entity Type', 'Email', and 'Password'.",
+      });
+      return;
+    }
+    const startRow =
+      typeof payload.startRow === "number" && payload.startRow >= 2 ? payload.startRow : 2;
+    const lookups = await loadDistrictLookups();
+    const result = await processDataRows(cols, payload.rows as string[][], startRow, lookups);
+    res.json({
+      ok: true,
+      processed: (payload.rows as string[][]).length,
+      created: result.created,
+      updated: result.updated,
+      skippedCount: result.skipped.length,
+      unmatchedCount: result.unmatchedDistrict.length,
+      skipped: result.skipped,
+      unmatchedDistrict: result.unmatchedDistrict,
+    });
+    return;
+  }
+
+  // Legacy single-shot mode: raw CSV body (kept for backwards compatibility and
+  // small files).
+  const buf = req.body as Buffer;
+  if (!Buffer.isBuffer(buf) || buf.length === 0) {
+    res.status(400).json({ error: "No CSV file received" });
+    return;
+  }
+  const grid = parseCsv(buf.toString("utf8"));
+  if (grid.length < 2) {
+    res.status(400).json({ error: "CSV has no data rows" });
+    return;
+  }
+  const cols = mapColumns(grid[0]);
+  if (!cols) {
+    res.status(400).json({
+      error:
+        "CSV is missing required columns. Expected at least 'Entity Type', 'Email', and 'Password'.",
+    });
+    return;
+  }
+  const lookups = await loadDistrictLookups();
+  const result = await processDataRows(cols, grid.slice(1), 2, lookups);
   res.json({
     ok: true,
     total: grid.length - 1,
-    created,
-    updated,
-    skippedCount: skipped.length,
-    unmatchedCount: unmatchedDistrict.length,
-    skipped,
-    unmatchedDistrict,
+    created: result.created,
+    updated: result.updated,
+    skippedCount: result.skipped.length,
+    unmatchedCount: result.unmatchedDistrict.length,
+    skipped: result.skipped,
+    unmatchedDistrict: result.unmatchedDistrict,
   });
 }
 
 router.post("/admin/bulk-import-customers", requireAdminToken, (req, res) => {
-  uploadCsvBody(req, res, (err?: unknown) => {
+  // JSON batches (the large-import path) parse as JSON; legacy single-shot CSV
+  // uploads parse as a raw buffer.
+  const ct = String(req.headers["content-type"] || "");
+  const parser = ct.includes("application/json") ? uploadJsonBody : uploadCsvBody;
+  parser(req, res, (err?: unknown) => {
     if (err) {
       const status =
         (err as { status?: number }).status ?? (err as { statusCode?: number }).statusCode;
       if (status === 413) {
-        res.status(413).json({ error: "CSV too large (max 32 MB)" });
+        res.status(413).json({ error: "Upload too large (max 32 MB per batch)" });
       } else {
         res.status(400).json({ error: "Failed to read upload body" });
       }
