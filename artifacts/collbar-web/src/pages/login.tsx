@@ -108,11 +108,16 @@ export default function LoginPage() {
           </button>
         </form>
 
-        <p className="text-center text-xs text-slate-600">
-          Contact{" "}
-          <span className="text-slate-500">david@collbar.io</span>{" "}
-          for access.
-        </p>
+        <div className="space-y-3 text-center">
+          <p className="text-xs leading-relaxed text-slate-400">
+            CollBar gives Illinois CSBOs, treasurers, and superintendents eleven
+            years of teacher settlement data and full multi-year CBA cost
+            modeling — so you bargain from precedent, not from memory.
+          </p>
+          <p className="text-xs text-slate-500">
+            Contact: E: hello@collbar.com&nbsp;&nbsp;P: (312) 768-8009
+          </p>
+        </div>
       </div>
     </main>
   );

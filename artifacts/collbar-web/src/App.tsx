@@ -50,6 +50,10 @@ function Home() {
             Sign In →
           </a>
         </div>
+        <p className="mx-auto mt-6 max-w-sm text-sm leading-relaxed text-slate-400">
+          Districts like yours settled their teacher contracts this spring. See
+          exactly what they paid.
+        </p>
       </div>
     </main>
   );
