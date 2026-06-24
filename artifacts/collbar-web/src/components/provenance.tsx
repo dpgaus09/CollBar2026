@@ -8,10 +8,18 @@ export interface ProvenanceValueProps {
   sourceUrl?: string | null;
   pageRef?: number | null;
   humanVerified?: boolean | null;
+  // Who confirmed the figure: "district" (the district vouched for it) or
+  // "internal" (CollBar staff). Drives the wording on the ✓ Verified badge.
+  verifiedBy?: "district" | "internal" | string | null;
   confidence?: string | number | null;
   retrievedAt?: string | null;
   className?: string;
 }
+
+// Below this confidence an AI read is treated as genuinely low-confidence and
+// stays visibly flagged for review. At or above it, an unverified read is
+// presented as a credible, sourced figure (no alarm styling).
+const LOW_CONFIDENCE_THRESHOLD = 0.5;
 
 export function ProvenanceValue({
   value,
@@ -19,6 +27,7 @@ export function ProvenanceValue({
   sourceUrl,
   pageRef,
   humanVerified,
+  verifiedBy,
   confidence,
   retrievedAt,
   className,
@@ -32,9 +41,22 @@ export function ProvenanceValue({
   const display =
     typeof value === "number" ? value.toLocaleString() : String(value);
   const unitDisplay = unit ? ` ${unit}` : "";
-  const isUnverified = !humanVerified;
+  const verified = !!humanVerified;
   const confNum = confidence != null ? parseFloat(String(confidence)) : null;
+  // Genuinely low-confidence reads stay flagged; everything else (high or
+  // unknown confidence) is presented as a credible, sourced figure.
+  const lowConfidence =
+    !verified && confNum != null && confNum < LOW_CONFIDENCE_THRESHOLD;
+  const confPct = confNum != null ? `${(confNum * 100).toFixed(0)}%` : null;
   const pdfLink = sourceHref(sourceUrl, pageRef);
+
+  const verifiedLabel = verified
+    ? verifiedBy === "district"
+      ? "✓ Verified by district"
+      : verifiedBy === "internal"
+      ? "✓ Verified by CollBar"
+      : "✓ Verified"
+    : null;
 
   const retrievedDisplay = retrievedAt
     ? new Date(retrievedAt).toLocaleDateString("en-US", {
@@ -56,18 +78,25 @@ export function ProvenanceValue({
           <span
             className={cn(
               "font-mono",
-              isUnverified ? "text-amber-400" : "text-slate-100",
+              lowConfidence ? "text-amber-400" : "text-slate-100",
             )}
           >
             {display}
             {unitDisplay}
           </span>
-          {isUnverified && (
+          {verified ? (
+            <span
+              className="text-emerald-400 text-xs flex-shrink-0"
+              aria-label="Verified"
+            >
+              ✓
+            </span>
+          ) : lowConfidence ? (
             <span
               className="w-1.5 h-1.5 rounded-full bg-amber-500 flex-shrink-0"
-              aria-label="Unverified"
+              aria-label="Low confidence — needs review"
             />
-          )}
+          ) : null}
         </span>
       </TooltipTrigger>
       <TooltipContent
@@ -94,28 +123,17 @@ export function ProvenanceValue({
           {retrievedDisplay && (
             <div className="text-slate-400">Retrieved: {retrievedDisplay}</div>
           )}
-          {confNum != null && (
-            <div>
-              Confidence:{" "}
-              <span
-                className={
-                  confNum >= 0.8
-                    ? "text-emerald-400"
-                    : confNum >= 0.5
-                    ? "text-amber-400"
-                    : "text-red-400"
-                }
-              >
-                {(confNum * 100).toFixed(0)}%
-              </span>
-            </div>
-          )}
           <div>
-            {humanVerified ? (
-              <span className="text-emerald-400">✓ Human verified</span>
-            ) : (
+            {verified ? (
+              <span className="text-emerald-400">{verifiedLabel}</span>
+            ) : lowConfidence ? (
               <span className="text-amber-400">
-                ⚠ LLM extracted — awaiting verification
+                ⚠ Low confidence{confPct ? ` · ${confPct}` : ""} — needs review
+              </span>
+            ) : (
+              <span className="text-slate-300">
+                Pulled from source PDF
+                {confPct ? ` · ${confPct} confidence` : ""}
               </span>
             )}
           </div>
@@ -132,6 +150,7 @@ export function ProvenanceRow({
   sourceUrl,
   pageRef,
   humanVerified,
+  verifiedBy,
   confidence,
   retrievedAt,
   countyMedian,
@@ -147,6 +166,7 @@ export function ProvenanceRow({
           sourceUrl={sourceUrl}
           pageRef={pageRef}
           humanVerified={humanVerified}
+          verifiedBy={verifiedBy}
           confidence={confidence}
           retrievedAt={retrievedAt}
         />

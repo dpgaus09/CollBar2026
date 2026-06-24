@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useParams, useLocation } from "wouter";
 import {
   BarChart, Bar, ResponsiveContainer, XAxis, Tooltip as RechartTooltip, ReferenceLine,
@@ -65,6 +65,8 @@ interface Settlement {
   method: string | null;
   confidence: string | null;
   human_verified: boolean;
+  verified_by: "district" | "internal" | null;
+  verified_at: string | null;
   page_ref: number | null;
   source_url: string | null;
   retrieved_at: string | null;
@@ -497,16 +499,85 @@ function UnitBadge({ unitName }: { unitName: string }) {
   );
 }
 
+// Inline control letting a district's own user confirm / un-confirm one of
+// their settlement figures. Only rendered for the owning district's user; the
+// server re-checks ownership regardless of what the UI shows.
+function VerifyControl({
+  districtId,
+  unit,
+  settlement,
+}: {
+  districtId: string;
+  unit: string;
+  settlement: Settlement;
+}) {
+  const qc = useQueryClient();
+  const basePath = `/api/dashboard/districts/${districtId}/settlements`;
+  const mutation = useMutation({
+    mutationFn: (verified: boolean) =>
+      fetch(apiUrl(`${basePath}/${settlement.id}/verify`), {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ verified }),
+      }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: [basePath, unit] });
+      // The same figure also appears on the comparables table.
+      qc.invalidateQueries({ queryKey: ["/api/dashboard/comparables"], exact: false });
+    },
+  });
+
+  // A district user can only manage district self-verifications; a figure
+  // verified by CollBar staff is shown as verified with no un-confirm control.
+  if (settlement.human_verified) {
+    if (settlement.verified_by === "internal") {
+      return (
+        <span className="text-[10px] text-emerald-500/80">✓ Verified by CollBar</span>
+      );
+    }
+    return (
+      <button
+        type="button"
+        disabled={mutation.isPending}
+        onClick={() => mutation.mutate(false)}
+        className="text-[10px] text-emerald-400 hover:text-emerald-300 disabled:opacity-50"
+      >
+        ✓ You verified this — undo
+      </button>
+    );
+  }
+  return (
+    <button
+      type="button"
+      disabled={mutation.isPending}
+      onClick={() => mutation.mutate(true)}
+      className="text-[10px] rounded border border-blue-500/40 bg-blue-500/10 px-2 py-0.5 text-blue-300 hover:bg-blue-500/20 disabled:opacity-50"
+    >
+      {mutation.isPending ? "Saving…" : "Confirm these numbers"}
+    </button>
+  );
+}
+
 function SettlementTable({
   settlements,
   unitName,
   sparseCoverage,
   peerDistrictCount,
+  districtId,
+  ownsDistrict,
+  unit,
 }: {
   settlements: Settlement[];
   unitName: string;
   sparseCoverage: boolean;
   peerDistrictCount: number;
+  districtId: string;
+  ownsDistrict: boolean;
+  unit: string;
 }) {
   if (settlements.length === 0) {
     return (
@@ -565,6 +636,7 @@ function SettlementTable({
               value={s.base_increase_pct ? parseFloat(s.base_increase_pct) : null}
               unit="%"
               humanVerified={s.human_verified}
+              verifiedBy={s.verified_by}
               confidence={s.confidence}
               pageRef={s.page_ref}
               sourceUrl={s.source_url}
@@ -574,6 +646,7 @@ function SettlementTable({
               value={s.year2_pct ? parseFloat(s.year2_pct) : null}
               unit="%"
               humanVerified={s.human_verified}
+              verifiedBy={s.verified_by}
               confidence={s.confidence}
               pageRef={s.page_ref}
               sourceUrl={s.source_url}
@@ -583,12 +656,18 @@ function SettlementTable({
               value={s.year3_pct ? parseFloat(s.year3_pct) : null}
               unit="%"
               humanVerified={s.human_verified}
+              verifiedBy={s.verified_by}
               confidence={s.confidence}
               pageRef={s.page_ref}
               sourceUrl={s.source_url}
               retrievedAt={s.retrieved_at}
             />
           </div>
+          {ownsDistrict && (
+            <div className="pb-2 -mt-1">
+              <VerifyControl districtId={districtId} unit={unit} settlement={s} />
+            </div>
+          )}
           {s.est_annual_cost_impact != null ? (
             <div className="text-[10px] pb-2 -mt-1 space-y-0.5">
               <div className="text-amber-400/80">
@@ -877,7 +956,10 @@ export default function DistrictDashboardPage() {
   const params = useParams<{ id: string }>();
   const id = params.id ?? "";
   const [, setLocation] = useLocation();
-  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const { isAuthenticated, isLoading: authLoading, districtId: myDistrictId } = useAuth();
+  // The user owns the viewed district when their account is tied to it. The
+  // server re-checks this on every verify request regardless of the UI.
+  const ownsDistrict = myDistrictId != null && String(myDistrictId) === id;
 
   useEffect(() => {
     if (authLoading) return;
@@ -1342,6 +1424,9 @@ export default function DistrictDashboardPage() {
                   unitName={unitLabel(unit)}
                   sparseCoverage={sparseCoverage}
                   peerDistrictCount={peerDistrictCount}
+                  districtId={id}
+                  ownsDistrict={ownsDistrict}
+                  unit={unit}
                 />
               </DataCard>
 

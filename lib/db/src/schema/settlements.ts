@@ -7,6 +7,7 @@ import {
   integer,
   boolean,
   text,
+  timestamp,
   unique,
   index,
   check,
@@ -41,6 +42,12 @@ export const settlementsTable = pgTable(
     method: text("method"),
     confidence: numeric("confidence", { precision: 3, scale: 2 }),
     humanVerified: boolean("human_verified").default(false),
+    // Who confirmed the figure: 'district' (the district's own administrator
+    // self-verified) or 'internal' (CollBar staff). NULL when unverified.
+    verifiedBy: text("verified_by"),
+    // The user account that performed the most recent verification, and when.
+    verifiedByUserId: bigint("verified_by_user_id", { mode: "bigint" }),
+    verifiedAt: timestamp("verified_at", { withTimezone: true }),
     notes: text("notes"),
     pageRef: integer("page_ref"),
     contractId: bigint("contract_id", { mode: "bigint" }).references(

@@ -49,6 +49,7 @@ interface TrackerStats {
     base_increase_pct: string | null;
     term_years: string | null;
     human_verified: boolean;
+    verified_by: string | null;
     source_url: string | null;
     district_slug: string | null;
   }>;
@@ -112,6 +113,7 @@ async function computeTrackerStats(state?: string): Promise<TrackerStats> {
         s.base_increase_pct,
         s.term_years,
         s.human_verified,
+        s.verified_by,
         sd.source_url
       FROM settlements s
       JOIN districts d ON s.district_id = d.id
@@ -156,6 +158,7 @@ async function computeTrackerStats(state?: string): Promise<TrackerStats> {
       base_increase_pct: r.base_increase_pct != null ? String(r.base_increase_pct) : null,
       term_years: r.term_years != null ? String(r.term_years) : null,
       human_verified: Boolean(r.human_verified),
+      verified_by: r.verified_by ? String(r.verified_by) : null,
       source_url: r.source_url ? String(r.source_url) : null,
       district_slug: r.district_slug ? String(r.district_slug) : null,
     })),

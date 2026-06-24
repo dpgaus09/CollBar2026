@@ -318,6 +318,22 @@ async function runMigrations(): Promise<void> {
     `);
 
     logger.info("Migration OK: final_offer tables ensured");
+
+    // -----------------------------------------------------------------------
+    // District self-verification of settlement figures (Task #152).
+    // Additive columns — who confirmed a settlement read, which user, and when.
+    // 'district' = confirmed by the owning district; 'internal' = CollBar admin.
+    // ADD COLUMN IF NOT EXISTS keeps this safe to run on every restart and on
+    // a fresh DB built from migrations alone.
+    // -----------------------------------------------------------------------
+    await db.execute(sql`
+      ALTER TABLE settlements
+        ADD COLUMN IF NOT EXISTS verified_by         TEXT,
+        ADD COLUMN IF NOT EXISTS verified_by_user_id BIGINT,
+        ADD COLUMN IF NOT EXISTS verified_at         TIMESTAMPTZ
+    `);
+
+    logger.info("Migration OK: settlements verification columns ensured");
   } catch (err) {
     logger.warn({ err }, "Migration failed — will retry on next restart");
     return;

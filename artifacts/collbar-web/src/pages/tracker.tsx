@@ -16,6 +16,7 @@ interface Settlement {
   base_increase_pct: string | null;
   term_years: string | null;
   human_verified: boolean;
+  verified_by: "district" | "internal" | null;
   source_url: string | null;
   state: string | null;
   district_slug: string | null;
@@ -176,9 +177,15 @@ export default function TrackerPage() {
                         </td>
                         <td className="px-3 py-2.5">
                           {s.human_verified ? (
-                            <span className="text-xs font-medium text-green-400">✓ Verified</span>
+                            <span className="text-xs font-medium text-green-400">
+                              {s.verified_by === "district"
+                                ? "✓ Verified by district"
+                                : s.verified_by === "internal"
+                                ? "✓ Verified by CollBar"
+                                : "✓ Verified"}
+                            </span>
                           ) : (
-                            <span className="text-xs text-blue-400">AI</span>
+                            <span className="text-xs text-slate-400">Sourced from PDF</span>
                           )}
                         </td>
                       </tr>

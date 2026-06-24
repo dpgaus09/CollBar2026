@@ -278,7 +278,7 @@ router.get("/dashboard/districts/:id/settlements", gate({ ownDistrict: true }), 
       SELECT s.id, s.from_year, s.to_year, s.base_increase_pct, s.year2_pct, s.year3_pct,
              s.off_schedule_payment, s.insurance_changed, s.term_years,
              s.method, s.confidence, s.human_verified, s.page_ref, s.notes,
-             s.bargaining_unit,
+             s.bargaining_unit, s.verified_by, s.verified_at,
              sd.source_url, sd.retrieved_at,
              -- Cost impact: EIS real salary preferred; TSS midpoint as fallback
              CASE
@@ -387,6 +387,91 @@ router.get("/dashboard/districts/:id/settlements", gate({ ownDistrict: true }), 
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+// ---------------------------------------------------------------------------
+// POST /api/dashboard/districts/:id/settlements/:settlementId/verify
+// Lets a district's own administrator confirm (or un-confirm) one of THEIR
+// settlement figures. body: { verified: boolean }.
+//
+// Access: any authenticated user whose account is tied to this district may
+// verify its data; CollBar admins may verify any district (recorded as an
+// 'internal' verification). Everyone else is rejected server-side regardless of
+// the UI (no IDOR) — gate() only scopes FREE users, so Pro district users are
+// still re-checked here against their own districtId. District users may never
+// touch an 'internal' verification (that stays an admin-only review path).
+// ---------------------------------------------------------------------------
+router.post(
+  "/dashboard/districts/:id/settlements/:settlementId/verify",
+  gate(),
+  async (req: Request, res: Response) => {
+    const districtId = parseInt(String(req.params.id), 10);
+    const settlementId = parseInt(String(req.params.settlementId), 10);
+    if (isNaN(districtId) || isNaN(settlementId)) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+    const verified = (req.body as { verified?: unknown })?.verified;
+    if (typeof verified !== "boolean") {
+      res.status(400).json({ error: "verified (boolean) is required" });
+      return;
+    }
+    const access = req.access!;
+    const isAdmin = access.role === "admin";
+    // Non-admins may only act on their OWN district, regardless of plan.
+    if (!isAdmin && (access.districtId == null || access.districtId !== districtId)) {
+      res.status(403).json({ error: "FORBIDDEN_DISTRICT", message: UPGRADE_MESSAGE });
+      return;
+    }
+    try {
+      // The settlement must exist AND belong to the district named in the path
+      // (prevents verifying another district's row via a mismatched URL).
+      const cur = await db.execute(sql`
+        SELECT id, district_id, verified_by
+        FROM settlements
+        WHERE id = ${settlementId} AND district_id = ${districtId}
+        LIMIT 1
+      `);
+      const row = cur.rows[0] as
+        | { id: unknown; district_id: unknown; verified_by: string | null }
+        | undefined;
+      if (!row) {
+        res.status(404).json({ error: "Settlement not found" });
+        return;
+      }
+      // Protect CollBar staff verifications: a district user cannot overwrite or
+      // clear an 'internal' verification (admin-only review path stays intact).
+      if (!isAdmin && row.verified_by === "internal") {
+        res.status(403).json({ error: "FORBIDDEN", message: "This figure was verified by CollBar staff." });
+        return;
+      }
+      if (verified) {
+        const verifier = isAdmin ? "internal" : "district";
+        await db.execute(sql`
+          UPDATE settlements
+          SET human_verified = true,
+              verified_by = ${verifier},
+              verified_by_user_id = ${access.userId},
+              verified_at = NOW()
+          WHERE id = ${settlementId} AND district_id = ${districtId}
+        `);
+        res.json({ ok: true, human_verified: true, verified_by: verifier });
+      } else {
+        await db.execute(sql`
+          UPDATE settlements
+          SET human_verified = false,
+              verified_by = NULL,
+              verified_by_user_id = NULL,
+              verified_at = NULL
+          WHERE id = ${settlementId} AND district_id = ${districtId}
+        `);
+        res.json({ ok: true, human_verified: false, verified_by: null });
+      }
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
 
 // ---------------------------------------------------------------------------
 // GET /api/dashboard/districts/:id/salary-schedules
@@ -908,7 +993,7 @@ router.get("/dashboard/comparables", gate({ paid: true }), async (req: Request, 
           s.id, s.from_year, s.to_year, s.base_increase_pct, s.year2_pct, s.year3_pct,
           s.off_schedule_payment, s.insurance_changed, s.term_years,
           s.method, s.confidence, s.human_verified, s.page_ref,
-          s.bargaining_unit,
+          s.bargaining_unit, s.verified_by, s.verified_at,
           d.id AS district_id, d.name AS district_name,
           d.county, d.district_type, d.enrollment,
           sd.source_url, sd.retrieved_at

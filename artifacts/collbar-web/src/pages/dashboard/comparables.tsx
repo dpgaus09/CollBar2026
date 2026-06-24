@@ -29,6 +29,8 @@ interface ComparableItem {
   method: string | null;
   confidence: string | null;
   human_verified: boolean;
+  verified_by: "district" | "internal" | null;
+  verified_at: string | null;
   page_ref: number | null;
   source_url: string | null;
   retrieved_at: string | null;
@@ -447,6 +449,7 @@ export default function ComparablesPage() {
                           }
                           unit="%"
                           humanVerified={item.human_verified}
+                          verifiedBy={item.verified_by}
                           confidence={item.confidence}
                           pageRef={item.page_ref}
                           sourceUrl={item.source_url}
@@ -462,6 +465,7 @@ export default function ComparablesPage() {
                           }
                           unit="%"
                           humanVerified={item.human_verified}
+                          verifiedBy={item.verified_by}
                           confidence={item.confidence}
                           pageRef={item.page_ref}
                           sourceUrl={item.source_url}
@@ -477,6 +481,7 @@ export default function ComparablesPage() {
                           }
                           unit="%"
                           humanVerified={item.human_verified}
+                          verifiedBy={item.verified_by}
                           confidence={item.confidence}
                           pageRef={item.page_ref}
                           sourceUrl={item.source_url}
