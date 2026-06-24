@@ -4521,6 +4521,7 @@ function EditContractUnitSection() {
       const j = (await r.json()) as {
         ok?: boolean;
         settlementsUpdated?: number;
+        sourceDocumentUpdated?: boolean | null;
         unchanged?: boolean;
         error?: string;
       };
@@ -4531,17 +4532,26 @@ function EditContractUnitSection() {
         }));
         return;
       }
+      // sourceDocumentUpdated === false means the upload's authoritative unit was
+      // intentionally left alone because the PDF backs more than one contract.
+      // Warn the admin: a future re-extraction reads that doc-level unit and
+      // could disagree with this reassignment.
+      const sharedDocNote =
+        j.sourceDocumentUpdated === false
+          ? " Note: this PDF backs multiple contracts, so its source-document unit was left unchanged — a future re-extraction may not match this fix."
+          : "";
       setRowMsg((m) => ({
         ...m,
         [c.id]: {
           type: "ok",
-          text: j.unchanged
-            ? `Confirmed as ${unitLabel(newUnit)} and pinned.`
-            : `Reassigned to ${unitLabel(newUnit)}${
-                j.settlementsUpdated
-                  ? ` · ${j.settlementsUpdated} settlement(s) updated`
-                  : ""
-              }.`,
+          text:
+            (j.unchanged
+              ? `Confirmed as ${unitLabel(newUnit)} and pinned.`
+              : `Reassigned to ${unitLabel(newUnit)}${
+                  j.settlementsUpdated
+                    ? ` · ${j.settlementsUpdated} settlement(s) updated`
+                    : ""
+                }.`) + sharedDocNote,
         },
       }));
       await queryClient.invalidateQueries({ queryKey: contractsKey });

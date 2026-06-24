@@ -1782,7 +1782,7 @@ async function handleReassignUnit(req: Request, res: Response): Promise<void> {
     contract.source_doc_id == null ? null : Number(contract.source_doc_id);
 
   try {
-    const settlementsUpdated = await db.transaction(async (tx) => {
+    const result = await db.transaction(async (tx) => {
       // Lock the contract row so a concurrent reassignment can't interleave.
       await tx.execute(sql`SELECT id FROM contracts WHERE id = ${contractId} FOR UPDATE`);
       await tx.execute(sql`
@@ -1798,18 +1798,37 @@ async function handleReassignUnit(req: Request, res: Response): Promise<void> {
       // human choice the extractor honors on re-extraction. Update it too — but
       // only when this doc maps to exactly this one contract (uploads are
       // single-unit), so a PDF shared across units is never mislabeled.
+      //
+      // sourceDocumentUpdated tells the admin what happened to that authoritative
+      // unit: null when there's nothing to update (non-upload doc / no source
+      // doc), true when we rewrote it, false when the shared-doc guard skipped it
+      // (the doc backs multiple contracts, so its unit still differs and a future
+      // re-extraction could disagree).
+      let sourceDocumentUpdated: boolean | null = null;
       if (isUpload && sourceDocId != null) {
-        await tx.execute(sql`
+        const docUpd = await tx.execute(sql`
           UPDATE source_documents sd
           SET bargaining_unit = ${newUnit}
           WHERE sd.id = ${sourceDocId}
             AND (SELECT COUNT(*) FROM contracts c2 WHERE c2.source_doc_id = sd.id) = 1
         `);
+        sourceDocumentUpdated =
+          Number((docUpd as { rowCount?: number | null }).rowCount ?? 0) > 0;
       }
-      return Number((upd as { rowCount?: number | null }).rowCount ?? 0);
+      return {
+        settlementsUpdated: Number((upd as { rowCount?: number | null }).rowCount ?? 0),
+        sourceDocumentUpdated,
+      };
     });
 
-    res.json({ ok: true, contractId, bargainingUnit: newUnit, settlementsUpdated, districtName });
+    res.json({
+      ok: true,
+      contractId,
+      bargainingUnit: newUnit,
+      settlementsUpdated: result.settlementsUpdated,
+      sourceDocumentUpdated: result.sourceDocumentUpdated,
+      districtName,
+    });
   } catch (err) {
     // drizzle wraps the driver error in a "Failed query" Error, so the pg
     // fields (code/constraint) live on the .cause chain, not the top error.
