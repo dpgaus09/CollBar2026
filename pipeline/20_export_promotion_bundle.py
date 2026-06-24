@@ -88,6 +88,35 @@ SPEC = [
         "is_parent": False,
     },
     {
+        "table": "contract_salary_schedules",
+        "own": ["bargaining_unit", "schedule_name", "school_year", "start_year",
+                "schedule_type", "lane_labels", "step_count", "lane_count",
+                "page_start", "page_end", "min_salary", "max_salary", "confidence",
+                "needs_review", "review_reason", "extraction_method", "created_at"],
+        "fks": [
+            {"col": "district_id", "parent": "districts", "key": "_district_key"},
+            {"col": "contract_id", "parent": "contracts", "key": "_contract_key",
+             "required": True},
+            {"col": "source_doc_id", "parent": "source_documents", "key": "_source_doc_key"},
+        ],
+        # Lockstep with promote.ts. DB unique index (contract_id, schedule_name,
+        # school_year), all NOT NULL. raw_json intentionally omitted (internal
+        # extraction blob, unused by the customer dashboard).
+        "natural_key": ["contract_id", "schedule_name", "school_year"],
+        "is_parent": True,
+    },
+    {
+        "table": "contract_salary_schedule_cells",
+        "own": ["step_label", "step_order", "lane_label", "lane_order",
+                "salary_amount", "page_ref"],
+        "fks": [
+            {"col": "schedule_id", "parent": "contract_salary_schedules",
+             "key": "_schedule_key", "required": True},
+        ],
+        "natural_key": None,  # grid is atomic: replace all cells per schedule
+        "is_parent": False,
+    },
+    {
         "table": "final_offer_postings",
         "own": ["case_number", "year", "bargaining_unit", "district_name", "union_name",
                 "posted_date", "district_offer_url", "union_offer_url", "page_url",

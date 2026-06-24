@@ -110,6 +110,50 @@ export const PROMOTION_SPEC: Spec[] = [
     isParent: false,
   },
   {
+    table: "contract_salary_schedules",
+    own: [
+      "bargaining_unit",
+      "schedule_name",
+      "school_year",
+      "start_year",
+      "schedule_type",
+      "lane_labels",
+      "step_count",
+      "lane_count",
+      "page_start",
+      "page_end",
+      "min_salary",
+      "max_salary",
+      "confidence",
+      "needs_review",
+      "review_reason",
+      "extraction_method",
+      "created_at",
+    ],
+    fks: [
+      { col: "district_id", parent: "districts", key: "_district_key" },
+      { col: "contract_id", parent: "contracts", key: "_contract_key", required: true },
+      { col: "source_doc_id", parent: "source_documents", key: "_source_doc_key" },
+    ],
+    // DB unique index is (contract_id, schedule_name, school_year) — all three
+    // are NOT NULL, so no NULL-equality collision under IS NOT DISTINCT FROM.
+    // raw_json is intentionally NOT promoted: it's the internal extraction blob,
+    // unused by the customer dashboard, and would bloat the bundle.
+    naturalKey: ["contract_id", "schedule_name", "school_year"],
+    isParent: true,
+  },
+  {
+    table: "contract_salary_schedule_cells",
+    own: ["step_label", "step_order", "lane_label", "lane_order", "salary_amount", "page_ref"],
+    fks: [
+      { col: "schedule_id", parent: "contract_salary_schedules", key: "_schedule_key", required: true },
+    ],
+    // No natural key: a grid is atomic, so replace ALL cells of each promoted
+    // schedule (delete-then-insert), mirroring contract_provisions.
+    naturalKey: null,
+    isParent: false,
+  },
+  {
     table: "final_offer_postings",
     own: ["case_number", "year", "bargaining_unit", "district_name", "union_name", "posted_date", "district_offer_url", "union_offer_url", "page_url", "created_at", "updated_at"],
     fks: [

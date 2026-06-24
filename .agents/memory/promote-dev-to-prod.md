@@ -56,7 +56,28 @@ already-populated prod table — adding one would force a destructive ALTER).
 and keep promotions.ts in lockstep with the CREATE TABLE DDL in promote.ts. Do NOT run
 `db push`/`push-force` against DEV to "test" — it can TRUNCATE the curated source tables.
 
+## Adding a feature table to the promotion (lockstep)
+Any table holding DEV-extracted data must be added to BOTH `PROMOTION_SPEC` (promote.ts) AND
+`SPEC` (20_export_promotion_bundle.py), same order, or its rows NEVER reach prod — publishing
+ships CODE, not DATA. Prod's `runPromotion` also REJECTS any bundle table not on its allowlist,
+so the engine must be DEPLOYED before a bundle containing the new table is POSTed (publish →
+dry-run → apply).
+
+Precedent: `contract_salary_schedules` + `contract_salary_schedule_cells` (teacher salary grids)
+were missing → grids rendered in DEV but showed "not yet extracted" in PROD (both tables existed
+in the prod schema but had 0 rows). Added as:
+- schedules: isParent, naturalKey=[contract_id, schedule_name, school_year] (all NOT NULL →
+  collision-free under IS NOT DISTINCT FROM), fks district_id / contract_id(required) /
+  source_doc_id. `raw_json` OMITTED (internal extraction blob, unused by the dashboard salary
+  route, bundle-bloat). `lane_labels` is jsonb and round-trips through json_populate_recordset.
+- cells: naturalKey=null → parent-scoped delete-then-insert keyed on fks[0]=schedule_id (a grid
+  is atomic; re-extraction can change step/lane shape, so wholesale replace beats a 3-col key).
+Rule of thumb: a child "grid"/detail table = naturalKey:null parent-replace; its parent MUST be
+isParent so the engine refreshes the parent map post-apply before the child resolves `_<parent>_key`.
+
 ## How to promote in the future (repeatable)
+NOTE: the only working prod base is `https://coll-bar-ohio-plan.replit.app` (app.collbar.com /
+coll-bar.replit.app 404 — custom domain not linked). Use that for `--base`.
 First deploy must include the promote endpoint (republish if `/api/admin/promote` 404s on prod).
 Auth is `Authorization: Bearer $ADMIN_TOKEN || $ADMIN_PASSWORD` (ADMIN_TOKEN is unset, so
 ADMIN_PASSWORD is used; it's a shared App Secret available to the prod deployment).
