@@ -30,11 +30,18 @@ const MARK = `tstunit-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 const UPLOAD_URL = `upload://${MARK}`;
 const FILE_HASH = createHash("sha256").update(MARK).digest("hex"); // 64 hex chars
 
+// A second uploaded doc deliberately shared by TWO contracts (Task #162). Its
+// authoritative unit must survive a reassignment of one of those contracts.
+const SHARED_URL = `upload://${MARK}-shared`;
+const SHARED_HASH = createHash("sha256").update(`${MARK}-shared`).digest("hex");
+
 let distId: number;
 let cSuccess: number; // teachers, upload-linked -> reassign to nurses
 let cColl1: number; // paraprofessionals -> reassign to food_service (collides w/ cColl2)
 let cSettColl: number; // transportation -> reassign to nurses (settlement collides)
 let cNoop: number; // administrators -> reassign to administrators (no-op pin)
+let cShared1: number; // teachers, shares an uploaded doc with cShared2 -> reassign to nurses
+let cShared2: number; // teachers, shares the same uploaded doc (must keep doc unit)
 
 function buildApp(): Express {
   const app = express();
@@ -105,6 +112,18 @@ beforeAll(async () => {
 
   // No-op fixture.
   cNoop = await insertContract("administrators", "ns", "2095-08-01");
+
+  // Shared-doc fixture (Task #162): one uploaded doc backing TWO contracts. The
+  // doc's authoritative unit must NOT be touched when one contract is reassigned.
+  const sharedSd = await db.execute(sql`
+    INSERT INTO source_documents (district_id, doc_type, bargaining_unit, source_url, file_hash, source_type)
+    VALUES (${distId}, 'cba_pdf', 'teachers', ${SHARED_URL}, ${SHARED_HASH}, 'pdf')
+    RETURNING id
+  `);
+  const sharedSdId = Number((sharedSd.rows[0] as { id: string | number }).id);
+  cShared1 = await insertContract("teachers", "sh1", "2094-08-01", sharedSdId);
+  await insertSettlement("teachers", "2094-00", "2094-00", cShared1);
+  cShared2 = await insertContract("teachers", "sh2", "2093-08-01", sharedSdId);
 });
 
 afterAll(async () => {
@@ -177,6 +196,42 @@ describe("PATCH /admin/contracts/:id/bargaining-unit", () => {
     const crow = c.rows[0] as { bargaining_unit: string; unit_override: boolean };
     expect(crow.bargaining_unit).toBe("administrators");
     expect(crow.unit_override).toBe(true);
+  });
+
+  it("reassigns one contract of a shared upload doc without touching the doc's unit", async () => {
+    const res = await request(buildApp())
+      .patch(`/admin/contracts/${cShared1}/bargaining-unit`)
+      .send({ bargainingUnit: "nurses" });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.bargainingUnit).toBe("nurses");
+    expect(res.body.settlementsUpdated).toBe(1);
+
+    // The reassigned contract + its settlement re-unit and the override pins.
+    const c = await db.execute(
+      sql`SELECT bargaining_unit, unit_override FROM contracts WHERE id = ${cShared1}`,
+    );
+    const crow = c.rows[0] as { bargaining_unit: string; unit_override: boolean };
+    expect(crow.bargaining_unit).toBe("nurses");
+    expect(crow.unit_override).toBe(true);
+
+    const s = await db.execute(
+      sql`SELECT bargaining_unit FROM settlements WHERE contract_id = ${cShared1}`,
+    );
+    expect((s.rows[0] as { bargaining_unit: string }).bargaining_unit).toBe("nurses");
+
+    // The sibling contract sharing the same doc is left alone.
+    const c2 = await db.execute(
+      sql`SELECT bargaining_unit FROM contracts WHERE id = ${cShared2}`,
+    );
+    expect((c2.rows[0] as { bargaining_unit: string }).bargaining_unit).toBe("teachers");
+
+    // The guard: a doc shared by >1 contract keeps its authoritative unit, so a
+    // re-extraction can't silently relabel the sibling contract.
+    const sd = await db.execute(
+      sql`SELECT bargaining_unit FROM source_documents WHERE source_url = ${SHARED_URL}`,
+    );
+    expect((sd.rows[0] as { bargaining_unit: string }).bargaining_unit).toBe("teachers");
   });
 
   it("returns 409 on a contract-key collision and changes nothing", async () => {
