@@ -14,6 +14,7 @@ import {
 import { gate, isFree, UPGRADE_MESSAGE } from "../lib/access.js";
 import { uploadCustomerSubmission, DriveNotConnectedError } from "../lib/google-drive.js";
 import { getRediscoveriesForDistrict, rediscoveryKey } from "../lib/crawl-state.js";
+import { uploadedCbaKey, streamObjectTo } from "../lib/objectStorage.js";
 
 const router: IRouter = Router();
 
@@ -385,13 +386,13 @@ router.get("/dashboard/document", gate(), async (req: Request, res: Response) =>
   }
   try {
     const result = await db.execute(sql`
-      SELECT storage_key, district_id
+      SELECT storage_key, district_id, file_hash
       FROM source_documents
       WHERE source_url = ${src}
       LIMIT 1
     `);
     const row = result.rows[0] as
-      | { storage_key: string | null; district_id: number | null }
+      | { storage_key: string | null; district_id: number | null; file_hash: string | null }
       | undefined;
     if (!row || !row.storage_key) {
       res.status(404).json({ error: "Document not found" });
@@ -414,24 +415,30 @@ router.get("/dashboard/document", gate(), async (req: Request, res: Response) =>
       res.status(403).json({ error: "FORBIDDEN_DISTRICT", message: UPGRADE_MESSAGE });
       return;
     }
-    if (!row.storage_key.startsWith("local:")) {
-      res.status(404).json({ error: "Document not available" });
-      return;
+    // Primary path: stream the persisted copy from object storage. This is the
+    // only source that exists in production — the local filesystem is dev-only
+    // and excluded from the deployment image, and autoscale instances are
+    // stateless. Falls back to the local file in dev when the object has not
+    // been backfilled yet.
+    if (row.file_hash) {
+      const streamed = await streamObjectTo(uploadedCbaKey(row.file_hash), res);
+      if (streamed) return;
     }
-    const absPath = row.storage_key.slice("local:".length);
-    // storage_key is a trusted server-written value; still keep this to PDFs.
-    if (!absPath.endsWith(".pdf")) {
-      res.status(404).json({ error: "Document not available" });
-      return;
+    if (row.storage_key.startsWith("local:")) {
+      const absPath = row.storage_key.slice("local:".length);
+      // storage_key is a trusted server-written value; still keep this to PDFs.
+      if (absPath.endsWith(".pdf")) {
+        const { existsSync, createReadStream } = await import("fs");
+        if (existsSync(absPath)) {
+          res.setHeader("Content-Type", "application/pdf");
+          res.setHeader("Content-Disposition", "inline");
+          createReadStream(absPath).pipe(res);
+          return;
+        }
+      }
     }
-    const { existsSync, createReadStream } = await import("fs");
-    if (!existsSync(absPath)) {
-      res.status(404).json({ error: "Document file missing" });
-      return;
-    }
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", "inline");
-    createReadStream(absPath).pipe(res);
+    res.status(404).json({ error: "Document file missing" });
+    return;
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Internal server error" });

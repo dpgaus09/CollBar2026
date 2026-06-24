@@ -9,6 +9,7 @@ import { db, pool } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import { VALID_BARGAINING_UNITS } from "./bargaining-units.js";
 import { runPromotion } from "../lib/promote.js";
+import { uploadBuffer, uploadedCbaKey } from "../lib/objectStorage.js";
 
 declare module "express-session" {
   interface SessionData {
@@ -1581,6 +1582,22 @@ async function handleCbaUpload(req: Request, res: Response): Promise<void> {
   mkdirSync(IL_CBA_PDF_DIR, { recursive: true });
   const absPath = join(IL_CBA_PDF_DIR, `${fileHash}.pdf`);
   writeFileSync(absPath, buf);
+  // Persist to object storage so the PDF is servable in production: the local
+  // filesystem is dev-only (excluded from the deployment image) and autoscale
+  // instances are stateless. This MUST succeed before we record the document —
+  // otherwise its source link would 404 ("Document file missing") in prod, the
+  // exact bug this guards against. We do not insert a row we can't serve. The
+  // local copy above is retained for the dev extraction pipeline.
+  try {
+    await uploadBuffer(uploadedCbaKey(fileHash), buf);
+  } catch (err) {
+    console.error("Object storage upload failed for uploaded CBA", fileHash, err);
+    res.status(502).json({
+      error:
+        "Could not save the PDF to durable storage, so it was not added. Please try again.",
+    });
+    return;
+  }
   const storageKey = `local:${absPath}`;
   const sourceUrl = `upload://district-${districtId}/${unit}/${filename}`;
 

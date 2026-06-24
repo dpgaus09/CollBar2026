@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
+    "@google-cloud/storage": "^7.21.0",
     "@react-pdf/renderer": "^4.5.1",
     "@replit/connectors-sdk": "^0.4.1",
     "@swc/helpers": "^0.5.23",
