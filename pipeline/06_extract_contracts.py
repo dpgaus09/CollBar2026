@@ -1520,6 +1520,9 @@ def main():
     parser.add_argument("--state", type=str, default=None, metavar="STATE",
                         help="Restrict to districts in this state, e.g. IL or OH. "
                              "IL districts automatically use the IL-specific prompt (v1_il.txt).")
+    parser.add_argument("--skip-salary-grids", action="store_true",
+                        help="Do not extract salary-schedule grids after each "
+                             "contract upsert (grid extraction runs by default).")
     args = parser.parse_args()
 
     conn = common.get_db_conn()
@@ -1578,6 +1581,19 @@ def main():
     total_cost_usd = 0.0
     cost_cap_hit = False
 
+    # Wire deterministic salary-schedule grid extraction into the load pipeline
+    # so every newly-loaded CBA gets its grids (pdfplumber, NOT the 80k-truncated
+    # LLM path). Imported lazily — 18 imports this module, so a top-level import
+    # would be circular.
+    salary_grid_mod = None
+    if not args.skip_salary_grids and not args.dry_run:
+        try:
+            import importlib
+            salary_grid_mod = importlib.import_module(
+                "18_extract_salary_schedules")
+        except Exception as e:  # noqa: BLE001
+            log.warning("Salary-grid extraction unavailable (%s) — skipping", e)
+
     for row in docs:
         # Rows now carry a 6th column: district_state.  Tolerate old 5-col rows.
         source_doc_id, source_url, storage_key, district_id, school_year = row[:5]
@@ -1611,6 +1627,10 @@ def main():
         # 'upload://…'); trust it over the LLM, which often mislabels non-teacher
         # contracts as 'teachers'.
         is_upload = bool(source_url and source_url.startswith("upload://"))
+
+        # pdf_path is set only in the PDF branch below; reset per-iteration so an
+        # HTML-contract doc never reuses the previous PDF doc's path for grids.
+        pdf_path = None
 
         # --- Step 1 + 2: Resolve source file and extract text ---
         if is_html:
@@ -1779,6 +1799,24 @@ def main():
                 continue
             conn.commit()
             doc_contracts += 1
+
+            # Deterministic salary-grid extraction for this contract (idempotent
+            # delete-then-insert by contract_id). Must never break the main run.
+            if salary_grid_mod is not None and pdf_path is not None:
+                try:
+                    sg = salary_grid_mod.extract_for_contract(
+                        conn, contract_id=contract_id, pdf_path=pdf_path,
+                    )
+                    log.info(
+                        "  salary grids for contract %s: %s schedules, %s cells (%s)",
+                        contract_id, sg.get("schedules"), sg.get("cells"),
+                        sg.get("status"),
+                    )
+                except Exception as e:  # noqa: BLE001
+                    conn.rollback()
+                    log.warning(
+                        "  salary-grid extraction failed for contract %s: %s",
+                        contract_id, e)
 
             provisions = c.provisions if PYDANTIC_OK else c.get("provisions", [])  # type: ignore[union-attr]
             n = insert_provisions(cur, contract_id, provisions)

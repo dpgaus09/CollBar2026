@@ -388,6 +388,162 @@ router.get("/dashboard/districts/:id/settlements", gate({ ownDistrict: true }), 
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/dashboard/districts/:id/salary-schedules
+// Full salary-schedule grids extracted from the CBA appendix: for teachers,
+// experience steps x education lanes (BA, BA+15, MA or 36, MA+30, ...); for
+// non-lane units (custodial, etc.) a single step->salary column (or a job-class
+// grid with no education lanes). Unit-scoped (CBAs never mix units; defaults to
+// teachers) and own-district gated, like the rest of the Overview.
+//
+// Returns the MOST RECENT (district, unit) contract that has extracted grids —
+// a single contract already spans several school years, so we never mix
+// overlapping years across successive CBAs. Each schedule carries every dollar
+// cell plus selector metadata (job families, school years) and a small derived
+// summary (base/MA-base/max for the default family's latest year).
+// ---------------------------------------------------------------------------
+router.get("/dashboard/districts/:id/salary-schedules", gate({ ownDistrict: true }), async (req: Request, res: Response) => {
+  const districtId = parseInt(String(req.params.id), 10);
+  if (isNaN(districtId)) { res.status(400).json({ error: "Invalid district id" }); return; }
+  const unit = parseUnit(req.query.bargainingUnit);
+
+  try {
+    if (!(await isCustomerDistrict(districtId))) { res.status(404).json({ error: "District not found" }); return; }
+
+    // Units that have a CBA, for the selector (teachers first).
+    const availUnits = await db.execute(sql`
+      SELECT bargaining_unit FROM contracts
+      WHERE district_id = ${districtId} AND bargaining_unit IS NOT NULL
+      GROUP BY bargaining_unit
+      ORDER BY (bargaining_unit = 'teachers') DESC, bargaining_unit
+    `);
+    const availableUnits = (availUnits.rows as { bargaining_unit: string }[]).map((r) => r.bargaining_unit);
+
+    // Most recent (district, unit) contract that actually has schedules.
+    const targetRows = await db.execute(sql`
+      SELECT s.contract_id
+      FROM contract_salary_schedules s
+      JOIN contracts c ON c.id = s.contract_id
+      WHERE c.district_id = ${districtId} AND c.bargaining_unit = ${unit}
+      ORDER BY c.effective_start DESC NULLS LAST, c.id DESC
+      LIMIT 1
+    `);
+    if (!targetRows.rows.length) {
+      res.json({ bargainingUnit: unit, contractId: null, schedules: [], jobFamilies: [], schoolYears: [], summary: null, availableUnits });
+      return;
+    }
+    const contractId = Number((targetRows.rows[0] as { contract_id: number | string }).contract_id);
+
+    const schedRows = await db.execute(sql`
+      SELECT s.id, s.schedule_name, s.school_year, s.start_year, s.schedule_type,
+             s.lane_labels, s.step_count, s.lane_count, s.page_start, s.page_end,
+             s.min_salary, s.max_salary, s.confidence, s.needs_review,
+             s.review_reason, s.extraction_method,
+             sd.source_url
+      FROM contract_salary_schedules s
+      LEFT JOIN source_documents sd ON sd.id = s.source_doc_id
+      WHERE s.contract_id = ${contractId}
+      ORDER BY s.schedule_name, s.start_year NULLS LAST, s.school_year
+    `);
+
+    // All cells for those schedules, fetched via the contract join (no IN list).
+    const cellRows = await db.execute(sql`
+      SELECT cell.schedule_id, cell.step_label, cell.step_order, cell.lane_label,
+             cell.lane_order, cell.salary_amount, cell.page_ref
+      FROM contract_salary_schedule_cells cell
+      JOIN contract_salary_schedules s ON s.id = cell.schedule_id
+      WHERE s.contract_id = ${contractId}
+      ORDER BY cell.step_order, cell.lane_order
+    `);
+
+    type CellOut = { stepLabel: string; stepOrder: number; laneLabel: string | null; laneOrder: number; salary: number; pageRef: number | null };
+    const cellsBySched = new Map<number, CellOut[]>();
+    for (const r of cellRows.rows as Array<Record<string, unknown>>) {
+      const sid = Number(r.schedule_id);
+      const arr = cellsBySched.get(sid) ?? [];
+      arr.push({
+        stepLabel: String(r.step_label),
+        stepOrder: Number(r.step_order),
+        laneLabel: r.lane_label == null ? null : String(r.lane_label),
+        laneOrder: Number(r.lane_order),
+        salary: Number(r.salary_amount),
+        pageRef: r.page_ref == null ? null : Number(r.page_ref),
+      });
+      cellsBySched.set(sid, arr);
+    }
+
+    const schedules = (schedRows.rows as Array<Record<string, unknown>>).map((s) => {
+      const id = Number(s.id);
+      const laneLabels = (s.lane_labels as string[] | null) ?? null;
+      // laneKind tells the UI how to render columns WITHOUT assuming education
+      // lanes: 'education' only when labels look like BA/MA/BS/MS degree lanes,
+      // 'columns' for any other multi-column grid (e.g. custodial job classes),
+      // null for single-column / no-lane schedules. Never show BA/MA chrome for
+      // a non-education unit.
+      const laneKind: "education" | "columns" | null =
+        laneLabels && laneLabels.length
+          ? (laneLabels.some((l) => /^\s*(BA|MA|BS|MS|B\.A|M\.A)\b/i.test(String(l)))
+              ? "education"
+              : "columns")
+          : null;
+      return {
+        id,
+        scheduleName: String(s.schedule_name),
+        schoolYear: String(s.school_year),
+        startYear: s.start_year == null ? null : Number(s.start_year),
+        scheduleType: String(s.schedule_type),
+        laneLabels,
+        laneKind,
+        stepCount: s.step_count == null ? null : Number(s.step_count),
+        laneCount: s.lane_count == null ? null : Number(s.lane_count),
+        pageStart: s.page_start == null ? null : Number(s.page_start),
+        pageEnd: s.page_end == null ? null : Number(s.page_end),
+        minSalary: s.min_salary == null ? null : Number(s.min_salary),
+        maxSalary: s.max_salary == null ? null : Number(s.max_salary),
+        confidence: s.confidence == null ? null : Number(s.confidence),
+        needsReview: Boolean(s.needs_review),
+        reviewReason: (s.review_reason as string | null) ?? null,
+        extractionMethod: (s.extraction_method as string | null) ?? null,
+        sourceUrl: (s.source_url as string | null) ?? null,
+        cells: cellsBySched.get(id) ?? [],
+      };
+    });
+
+    const jobFamilies = [...new Set(schedules.map((s) => s.scheduleName))];
+    const schoolYears = [...new Set(schedules.map((s) => s.schoolYear))].sort();
+
+    // Derived scalar anchors for the default job family's latest year.
+    const defaultFamily = jobFamilies.includes("Teachers") ? "Teachers" : jobFamilies[0];
+    const fam = schedules
+      .filter((s) => s.scheduleName === defaultFamily)
+      .sort((a, b) => (b.startYear ?? 0) - (a.startYear ?? 0));
+    const latest = fam[0] ?? null;
+    let summary: {
+      scheduleName: string; schoolYear: string;
+      baseSalary: number | null; maBaseSalary: number | null; maxSalary: number | null;
+    } | null = null;
+    if (latest && latest.cells.length) {
+      const step0 = Math.min(...latest.cells.map((c) => c.stepOrder));
+      const baCell =
+        latest.cells.find((c) => c.stepOrder === step0 && /^BA\b/i.test(c.laneLabel ?? "")) ??
+        latest.cells.find((c) => c.stepOrder === step0 && c.laneOrder === 0);
+      const maCell = latest.cells.find((c) => c.stepOrder === step0 && /^MA\b/i.test(c.laneLabel ?? ""));
+      summary = {
+        scheduleName: defaultFamily,
+        schoolYear: latest.schoolYear,
+        baseSalary: baCell ? baCell.salary : null,
+        maBaseSalary: maCell ? maCell.salary : null,
+        maxSalary: latest.maxSalary,
+      };
+    }
+
+    res.json({ bargainingUnit: unit, contractId, schedules, jobFamilies, schoolYears, summary, availableUnits });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/dashboard/document?src=upload://...
 // Streams a locally-stored uploaded CBA PDF so its source link renders in the
 // browser. Crawled docs use real http(s) URLs and are linked directly by the

@@ -3,6 +3,8 @@ export * from "./districts";
 export * from "./source_documents";
 export * from "./contracts";
 export * from "./contract_provisions";
+export * from "./contract_salary_schedules";
+export * from "./contract_salary_schedule_cells";
 export * from "./settlements";
 export * from "./factfinding_proposals";
 export * from "./extraction_runs";
