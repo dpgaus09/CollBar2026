@@ -28,6 +28,11 @@ export const contractsTable = pgTable(
     affiliation: text("affiliation"),
     unitScope: text("unit_scope"),
     bargainingUnit: text("bargaining_unit").notNull().default("teachers"),
+    // True when an admin manually corrected the bargaining unit. Pins the value
+    // so the pipeline's auto-classifier (backfill_contract_units) won't revert
+    // it back to the text-derived guess. Additive column applied via the API
+    // server runMigrations() — see artifacts/api-server/src/app.ts.
+    unitOverride: boolean("unit_override").notNull().default(false),
     effectiveStart: date("effective_start", { mode: "string" }),
     effectiveEnd: date("effective_end", { mode: "string" }),
     termYears: numeric("term_years", { precision: 3, scale: 1 }),

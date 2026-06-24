@@ -23,6 +23,30 @@ yields correct settlements). Repairing existing bad data means relabeling BOTH
 contracts and settlements and removing exact duplicates, then verifying no
 upload row's contract/settlement unit differs from its source_documents unit.
 
+# Admin unit reassignment is pinned via contracts.unit_override
+
+Admins can reassign an existing contract's `bargaining_unit` after the fact. A
+manual reassignment sets `contracts.unit_override = true`, which is a permanent
+pin: any auto-classifier path (the heuristic `backfill_contract_units` and the
+extraction LLM) MUST skip override rows so a human correction is never reverted
+to the auto guess. Reassignment is atomic — it updates the contract, propagates
+the new unit to that contract's DERIVED settlements, and (for `upload://` docs
+backing exactly ONE contract) also rewrites the authoritative
+`source_documents.bargaining_unit` so re-extraction keeps the fix.
+
+**Why:** without the pin, the next pipeline pass re-derives units from scope/union
+text and silently undoes the admin's correction; without propagating to
+settlements, the customer unit selector (driven by settlements) still shows the
+wrong unit; without updating the upload doc's authoritative unit, re-extraction
+re-clobbers it (uploads trust `source_documents.bargaining_unit`).
+
+**How to apply:** the reassign endpoint runs in a transaction with `FOR UPDATE`;
+unique-key collisions (a sibling already holds the target unit/scope/term, or a
+settlement slot is taken) must surface as 409, not corrupt data — and Drizzle
+wraps pg errors so the unique-violation code (23505) lives on the `.cause` chain.
+NEVER touch `source_documents` when the upload doc backs more than one contract
+(anti-clobber guard).
+
 # upload:// PDFs need an authed serving route, not a raw link
 
 `upload://...` is a storage scheme, not a URL — using it as an href opens a blank

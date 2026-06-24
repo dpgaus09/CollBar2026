@@ -4432,6 +4432,267 @@ function UploadCbaTab() {
 }
 
 // ---------------------------------------------------------------------------
+// Fix a contract's bargaining unit (Task #158)
+//
+// Look up a district, list its contracts, and reassign any contract to the
+// correct bargaining unit. The change propagates to the settlement figures
+// customers see and is pinned server-side so the pipeline won't revert it.
+// ---------------------------------------------------------------------------
+
+interface DistrictContract {
+  id: string;
+  bargainingUnit: string;
+  unitOverride: boolean;
+  unionName: string | null;
+  affiliation: string | null;
+  unitScope: string | null;
+  effectiveStart: string | null;
+  effectiveEnd: string | null;
+  termYears: string | null;
+  sourceUrl: string | null;
+  settlementCount: number;
+}
+
+function unitLabel(value: string): string {
+  return BARGAINING_UNIT_OPTIONS.find((u) => u.value === value)?.label ?? value;
+}
+
+function EditContractUnitSection() {
+  const { data: session } = useAdminSession();
+  const isAuthenticated = session?.authenticated === true;
+  const queryClient = useQueryClient();
+
+  const { data: districtsData } = useQuery<{ districts: District[] }>({
+    queryKey: ["/api/dashboard/districts"],
+    queryFn: () =>
+      fetch(apiUrl("/api/dashboard/districts"), { credentials: "include" }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    enabled: isAuthenticated,
+    retry: false,
+  });
+  const districts = districtsData?.districts ?? [];
+
+  const [districtSearch, setDistrictSearch] = useState("");
+  const [districtId, setDistrictId] = useState("");
+  const [pendingUnit, setPendingUnit] = useState<Record<string, string>>({});
+  const [rowMsg, setRowMsg] = useState<
+    Record<string, { type: "ok" | "err"; text: string }>
+  >({});
+  const [savingId, setSavingId] = useState<string | null>(null);
+
+  const contractsKey = ["/api/admin/districts", districtId, "contracts"];
+  const { data: contractsData, isLoading, isError } = useQuery<{
+    districtName: string;
+    contracts: DistrictContract[];
+  }>({
+    queryKey: contractsKey,
+    queryFn: () =>
+      fetch(apiUrl(`/api/admin/districts/${districtId}/contracts`), {
+        credentials: "include",
+      }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    enabled: isAuthenticated && !!districtId,
+    retry: false,
+  });
+  const contracts = contractsData?.contracts ?? [];
+
+  const clearMsg = (id: string) =>
+    setRowMsg((m) => {
+      const next = { ...m };
+      delete next[id];
+      return next;
+    });
+
+  const save = async (c: DistrictContract) => {
+    const newUnit = pendingUnit[c.id] ?? c.bargainingUnit;
+    setSavingId(c.id);
+    clearMsg(c.id);
+    try {
+      const r = await fetch(apiUrl(`/api/admin/contracts/${c.id}/bargaining-unit`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ bargainingUnit: newUnit }),
+      });
+      const j = (await r.json()) as {
+        ok?: boolean;
+        settlementsUpdated?: number;
+        unchanged?: boolean;
+        error?: string;
+      };
+      if (!r.ok || !j.ok) {
+        setRowMsg((m) => ({
+          ...m,
+          [c.id]: { type: "err", text: j.error ?? `Request failed (HTTP ${r.status})` },
+        }));
+        return;
+      }
+      setRowMsg((m) => ({
+        ...m,
+        [c.id]: {
+          type: "ok",
+          text: j.unchanged
+            ? `Confirmed as ${unitLabel(newUnit)} and pinned.`
+            : `Reassigned to ${unitLabel(newUnit)}${
+                j.settlementsUpdated
+                  ? ` · ${j.settlementsUpdated} settlement(s) updated`
+                  : ""
+              }.`,
+        },
+      }));
+      await queryClient.invalidateQueries({ queryKey: contractsKey });
+    } catch {
+      setRowMsg((m) => ({
+        ...m,
+        [c.id]: { type: "err", text: "Network error during save." },
+      }));
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  if (!isAuthenticated) return null;
+
+  const filtered = districts.filter(
+    (d) =>
+      !districtSearch ||
+      d.name.toLowerCase().includes(districtSearch.toLowerCase()) ||
+      (d.county ?? "").toLowerCase().includes(districtSearch.toLowerCase()),
+  );
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-1">
+        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
+          Fix a contract's bargaining unit
+        </h2>
+        <p className="text-xs text-slate-500 leading-relaxed max-w-2xl">
+          Picked the wrong unit at upload time? Look up a district, then reassign any
+          contract to the correct bargaining unit. The change updates the settlement
+          figures customers see and is pinned so the pipeline won't revert it.
+        </p>
+      </div>
+
+      <div className="rounded-lg border border-slate-800 bg-slate-900 p-5 space-y-4">
+        <div className="space-y-1.5">
+          <label className="text-xs text-slate-400">District</label>
+          <input
+            type="text"
+            placeholder="Filter districts by name or county…"
+            value={districtSearch}
+            onChange={(e) => {
+              setDistrictSearch(e.target.value);
+              setDistrictId("");
+            }}
+            className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:border-blue-500 focus:outline-none"
+          />
+          <select
+            value={districtId}
+            onChange={(e) => {
+              setDistrictId(e.target.value);
+              setRowMsg({});
+              setPendingUnit({});
+            }}
+            className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 focus:border-blue-500 focus:outline-none"
+          >
+            <option value="">— Select a district —</option>
+            {filtered.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name}
+                {d.state ? ` (${d.state})` : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {districtId && isLoading && (
+          <p className="text-[11px] text-slate-500">Loading contracts…</p>
+        )}
+        {districtId && isError && (
+          <p className="text-[11px] text-red-400">
+            Could not load contracts for this district.
+          </p>
+        )}
+        {districtId && !isLoading && !isError && contracts.length === 0 && (
+          <p className="text-[11px] text-slate-500">
+            No contracts on file for this district.
+          </p>
+        )}
+
+        {contracts.length > 0 && (
+          <div className="space-y-3">
+            {contracts.map((c) => {
+              const sel = pendingUnit[c.id] ?? c.bargainingUnit;
+              const dirty = sel !== c.bargainingUnit;
+              const msg = rowMsg[c.id];
+              const term = [c.effectiveStart, c.effectiveEnd]
+                .filter(Boolean)
+                .join(" → ");
+              return (
+                <div
+                  key={c.id}
+                  className="rounded border border-slate-800 bg-slate-950 p-3 space-y-2"
+                >
+                  <div className="min-w-0">
+                    <p className="text-xs text-slate-300 truncate">
+                      {c.unionName || "Unnamed unit"}
+                      {c.affiliation ? ` · ${c.affiliation}` : ""}
+                    </p>
+                    <p className="text-[11px] text-slate-500">
+                      {unitLabel(c.bargainingUnit)}
+                      {c.unitScope ? ` · ${c.unitScope}` : ""}
+                      {term ? ` · ${term}` : ""}
+                      {` · ${c.settlementCount} settlement(s)`}
+                      {c.unitOverride ? " · pinned" : ""}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={sel}
+                      onChange={(e) =>
+                        setPendingUnit((p) => ({ ...p, [c.id]: e.target.value }))
+                      }
+                      className="flex-1 text-xs bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-slate-200 focus:border-blue-500 focus:outline-none"
+                    >
+                      {BARGAINING_UNIT_OPTIONS.map((u) => (
+                        <option key={u.value} value={u.value}>
+                          {u.label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => save(c)}
+                      disabled={savingId === c.id || (!dirty && c.unitOverride)}
+                      className="text-xs px-3 py-1.5 rounded bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-50 transition-colors whitespace-nowrap"
+                    >
+                      {savingId === c.id ? "Saving…" : dirty ? "Save" : "Pin"}
+                    </button>
+                  </div>
+                  {msg && (
+                    <p
+                      className={`text-[11px] ${
+                        msg.type === "ok" ? "text-emerald-400" : "text-red-400"
+                      }`}
+                    >
+                      {msg.text}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page shell with tab routing
 // ---------------------------------------------------------------------------
 
@@ -4557,7 +4818,12 @@ export default function AdminPage() {
         {tab === "overview" && <OverviewTab />}
         {tab === "crawl-report" && <CrawlReportTab />}
         {tab === "extraction-report" && <ExtractionReportTab />}
-        {tab === "upload" && <UploadCbaTab />}
+        {tab === "upload" && (
+          <div className="space-y-12">
+            <UploadCbaTab />
+            <EditContractUnitSection />
+          </div>
+        )}
         {tab === "review-queue" && <ReviewQueueTab />}
         {tab === "alerts" && <AlertsTab />}
         {tab === "eis-crosscheck" && <EisXCheckTab />}

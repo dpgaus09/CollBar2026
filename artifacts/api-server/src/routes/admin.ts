@@ -7,7 +7,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { db, pool } from "@workspace/db";
 import { sql } from "drizzle-orm";
-import { VALID_BARGAINING_UNITS } from "./bargaining-units.js";
+import { VALID_BARGAINING_UNITS, BARGAINING_UNIT_LABELS } from "./bargaining-units.js";
 import { runPromotion } from "../lib/promote.js";
 import { uploadBuffer, uploadedCbaKey } from "../lib/objectStorage.js";
 
@@ -1657,6 +1657,211 @@ router.post("/admin/upload-cba", requireAdminToken, (req, res) => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fix a contract's bargaining unit (Task #158)
+//
+// Lets an admin correct a contract whose unit was mislabeled at upload or
+// extraction time. The correction:
+//   1. updates contracts.bargaining_unit and pins it via unit_override = true
+//      so the pipeline's auto-classifier (backfill_contract_units) won't revert
+//      it;
+//   2. propagates to the derived settlements (contract_id linked) — these drive
+//      the unit selector the customer sees;
+//   3. for uploaded docs, also updates the authoritative
+//      source_documents.bargaining_unit, because the extractor trusts that value
+//      for upload:// docs on a re-extraction — otherwise the fix would silently
+//      revert.
+// All writes run in one transaction; a unique-constraint collision (another
+// contract or settlement already occupies the target unit) rolls everything
+// back and returns a 409 with a human-readable message.
+// ---------------------------------------------------------------------------
+
+// GET /admin/districts/:id/contracts — list a district's contracts so an admin
+// can pick the one to correct.
+router.get("/admin/districts/:id/contracts", requireAdminToken, (req, res) => {
+  void (async () => {
+    const districtId = parseInt(String(req.params.id ?? ""), 10);
+    if (!Number.isInteger(districtId) || districtId < 1) {
+      res.status(400).json({ error: "district id must be a positive integer" });
+      return;
+    }
+    const distRows = await db.execute(sql`
+      SELECT id, name FROM districts WHERE id = ${districtId}
+    `);
+    const district = distRows.rows[0] as { id: string | number; name: string } | undefined;
+    if (!district) {
+      res.status(404).json({ error: `District ${districtId} not found` });
+      return;
+    }
+    const rows = await db.execute(sql`
+      SELECT c.id,
+             c.bargaining_unit AS "bargainingUnit",
+             c.unit_override   AS "unitOverride",
+             c.union_name      AS "unionName",
+             c.affiliation,
+             c.unit_scope      AS "unitScope",
+             c.effective_start AS "effectiveStart",
+             c.effective_end   AS "effectiveEnd",
+             c.term_years      AS "termYears",
+             sd.source_url     AS "sourceUrl",
+             (SELECT COUNT(*)::int FROM settlements s WHERE s.contract_id = c.id)
+               AS "settlementCount"
+      FROM contracts c
+      LEFT JOIN source_documents sd ON sd.id = c.source_doc_id
+      WHERE c.district_id = ${districtId}
+      ORDER BY (c.bargaining_unit = 'teachers') DESC, c.bargaining_unit,
+               c.effective_start DESC NULLS LAST, c.id
+    `);
+    res.json({ districtId, districtName: district.name, contracts: rows.rows });
+  })().catch((e) => {
+    console.error(e);
+    res.status(500).json({ error: "Internal server error" });
+  });
+});
+
+async function handleReassignUnit(req: Request, res: Response): Promise<void> {
+  const contractId = parseInt(String(req.params.id ?? ""), 10);
+  if (!Number.isInteger(contractId) || contractId < 1) {
+    res.status(400).json({ error: "contract id must be a positive integer" });
+    return;
+  }
+  // Validate strictly against the controlled vocabulary. We deliberately do NOT
+  // use parseUnit() here, which silently defaults invalid input to 'teachers' —
+  // for a manual correction, bad input must be a 400, not a silent mislabel.
+  const body = (req.body ?? {}) as { bargainingUnit?: unknown };
+  const newUnit = body.bargainingUnit != null ? String(body.bargainingUnit) : "";
+  if (!VALID_BARGAINING_UNITS.has(newUnit)) {
+    res.status(400).json({ error: `Invalid bargaining_unit: ${newUnit || "(missing)"}` });
+    return;
+  }
+
+  const cRows = await db.execute(sql`
+    SELECT c.id, c.bargaining_unit, c.source_doc_id,
+           d.name AS district_name, sd.source_url
+    FROM contracts c
+    LEFT JOIN districts d ON d.id = c.district_id
+    LEFT JOIN source_documents sd ON sd.id = c.source_doc_id
+    WHERE c.id = ${contractId}
+  `);
+  const contract = cRows.rows[0] as
+    | {
+        id: string | number;
+        bargaining_unit: string;
+        source_doc_id: string | number | null;
+        district_name: string | null;
+        source_url: string | null;
+      }
+    | undefined;
+  if (!contract) {
+    res.status(404).json({ error: `Contract ${contractId} not found` });
+    return;
+  }
+  const districtName = contract.district_name ?? "this district";
+  const label = BARGAINING_UNIT_LABELS[newUnit] ?? newUnit;
+
+  // No-op: same unit. Still pin it (unit_override = true) — the admin has
+  // explicitly confirmed this unit is correct, so protect it from the
+  // auto-classifier going forward.
+  if (contract.bargaining_unit === newUnit) {
+    await db.execute(sql`UPDATE contracts SET unit_override = true WHERE id = ${contractId}`);
+    res.json({
+      ok: true,
+      contractId,
+      bargainingUnit: newUnit,
+      settlementsUpdated: 0,
+      unchanged: true,
+      districtName,
+    });
+    return;
+  }
+
+  const isUpload =
+    !!contract.source_url && String(contract.source_url).startsWith("upload://");
+  const sourceDocId =
+    contract.source_doc_id == null ? null : Number(contract.source_doc_id);
+
+  try {
+    const settlementsUpdated = await db.transaction(async (tx) => {
+      // Lock the contract row so a concurrent reassignment can't interleave.
+      await tx.execute(sql`SELECT id FROM contracts WHERE id = ${contractId} FOR UPDATE`);
+      await tx.execute(sql`
+        UPDATE contracts
+        SET bargaining_unit = ${newUnit}, unit_override = true
+        WHERE id = ${contractId}
+      `);
+      const upd = await tx.execute(sql`
+        UPDATE settlements SET bargaining_unit = ${newUnit}
+        WHERE contract_id = ${contractId}
+      `);
+      // Uploaded docs: source_documents.bargaining_unit is the authoritative
+      // human choice the extractor honors on re-extraction. Update it too — but
+      // only when this doc maps to exactly this one contract (uploads are
+      // single-unit), so a PDF shared across units is never mislabeled.
+      if (isUpload && sourceDocId != null) {
+        await tx.execute(sql`
+          UPDATE source_documents sd
+          SET bargaining_unit = ${newUnit}
+          WHERE sd.id = ${sourceDocId}
+            AND (SELECT COUNT(*) FROM contracts c2 WHERE c2.source_doc_id = sd.id) = 1
+        `);
+      }
+      return Number((upd as { rowCount?: number | null }).rowCount ?? 0);
+    });
+
+    res.json({ ok: true, contractId, bargainingUnit: newUnit, settlementsUpdated, districtName });
+  } catch (err) {
+    // drizzle wraps the driver error in a "Failed query" Error, so the pg
+    // fields (code/constraint) live on the .cause chain, not the top error.
+    // Walk the chain to find the first node that carries them.
+    let pg: { code?: string; constraint?: string } = {};
+    let node: unknown = err;
+    for (let i = 0; i < 5 && node; i++) {
+      const n = node as { code?: string; constraint?: string; cause?: unknown };
+      if (n.code != null || n.constraint != null) {
+        pg = { code: n.code, constraint: n.constraint };
+        break;
+      }
+      node = n.cause;
+    }
+    const constraint = pg.constraint;
+    const code = pg.code;
+    const msg = String((err as { message?: string })?.message ?? err);
+    const isUnique = code === "23505" || /unique|duplicate/i.test(msg) || constraint != null;
+    if (isUnique) {
+      if (constraint === "settlements_district_unit_year_unique") {
+        res.status(409).json({
+          error:
+            `A ${label} settlement already exists for ${districtName} covering the same ` +
+            `year(s). Reassigning this contract would duplicate it — resolve the existing ` +
+            `settlement first. No changes were made.`,
+        });
+        return;
+      }
+      res.status(409).json({
+        error:
+          `Another ${label} contract already exists for ${districtName} with the same scope ` +
+          `and start date. Reassigning would create a duplicate — resolve that contract ` +
+          `first. No changes were made.`,
+      });
+      return;
+    }
+    throw err;
+  }
+}
+
+// PATCH /admin/contracts/:id/bargaining-unit — reassign one contract's unit.
+router.patch(
+  "/admin/contracts/:id/bargaining-unit",
+  requireAdminToken,
+  json(),
+  (req, res) => {
+    handleReassignUnit(req, res).catch((e) => {
+      console.error(e);
+      res.status(500).json({ error: "Internal server error" });
+    });
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Directory Refresh — exported spawn helper (used by cron in index.ts) + routes

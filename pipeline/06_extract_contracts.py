@@ -998,14 +998,31 @@ def backfill_contract_units(conn) -> int:
     Contracts from manual uploads (source_url 'upload://…') are left untouched:
     their unit is an explicit human choice and must not be re-derived by the
     text classifier, which can misread non-teacher contracts.
+
+    Contracts an admin manually corrected (contracts.unit_override = true) are
+    likewise skipped, so a human correction is never reverted to the auto guess.
+    The override column is additive and may not exist yet when the pipeline runs
+    standalone before the API server's migration; we detect it first and degrade
+    gracefully to the prior behavior when it is absent.
     """
     import psycopg2  # driver is always available where this runs
 
     cur = conn.cursor()
     cur.execute(
         """
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'contracts' AND column_name = 'unit_override'
+        )
+        """
+    )
+    has_override = bool(cur.fetchone()[0])
+
+    override_col = ", c.unit_override" if has_override else ""
+    cur.execute(
+        f"""
         SELECT c.id, c.unit_scope, c.union_name, c.affiliation, c.bargaining_unit,
-               sd.source_url
+               sd.source_url{override_col}
         FROM contracts c
         LEFT JOIN source_documents sd ON sd.id = c.source_doc_id
         """
@@ -1013,7 +1030,15 @@ def backfill_contract_units(conn) -> int:
     rows = cur.fetchall()
     updated = 0
     skipped_conflict = 0
-    for cid, scope, uname, affil, current, src_url in rows:
+    for row in rows:
+        if has_override:
+            cid, scope, uname, affil, current, src_url, override = row
+        else:
+            cid, scope, uname, affil, current, src_url = row
+            override = False
+        # An admin's manual correction (unit_override) is pinned — never re-derive.
+        if override:
+            continue
         if src_url and src_url.startswith("upload://"):
             continue
         guess = common.classify_bargaining_unit(scope, uname, affil, default="other")

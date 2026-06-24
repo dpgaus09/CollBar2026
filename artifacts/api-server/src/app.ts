@@ -334,6 +334,20 @@ async function runMigrations(): Promise<void> {
     `);
 
     logger.info("Migration OK: settlements verification columns ensured");
+
+    // -----------------------------------------------------------------------
+    // Admin manual override of a contract's bargaining unit (Task #158).
+    // Additive flag, default false. When true, the pipeline's auto-classifier
+    // (backfill_contract_units) skips the row so an admin's correction sticks.
+    // ADD COLUMN IF NOT EXISTS keeps this safe on every restart and on a fresh
+    // DB built from migrations alone.
+    // -----------------------------------------------------------------------
+    await db.execute(sql`
+      ALTER TABLE contracts
+        ADD COLUMN IF NOT EXISTS unit_override BOOLEAN NOT NULL DEFAULT false
+    `);
+
+    logger.info("Migration OK: contracts.unit_override ensured");
   } catch (err) {
     logger.warn({ err }, "Migration failed — will retry on next restart");
     return;
