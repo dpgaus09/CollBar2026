@@ -288,3 +288,10 @@ doc_id,district_id,district_name,state,school_year,bargaining_unit,classificatio
 1047,22094,Test District tstrq-1782299408287-194565,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782299408287-194565/norun.pdf
 1048,22094,Test District tstrq-1782299408287-194565,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782299408287-194565/bulk-ids.pdf
 1049,22094,Test District tstrq-1782299408287-194565,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782299408287-194565/bulk-doc.pdf
+1052,22096,Test District tstrq-1782300350785-270495,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782300350785-270495/good-latest.pdf
+1053,22096,Test District tstrq-1782300350785-270495,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782300350785-270495/bad.pdf
+1054,22096,Test District tstrq-1782300350785-270495,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782300350785-270495/norun.pdf
+1055,22096,Test District tstrq-1782300350785-270495,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782300350785-270495/bulk-ids.pdf
+1056,22096,Test District tstrq-1782300350785-270495,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782300350785-270495/bulk-doc.pdf
+1060,22099,ZZ Unit Test tstunit-1782312037714-630489,IL,,teachers,unreadable,file_not_found,upload://tstunit-1782312037714-630489
+1061,22100,ZZ Unit Test tstunit-1782312086035-400101,IL,,teachers,unreadable,file_not_found,upload://tstunit-1782312086035-400101
