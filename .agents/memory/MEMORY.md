@@ -44,3 +44,4 @@
 - [Salary extraction cross-unit leak](salary-extraction-cross-unit-leak.md) — one CBA PDF shared by multiple unit contract-rows makes 18_extract stamp the teacher grid onto support_staff/secretarial; add magnitude sanity; ~40% recall gap. Don't backfill until fixed.
 - [Salary-grid textual Step N](salary-grid-textual-step.md) — textual "Step 1" rows must be an education-only fallback; non-edu textual grids (stipends) evade the magnitude floor and must be rejected; glued/corrupt labels rejected by construction.
 - [Salary-grid coverage gap](salary-grid-coverage-gap.md) — IL teacher grid recall ~33%; readable-but-unrecognized misses are mostly prose/rosters/fragments not grids; real recoverable bucket is ~58 scanned PDFs needing OCR (separate task).
+- [Publish DB-diff timeout](publish-db-diff-timeout.md) — Replit publish schema-diff times out on cold Neon prod DB (~17s connect > check timeout); warm prod (SELECT 1, env=production) then retry publish within ~5min.
