@@ -10,9 +10,9 @@ K-12 collective bargaining settlement database and district dashboard — Ohio s
 - `pnpm run typecheck:libs` — typecheck shared libs only
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes to dev database (run after schema changes)
+- `pnpm --filter @workspace/db run check-drift` — verify the Drizzle schema matches the dev database (read-only; issues no DDL)
 - `python3 pipeline/seed_test.py` — insert and delete 3 TEST_ districts, print acceptance row-count table
-- `python3 -m unittest discover -s pipeline/tests -p "test_*.py" -v` — run Python test suite (57 tests)
+- `python3 -m unittest discover -s pipeline/tests -p "test_*.py" -v` — run Python test suite (58 tests)
 - `python3 pipeline/08_cron_incremental.py` — run nightly incremental SERB scraper manually
 - Required env secret: `DATABASE_URL` — already provisioned via Replit managed PostgreSQL
 
@@ -41,7 +41,7 @@ K-12 collective bargaining settlement database and district dashboard — Ohio s
   - `src/pages/admin.tsx` — Admin panel (Crawl, Extraction, Review Queue, DB Stats, Alerts tabs)
 - `pipeline/` — Python data acquisition and extraction scripts
   - `pipeline/08_cron_incremental.py` — nightly incremental SERB scraper (Phase 5)
-  - `pipeline/tests/` — Python unit + integration tests (57 tests across 4 files)
+  - `pipeline/tests/` — Python unit + integration tests (58 tests across 4 files)
 - `pipeline/seed_test.py` — Phase 1 acceptance test seed script
 
 ## Architecture decisions
@@ -77,9 +77,9 @@ CollBar lets school business officials (CFOs/treasurers) see their entire labor 
 
 ## Gotchas
 
-- Always run `pnpm --filter @workspace/db run push` after any schema change in `lib/db/src/schema/`
+- After any schema change: declare it in `lib/db/src/schema/*.ts` AND add an idempotent `ADD COLUMN IF NOT EXISTS` ALTER to the API server's `runMigrations()` (`artifacts/api-server/src/app.ts`), then verify with `pnpm --filter @workspace/db run check-drift`. Do NOT run `drizzle-kit push --force` — this DB also contains tables Drizzle doesn't manage (login_events, sync_run_status, pipeline tables), so push tries to TRUNCATE/DROP data.
 - Always run `pnpm --filter @workspace/api-spec run codegen` after changing `lib/api-spec/openapi.yaml`
-- Drizzle schema must declare every column that exists in the DB — columns added via raw ALTER TABLE must be added to the `.ts` schema file before the next `push` or Drizzle will try to drop them
+- Drizzle schema must declare every column that exists on a Drizzle-owned table — columns added via raw ALTER TABLE must be mirrored into the `.ts` schema file, or the `check-drift` guardrail (and `pipeline/tests/test_schema.py::test_drizzle_schema_matches_db`) fails
 - `psycopg` (not `psycopg2`) is the Python Postgres client for pipeline scripts
 - The `pipeline/` directory contains Python scripts — run them with `python3`, not `node`
 - Scraper crawl state files live in `pipeline/crawl_state/` (created in Phase 2)

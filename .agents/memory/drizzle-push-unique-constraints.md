@@ -1,45 +1,48 @@
 ---
-name: drizzle-kit push-force breaks on unique constraints over populated tables
-description: Why post-merge push-force fails for any UNIQUE constraint on a table with rows, and how to apply such constraints safely.
+name: Schema apply + drift guardrail (hybrid-managed DB)
+description: Why drizzle-kit push/push-force are unusable on this DB, how schema actually reaches the DB, and how drift is now verified.
 ---
 
-# drizzle-kit push-force + unique constraints on populated tables
+# Schema apply + drift guardrail
 
-`pnpm --filter db push-force` (drizzle-kit 0.31.10, run by `scripts/post-merge.sh`)
-**cannot** be relied on to apply or re-detect a UNIQUE constraint on a table that
-already has rows.
+This database is **hybrid-managed**, NOT owned end-to-end by Drizzle:
+- versioned migration files in `db/migrations` (for fresh-DB provisioning), plus
+- idempotent `ADD COLUMN IF NOT EXISTS` / `CREATE TABLE IF NOT EXISTS` ALTERs in
+  the API server's `runMigrations()` (`artifacts/api-server/src/app.ts`), run on
+  every API server boot, plus
+- several tables that intentionally exist in the DB with **no Drizzle
+  declaration**: `login_events`, `sync_run_status`, `directory_refresh_log`,
+  `il_district_fte`, `il_eis_district`, `tss_annual`, and the Python pipeline's
+  tables.
 
-Two compounding problems observed:
-1. drizzle-kit 0.31.10 does **not** detect existing explicit-named *composite*
-   unique CONSTRAINTS during `push` introspection, so every run it wants to
-   re-`ADD` them.
-2. Adding a unique constraint to a non-empty table triggers an interactive
-   "Do you want to truncate <table>?" prompt. `--force` does **not** auto-confirm
-   *this specific* prompt — under closed stdin (CI / post-merge) it errors with
-   "Interactive prompts require a TTY terminal" and exits non-zero.
+**Consequence:** `drizzle-kit push` ALWAYS wants to DROP the non-Drizzle tables,
+so it can never report "No changes detected"; `push --force` would silently DROP
+them AND tries to TRUNCATE the populated `contracts` table to (re)apply its
+already-present composite unique key. push introspection is also slow and can
+hang under concurrent pipeline DB load.
 
-**Why this matters / data-safety:** `--force` is documented as "auto-approve all
-data loss statements … may truncate your tables." If push-force were ever given a
-TTY here, it would answer the prompt and **TRUNCATE the table** (delete all rows).
-So the post-merge erroring out is actually the *data-safe* failure mode. Never feed
-push-force a pseudo-tty (e.g. `script`) to "get past" the prompt — it will wipe data.
+**Why this matters:** a red "schema drift" test, a hanging/failed post-merge, and
+a truncate landmine were all inevitable side-effects of pointing push/push-force
+at a DB it doesn't fully own. The fix is to stop using push as a guardrail/apply
+tool, not to fight it.
 
-**Scope:** pre-existing, not specific to one table. Verified to fire on every
-populated table that got a unique key this way: `settlements` (~7.3k rows),
-`source_documents` (~180 rows) from migration 0008, and `contracts` from 0009.
-
-**How to apply a unique constraint change here (the working pattern):**
-- Apply it to the dev DB directly via raw SQL (`DROP CONSTRAINT IF EXISTS old;
-  ADD CONSTRAINT new UNIQUE (...)`). Adding a column to an existing unique key is
-  strictly more permissive, so the ADD can never fail on duplicates.
-- Update the Drizzle schema (`lib/db/src/schema/*.ts`) with an explicit-named
-  `unique("...")` matching the DB, plus a hand-written `db/migrations/NNNN_*.sql`
-  and a `meta/_journal.json` entry, for documentation / fresh-DB provisioning.
-- Expect the post-merge `push-force` step to FAIL on these tables. That failure is
-  pre-existing and is a migration-tooling gap, not a defect in the constraint change.
-
-**Open follow-up (affects production deploys & "keep pipeline running" work):** the
-post-merge / production migration path should stop using `push-force` for unique
-constraints — options: apply the hand-written SQL migrations via `drizzle-orm`
-`migrate()` (needs a `__drizzle_migrations` bootstrap), switch these constraints to
-`uniqueIndex` if push detects indexes more reliably, or upgrade drizzle-kit.
+**How to apply / verify schema now:**
+- Additive schema changes: declare in `lib/db/src/schema/*.ts` AND add the
+  idempotent ALTER to `runMigrations()`. The change reaches the dev DB when the
+  API server restarts (post-merge reconciliation restarts running workflows), and
+  reaches prod via the Publish flow (prod is **autoscale**; its postBuild only
+  runs `pnpm store prune` — it does NOT run push-force; the old promotions.ts
+  comment claiming otherwise was stale).
+- `push-force` is **neutered** in `lib/db/package.json` (the script now prints a
+  refusal and exits 1). Interactive `push` is kept for human investigation only.
+- Verify schema/DB sync with `pnpm --filter @workspace/db run check-drift`
+  (`lib/db/scripts/check-drift.ts`): read-only, issues NO DDL, compares declared
+  columns vs `information_schema.columns` in BOTH directions, scoped to the
+  ~24 Drizzle-owned tables. `pipeline/tests/test_schema.py` runs it as a test.
+- check-drift deliberately checks **column presence only** (not types/nullability/
+  defaults/indexes) to avoid false positives from drizzle→pg type mapping. The
+  one constraint that bit us — the `contracts` composite unique key
+  `(district_id, bargaining_unit, unit_scope, effective_start)`, **NULLS
+  DISTINCT** — is guarded by a dedicated test (`pg_constraint` joined to
+  `pg_index.indnullsnotdistinct`; note `pg_constraint` has no nulls-distinct
+  column in PG16, it lives on the backing index).

@@ -102,7 +102,9 @@ class TestSchema(unittest.TestCase):
         self.assertEqual(
             missing, [],
             f"Missing tables: {missing!r}. "
-            "Run: pnpm --filter @workspace/db run push",
+            "Declare them in lib/db/src/schema/*.ts and apply them via a "
+            "migration / the API server's runMigrations(). Do NOT run "
+            "`drizzle-kit push --force` — it can truncate or drop data.",
         )
 
     def test_all_expected_columns_exist(self):
@@ -118,7 +120,9 @@ class TestSchema(unittest.TestCase):
         self.assertEqual(
             errors, [],
             f"Missing columns: {errors!r}. "
-            "Run: pnpm --filter @workspace/db run push",
+            "Declare them in lib/db/src/schema/*.ts and apply them via a "
+            "migration / the API server's runMigrations(). Do NOT run "
+            "`drizzle-kit push --force` — it can truncate or drop data.",
         )
 
     def test_districts_state_column_accepts_oh(self):
@@ -196,28 +200,80 @@ class TestSchema(unittest.TestCase):
 
     def test_drizzle_schema_matches_db(self):
         """
-        Drizzle schema files must declare every column that exists in the DB.
-        Runs drizzle-kit push and asserts 'No changes detected', confirming
-        the TypeScript schema files and the live DB are in sync.
-        This catches the failure mode where a column was added via raw
-        ALTER TABLE but not declared in the .ts schema file.
+        Every column on a Drizzle-owned table must be declared in the .ts schema.
+
+        Runs the non-destructive `check-drift` script
+        (lib/db/scripts/check-drift.ts), which compares the columns declared in
+        the Drizzle schema against the live database for every Drizzle-owned
+        table. It issues no DDL, so unlike `drizzle-kit push` it can never
+        truncate or drop data — important because this DB is a hybrid of
+        migration files + the API server's runMigrations(), with several tables
+        (login_events, sync_run_status, pipeline tables) intentionally living in
+        the DB without a Drizzle declaration.
+
+        This catches the failure mode where a column was added via raw ALTER
+        TABLE (or runMigrations) but never mirrored into the Drizzle .ts schema.
         """
         import subprocess
         result = subprocess.run(
-            ["pnpm", "--filter", "@workspace/db", "run", "push"],
+            ["pnpm", "--filter", "@workspace/db", "run", "check-drift"],
             capture_output=True,
             text=True,
             cwd=str(Path(__file__).parent.parent.parent),
-            timeout=30,
+            timeout=120,
         )
         combined = result.stdout + result.stderr
-        self.assertIn(
-            "No changes detected",
-            combined,
-            "drizzle-kit detected pending schema changes — run "
-            "`pnpm --filter @workspace/db run push` and re-add any raw "
-            "ALTER TABLE columns to the Drizzle schema .ts files.\n"
-            f"drizzle-kit output:\n{combined}",
+        self.assertEqual(
+            result.returncode, 0,
+            "Schema drift detected between the Drizzle schema and the database. "
+            "Mirror any DB-only columns into lib/db/src/schema/*.ts (and keep "
+            "the additive ALTER in the API server's runMigrations()). Do NOT "
+            "run `drizzle-kit push --force` — it can truncate or drop data.\n"
+            f"check-drift output:\n{combined}",
+        )
+
+    def test_contracts_unique_constraint_intact(self):
+        """
+        The contracts uniqueness key — (district_id, bargaining_unit,
+        unit_scope, effective_start), NULLS DISTINCT — must exist exactly as
+        declared in lib/db/src/schema/contracts.ts. This is the constraint whose
+        absence previously made drizzle-kit push want to TRUNCATE the populated
+        contracts table; the guardrail must detect if it ever drifts.
+        """
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT con.conname, idx.indnullsnotdistinct,
+                   array_agg(att.attname ORDER BY att.attname) AS cols
+            FROM pg_constraint con
+            JOIN pg_class rel ON rel.oid = con.conrelid
+            JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+            JOIN pg_index idx ON idx.indexrelid = con.conindid
+            JOIN unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
+            JOIN pg_attribute att ON att.attrelid = rel.oid
+                                 AND att.attnum = k.attnum
+            WHERE nsp.nspname = 'public' AND rel.relname = 'contracts'
+              AND con.contype = 'u'
+            GROUP BY con.conname, idx.indnullsnotdistinct
+            """
+        )
+        rows = cur.fetchall()
+        cur.close()
+        expected_cols = {
+            "district_id", "bargaining_unit", "unit_scope", "effective_start",
+        }
+        match = [r for r in rows if set(r[2]) == expected_cols]
+        self.assertTrue(
+            match,
+            f"contracts unique constraint over {sorted(expected_cols)} not "
+            f"found. Existing unique constraints: {rows!r}",
+        )
+        # indnullsnotdistinct must be False (NULLS DISTINCT) so multiple rows
+        # with a NULL effective_start do not collide.
+        self.assertFalse(
+            match[0][1],
+            "contracts unique constraint must be NULLS DISTINCT; NULLS NOT "
+            "DISTINCT would wrongly collide rows with a NULL effective_start.",
         )
 
     def test_migration_files_exist_for_all_phases(self):

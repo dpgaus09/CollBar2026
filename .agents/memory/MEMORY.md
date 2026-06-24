@@ -14,7 +14,7 @@
 - [extraction_runs is append-per-attempt](il-extraction-runs-latest-per-doc.md) — one row per attempt; use latest-per-doc (DISTINCT ON source_doc_id) for status, never raw COUNT by status.
 - [IL CBA crawl precision](il-crawl-precision.md) — denylist aggregator/gov domains in name-search; require %PDF bytes before storing (HTML-as-PDF falsely marks districts found).
 - [Derive vs unit reclassification](il-extraction-derive-savepoint.md) — backfill_contract_units must wrap each UPDATE in a SAVEPOINT or a unique-constraint conflict aborts the whole derive transaction.
-- [drizzle push-force + unique constraints](drizzle-push-unique-constraints.md) — push-force can't apply UNIQUE on populated tables (errors under closed stdin; a TTY would TRUNCATE); apply via raw SQL instead.
+- [Schema apply + drift guardrail](drizzle-push-unique-constraints.md) — hybrid DB (migrations + runMigrations + non-Drizzle tables) makes drizzle-kit push/push-force unusable; push-force neutered; verify schema with check-drift.
 - [Bargaining-unit scoping](bargaining-unit-scoping.md) — benchmarks never mix units, default teachers; whole customer Overview (detail/provisions/settlements/provision-medians) unit-scoped; parseUnit whitelist; provenance own-doc→same-unit fallback; cost-impact teachers-only; contracts-unique gap.
 - [OCR quality flag](ocr-quality-flag.md) — extraction_runs.ocr_confidence/ocr_low_quality (threshold 70); use latest-per-doc; legacy cache has no score (NULL != good).
 - [IL viewer recovery](il-viewer-recovery.md) — manual-review CSV is a crawl side-effect (empty until non-dry-run re-crawl); 13_recover_viewer_cbas.py resolves Box/Issuu/Drive best-effort + --pdf manual ingest.

@@ -9,7 +9,8 @@
   },
   "scripts": {
     "push": "drizzle-kit push --config ./drizzle.config.ts",
-    "push-force": "drizzle-kit push --force --config ./drizzle.config.ts"
+    "push-force": "echo 'push-force is DISABLED: this DB contains tables Drizzle does not manage (login_events, sync_run_status, pipeline tables), so push --force DROPs them and TRUNCATEs the populated contracts table. Apply additive schema via the API server runMigrations() and verify with: pnpm --filter @workspace/db run check-drift' >&2; exit 1",
+    "check-drift": "tsx ./scripts/check-drift.ts"
   },
   "dependencies": {
     "drizzle-orm": "catalog:",
@@ -20,6 +21,7 @@
   "devDependencies": {
     "@types/node": "catalog:",
     "@types/pg": "^8.20.0",
-    "drizzle-kit": "^0.31.10"
+    "drizzle-kit": "^0.31.10",
+    "tsx": "catalog:"
   }
 }

@@ -10,10 +10,11 @@ change in the Drizzle schema (source of truth), apply it to the **dev** DB, veri
 then tell the user to **re-publish**.
 
 **Push gotcha (this repo):** `pnpm --filter @workspace/db run push` is NOT safe to
-run blindly. It currently also wants to add a UNIQUE constraint
-`contracts_district_bargaining_unit_scope_start_unique` and prompts to **truncate
-the contracts table** (had ~200 rows) — an unrelated pending drift. `push-force`
-would auto-confirm that truncation = data loss.
+run blindly — it wants to DROP tables Drizzle doesn't manage and prompts to
+**truncate the contracts table** to re-add its already-present unique key. The
+`push-force` script is now **neutered** (exits 1). To verify the schema matches
+the DB use the read-only `pnpm --filter @workspace/db run check-drift` instead.
+See `drizzle-push-unique-constraints.md` for the full hybrid-management story.
 
 **How to apply (additive columns):** for a targeted additive change, skip push and
 run a surgical `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` against the dev DB only.

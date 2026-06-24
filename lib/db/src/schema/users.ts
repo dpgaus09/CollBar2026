@@ -3,6 +3,8 @@ import {
   bigserial,
   bigint,
   text,
+  boolean,
+  integer,
   timestamp,
   unique,
   check,
@@ -23,6 +25,16 @@ export const usersTable = pgTable(
       () => districtsTable.id,
     ),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+    // Auth columns. Created idempotently by the API server's runMigrations()
+    // (artifacts/api-server/src/app.ts); declared here so the Drizzle schema
+    // stays in sync with the live database (enforced by the schema-drift
+    // guardrail: pnpm --filter @workspace/db run check-drift).
+    name: text("name"),
+    passwordHash: text("password_hash"),
+    active: boolean("active").notNull().default(true),
+    failedLoginCount: integer("failed_login_count").notNull().default(0),
+    lockoutUntil: timestamp("lockout_until", { withTimezone: true }),
+    lastSignInAt: timestamp("last_sign_in_at", { withTimezone: true }),
   },
   (t) => [
     unique().on(t.email),
