@@ -34,9 +34,7 @@ declare global {
 // of assigned district, or deactivation) immediately, not only after the
 // customer next logs in. The freshly-read plan/district are also written back
 // onto the session so /auth/me and the client stay consistent.
-export async function loadAccess(req: Request): Promise<Access | null> {
-  const userId = req.session.userId;
-  if (!userId) return null;
+export async function loadAccessForUser(userId: number): Promise<Access | null> {
   const rows = await db.execute(sql`
     SELECT id, role, plan, district_id, active
     FROM users
@@ -47,13 +45,20 @@ export async function loadAccess(req: Request): Promise<Access | null> {
     | { id: unknown; role: unknown; plan: unknown; district_id: unknown; active: unknown }
     | undefined;
   if (!row) return null;
-  const access: Access = {
+  return {
     userId,
     role: row.role === "admin" ? "admin" : "district_user",
     plan: row.plan === "pro" ? "pro" : "free",
     districtId: row.district_id == null ? null : Number(row.district_id),
     active: row.active !== false,
   };
+}
+
+export async function loadAccess(req: Request): Promise<Access | null> {
+  const userId = req.session.userId;
+  if (!userId) return null;
+  const access = await loadAccessForUser(userId);
+  if (!access) return null;
   req.session.userRole = access.role;
   req.session.userPlan = access.plan;
   req.session.userDistrictId = access.districtId;

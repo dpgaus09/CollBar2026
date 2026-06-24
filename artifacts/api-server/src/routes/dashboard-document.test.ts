@@ -24,6 +24,7 @@ import { sql } from "drizzle-orm";
 // ---------------------------------------------------------------------------
 
 const dashboardRouter = (await import("./dashboard.js")).default;
+const { signDocumentAccessToken } = await import("../lib/documentToken.js");
 
 // A real CBA PDF persisted to object storage by the backfill migration.
 const UPLOADED_HASH =
@@ -37,11 +38,25 @@ const MISSING_HASH = "f".repeat(64);
 
 let adminId: number;
 let districtId: number;
+let freeUserId: number;
+let otherDistrictId: number;
 
 function buildApp(userId: number): Express {
   const app = express();
   app.use((req: Request, _res: Response, next: NextFunction) => {
     (req as unknown as { session: { userId: number } }).session = { userId };
+    next();
+  });
+  app.use("/", dashboardRouter);
+  return app;
+}
+
+// An app with NO session at all — exercises the signed-token auth path used by
+// "View source PDF" links that open in a new tab without the session cookie.
+function buildTokenApp(): Express {
+  const app = express();
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    (req as unknown as { session: Record<string, unknown> }).session = {};
     next();
   });
   app.use("/", dashboardRouter);
@@ -91,13 +106,29 @@ beforeAll(async () => {
       (${districtId}, ${SRC_MISSING}, 'cba_pdf', 'cba_pdf',
        'local:/nonexistent/also-missing.pdf', ${MISSING_HASH})
   `);
+
+  // A second IL district + a free user assigned to it, to prove the signed
+  // token does NOT let a free customer reach another district's document.
+  const d2 = await db.execute(sql`
+    SELECT id FROM districts
+    WHERE state = 'IL' AND id <> ${districtId}
+    LIMIT 1
+  `);
+  otherDistrictId = Number((d2.rows[0] as { id: string | number }).id);
+
+  const f = await db.execute(sql`
+    INSERT INTO users (name, email, role, plan, district_id, active)
+    VALUES ('Doc Test Free', ${`${MARK}-free@test.collbar`}, 'district_user', 'free', ${otherDistrictId}, true)
+    RETURNING id
+  `);
+  freeUserId = Number((f.rows[0] as { id: string | number }).id);
 });
 
 afterAll(async () => {
   await db.execute(
     sql`DELETE FROM source_documents WHERE source_url IN (${SRC_OK}, ${SRC_MISSING})`,
   );
-  await db.execute(sql`DELETE FROM users WHERE id = ${adminId}`);
+  await db.execute(sql`DELETE FROM users WHERE id IN (${adminId}, ${freeUserId})`);
   await pool.end();
 });
 
@@ -131,5 +162,58 @@ describe("GET /dashboard/document (object storage serving)", () => {
       .get("/dashboard/document")
       .query({ src: SRC_OK });
     expect(res.status).toBe(401);
+  });
+});
+
+describe("GET /dashboard/document (signed-token auth, new-tab links)", () => {
+  it("streams the PDF for a valid token with no session cookie", async () => {
+    const token = signDocumentAccessToken(adminId);
+    const res = await request(buildTokenApp())
+      .get("/dashboard/document")
+      .query({ src: SRC_OK, token })
+      .buffer(true)
+      .parse((r, cb) => {
+        const chunks: Buffer[] = [];
+        r.on("data", (c: Buffer) => chunks.push(Buffer.from(c)));
+        r.on("end", () => cb(null, Buffer.concat(chunks)));
+      });
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toContain("application/pdf");
+    expect((res.body as Buffer).subarray(0, 4).toString("latin1")).toBe("%PDF");
+  });
+
+  it("401s for a tampered token", async () => {
+    const token = signDocumentAccessToken(adminId) + "x";
+    const res = await request(buildTokenApp())
+      .get("/dashboard/document")
+      .query({ src: SRC_OK, token });
+    expect(res.status).toBe(401);
+  });
+
+  it("401s for an expired token", async () => {
+    const token = signDocumentAccessToken(adminId, -1000);
+    const res = await request(buildTokenApp())
+      .get("/dashboard/document")
+      .query({ src: SRC_OK, token });
+    expect(res.status).toBe(401);
+  });
+
+  it("403s a free user's token for another district's document", async () => {
+    const token = signDocumentAccessToken(freeUserId);
+    const res = await request(buildTokenApp())
+      .get("/dashboard/document")
+      .query({ src: SRC_OK, token });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("FORBIDDEN_DISTRICT");
+  });
+
+  it("returns an HTML error page for top-level browser navigations", async () => {
+    const res = await request(buildTokenApp())
+      .get("/dashboard/document")
+      .set("Sec-Fetch-Dest", "document")
+      .query({ src: SRC_OK }); // no token → 401, but as HTML
+    expect(res.status).toBe(401);
+    expect(res.headers["content-type"]).toContain("text/html");
+    expect(res.text).toContain("Sign-in required");
   });
 });

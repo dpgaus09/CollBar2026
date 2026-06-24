@@ -11,7 +11,8 @@ import {
   buildWhere,
   isCustomerDistrict,
 } from "../lib/dashboard-query.js";
-import { gate, isFree, UPGRADE_MESSAGE } from "../lib/access.js";
+import { gate, isFree, loadAccess, loadAccessForUser, UPGRADE_MESSAGE, type Access } from "../lib/access.js";
+import { verifyDocumentAccessToken } from "../lib/documentToken.js";
 import { uploadCustomerSubmission, DriveNotConnectedError } from "../lib/google-drive.js";
 import { getRediscoveriesForDistrict, rediscoveryKey } from "../lib/crawl-state.js";
 import { uploadedCbaKey, streamObjectTo } from "../lib/objectStorage.js";
@@ -549,15 +550,75 @@ router.get("/dashboard/districts/:id/salary-schedules", gate({ ownDistrict: true
 // browser. Crawled docs use real http(s) URLs and are linked directly by the
 // client, so only the 'upload://' scheme is served here.
 // ---------------------------------------------------------------------------
-router.get("/dashboard/document", gate(), async (req: Request, res: Response) => {
-  const access = req.access;
-  if (!access) {
-    res.status(401).json({ error: "Authentication required" });
+// Render a document-route error. "View source PDF" links open in a NEW
+// top-level browser tab, so on failure the user would otherwise stare at raw
+// JSON on a blank white page. For genuine top-level navigations (which set
+// Sec-Fetch-Dest: document) return a small readable HTML page instead; API/XHR
+// callers (and tests) still receive the original JSON body.
+function sendDocumentError(
+  req: Request,
+  res: Response,
+  status: number,
+  error: string,
+  message?: string,
+): void {
+  if (req.headers["sec-fetch-dest"] === "document") {
+    const heading =
+      status === 401 ? "Sign-in required" :
+      status === 403 ? "Access restricted" :
+      "Document unavailable";
+    const detail = message ?? (
+      status === 404 ? "This source document could not be found. It may not have been saved to storage yet." :
+      status === 401 ? "Your session has expired. Return to CollBar and sign in again to view this document." :
+      "We couldn't open this document."
+    );
+    res
+      .status(status)
+      .type("html")
+      .send(
+        `<!doctype html><html><head><meta charset="utf-8">` +
+        `<meta name="viewport" content="width=device-width, initial-scale=1">` +
+        `<title>${heading}</title>` +
+        `<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;` +
+        `background:#020617;color:#e2e8f0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}` +
+        `.card{max-width:28rem;padding:2rem;text-align:center}` +
+        `h1{font-size:1.1rem;margin:0 0 .5rem;color:#f1f5f9}` +
+        `p{font-size:.85rem;line-height:1.5;color:#94a3b8;margin:0}</style></head>` +
+        `<body><div class="card"><h1>${heading}</h1><p>${detail}</p></div></body></html>`,
+      );
+    return;
+  }
+  res.status(status).json(message ? { error, message } : { error });
+}
+
+router.get("/dashboard/document", async (req: Request, res: Response) => {
+  // Resolve the caller from the session cookie OR a self-contained signed
+  // token. A "View source PDF" link opens a brand-new top-level tab, which in
+  // the cross-site Replit preview iframe does not carry the SameSite=Lax
+  // session cookie — so these links embed a short-lived HMAC token instead
+  // (see lib/documentToken.ts). Either way we resolve the user's LIVE access
+  // and apply the identical per-district checks below; the token only proves
+  // identity, it does not bypass any authorization.
+  let access: Access | null = null;
+  try {
+    if (req.session.userId) {
+      access = await loadAccess(req);
+    } else {
+      const token = typeof req.query.token === "string" ? req.query.token : "";
+      const userId = token ? verifyDocumentAccessToken(token) : null;
+      if (userId != null) access = await loadAccessForUser(userId);
+    }
+  } catch {
+    sendDocumentError(req, res, 500, "Internal server error");
+    return;
+  }
+  if (!access || !access.active) {
+    sendDocumentError(req, res, 401, "Authentication required");
     return;
   }
   const src = typeof req.query.src === "string" ? req.query.src : "";
   if (!src.startsWith("upload://")) {
-    res.status(400).json({ error: "Unsupported document source" });
+    sendDocumentError(req, res, 400, "Unsupported document source");
     return;
   }
   try {
@@ -571,7 +632,7 @@ router.get("/dashboard/document", gate(), async (req: Request, res: Response) =>
       | { storage_key: string | null; district_id: number | null; file_hash: string | null }
       | undefined;
     if (!row || !row.storage_key) {
-      res.status(404).json({ error: "Document not found" });
+      sendDocumentError(req, res, 404, "Document not found");
       return;
     }
     // bigint district_id comes back from db.execute as a string; coerce so it
@@ -579,7 +640,7 @@ router.get("/dashboard/document", gate(), async (req: Request, res: Response) =>
     const docDistrictId = row.district_id == null ? null : Number(row.district_id);
     // Only serve documents for customer-state (IL) districts.
     if (docDistrictId == null || !(await isCustomerDistrict(docDistrictId))) {
-      res.status(404).json({ error: "Document not found" });
+      sendDocumentError(req, res, 404, "Document not found");
       return;
     }
     // Access control (mirrors the rest of the dashboard): free customers may
@@ -588,7 +649,7 @@ router.get("/dashboard/document", gate(), async (req: Request, res: Response) =>
     // with the paid Comparables feature which surfaces other districts' source
     // links. Without this any authenticated session could fetch any IL upload.
     if (isFree(access) && (access.districtId == null || docDistrictId !== access.districtId)) {
-      res.status(403).json({ error: "FORBIDDEN_DISTRICT", message: UPGRADE_MESSAGE });
+      sendDocumentError(req, res, 403, "FORBIDDEN_DISTRICT", UPGRADE_MESSAGE);
       return;
     }
     // Primary path: stream the persisted copy from object storage. This is the
@@ -613,11 +674,13 @@ router.get("/dashboard/document", gate(), async (req: Request, res: Response) =>
         }
       }
     }
-    res.status(404).json({ error: "Document file missing" });
+    // The row exists but its bytes are absent from object storage. This is the
+    // prod symptom of a doc whose only copy was local: (dev-only / ephemeral).
+    sendDocumentError(req, res, 404, "Document file missing");
     return;
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Internal server error" });
+    sendDocumentError(req, res, 500, "Internal server error");
   }
 });
 

@@ -2,6 +2,7 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import bcrypt from "bcrypt";
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
+import { signDocumentAccessToken } from "../lib/documentToken.js";
 
 // ============================================================================
 // Session type augmentation
@@ -239,6 +240,10 @@ router.get("/auth/me", async (req: Request, res: Response) => {
       plan,
       districtId,
       email: typeof u.email === "string" ? u.email : req.session.userEmail,
+      // Self-contained credential for "View source PDF" links, which open in a
+      // new top-level tab that does not carry the cross-site iframe session
+      // cookie. See lib/documentToken.ts.
+      documentToken: signDocumentAccessToken(req.session.userId),
     });
   } catch {
     // On a transient DB error, fall back to the cached session rather than
@@ -250,6 +255,7 @@ router.get("/auth/me", async (req: Request, res: Response) => {
       plan: req.session.userPlan ?? "free",
       districtId: req.session.userDistrictId,
       email: req.session.userEmail,
+      documentToken: signDocumentAccessToken(req.session.userId),
     });
   }
 });

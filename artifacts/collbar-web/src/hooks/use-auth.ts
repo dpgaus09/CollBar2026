@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, setDocumentToken } from "@/lib/api";
 
 export interface AuthUser {
   authenticated: boolean;
@@ -8,6 +8,8 @@ export interface AuthUser {
   plan?: "free" | "pro";
   districtId?: number | null;
   email?: string;
+  // Signed credential for opening source-PDF links in a new tab.
+  documentToken?: string;
 }
 
 const AUTH_KEY = ["/api/auth/me"];
@@ -16,7 +18,12 @@ export function useAuth() {
   const { data, isLoading, refetch } = useQuery<AuthUser>({
     queryKey: AUTH_KEY,
     queryFn: () =>
-      fetch(apiUrl("/api/auth/me"), { credentials: "include" }).then((r) => r.json()),
+      fetch(apiUrl("/api/auth/me"), { credentials: "include" })
+        .then((r) => r.json())
+        .then((d: AuthUser) => {
+          setDocumentToken(d.documentToken);
+          return d;
+        }),
     staleTime: 60_000,
     retry: 1,
   });
@@ -46,6 +53,7 @@ export function useLogout() {
     mutationFn: () =>
       fetch(apiUrl("/api/auth/logout"), { method: "POST", credentials: "include" }),
     onSuccess: () => {
+      setDocumentToken(null);
       qc.setQueryData(AUTH_KEY, { authenticated: false });
       window.location.href = `${import.meta.env.BASE_URL}login`;
     },
