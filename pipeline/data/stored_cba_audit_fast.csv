@@ -266,3 +266,25 @@ doc_id,district_id,district_name,state,school_year,bargaining_unit,classificatio
 834,10988,Edwardsville CUSD 7,IL,,teachers,needs-OCR,insufficient_text (0 chars),upload://district-10988/teachers/EEA2025-2027Contract.pdf
 835,10988,Edwardsville CUSD 7,IL,,custodial_maintenance,needs-OCR,insufficient_text (0 chars),upload://district-10988/custodial_maintenance/ESSPAContract.pdf
 836,10988,Edwardsville CUSD 7,IL,,secretarial_clerical,needs-OCR,insufficient_text (0 chars),upload://district-10988/secretarial_clerical/SecretaryContract.pdf
+1024,22088,Test District tstrq-1782295580625-879645,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782295580625-879645/good-latest.pdf
+1025,22088,Test District tstrq-1782295580625-879645,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782295580625-879645/bad.pdf
+1026,22088,Test District tstrq-1782295580625-879645,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782295580625-879645/norun.pdf
+1027,22088,Test District tstrq-1782295580625-879645,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782295580625-879645/bulk-ids.pdf
+1028,22088,Test District tstrq-1782295580625-879645,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782295580625-879645/bulk-doc.pdf
+1031,22090,Test District tstrq-1782297904089-446819,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782297904089-446819/good-latest.pdf
+1032,22090,Test District tstrq-1782297904089-446819,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782297904089-446819/bad.pdf
+1033,22090,Test District tstrq-1782297904089-446819,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782297904089-446819/norun.pdf
+1034,22090,Test District tstrq-1782297904089-446819,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782297904089-446819/bulk-ids.pdf
+1035,22090,Test District tstrq-1782297904089-446819,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782297904089-446819/bulk-doc.pdf
+1038,22092,Test District tstrq-1782298032087-7226,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782298032087-7226/good-latest.pdf
+1039,22092,Test District tstrq-1782298032087-7226,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782298032087-7226/bad.pdf
+1040,22092,Test District tstrq-1782298032087-7226,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782298032087-7226/norun.pdf
+1041,22092,Test District tstrq-1782298032087-7226,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782298032087-7226/bulk-ids.pdf
+1042,22092,Test District tstrq-1782298032087-7226,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782298032087-7226/bulk-doc.pdf
+1043,10421,Durand CUSD 322,IL,,teachers,unreadable,file_not_found,upload://tstdoc-1782299381898-882254-ok
+1044,10421,Durand CUSD 322,IL,,teachers,unreadable,file_not_found,upload://tstdoc-1782299381898-882254-missing
+1045,22094,Test District tstrq-1782299408287-194565,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782299408287-194565/good-latest.pdf
+1046,22094,Test District tstrq-1782299408287-194565,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782299408287-194565/bad.pdf
+1047,22094,Test District tstrq-1782299408287-194565,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782299408287-194565/norun.pdf
+1048,22094,Test District tstrq-1782299408287-194565,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782299408287-194565/bulk-ids.pdf
+1049,22094,Test District tstrq-1782299408287-194565,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782299408287-194565/bulk-doc.pdf
