@@ -6,13 +6,21 @@ Parsing lives in lib_salary_grid (pure, unit-tested). This script owns
 selection (which contracts/PDFs), PDF resolution, bargaining-unit provenance,
 and idempotent storage.
 
-INVARIANT: a schedule's bargaining_unit always comes from its contract row
-(never inferred from the appendix). The appendix heading only distinguishes job
-families *within* that unit (e.g. the teachers unit may contain "Teachers",
+SHARED-PDF ROUTING: one CBA PDF often backs several contract rows (one per
+bargaining unit: teachers, support_staff, secretarial_clerical). We parse the
+PDF once and ROUTE each parsed schedule to the contract whose unit it actually
+belongs to (by content), instead of stamping every schedule onto every sibling.
+Education/teacher schedules go ONLY to the teachers contract — they are never
+attributed to a non-teacher unit (which would show BA/MA grids to, say,
+custodians). A schedule whose unit has no matching contract on the PDF is left
+unattributed (counted, not stored). Within a unit, the appendix heading still
+only distinguishes job families (e.g. the teachers unit may contain "Teachers",
 "Counselors/Social Workers", "Psychologist/Speech Pathologist" sub-schedules).
 
 Idempotency: every run replaces all schedules for a contract atomically
 (delete-then-insert in one transaction), so re-running never duplicates rows.
+Every contract in a processed source-doc group is rewritten — INCLUDING those
+that now route to zero schedules — so stale/leaked rows are always cleared.
 
 Examples:
     python3 18_extract_salary_schedules.py --contract 123 --pdf /path/to.pdf
@@ -78,12 +86,103 @@ def fetch_targets(cur, args) -> list[dict]:
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+def fetch_doc_units(cur, source_doc_id) -> set[str]:
+    """All bargaining units whose contracts reference this source_doc. Routing
+    needs the FULL sibling set (not just the selected targets) so it can decide
+    e.g. whether a teachers contract exists to receive the education grid."""
+    cur.execute(
+        "SELECT DISTINCT COALESCE(bargaining_unit, 'teachers') "
+        "FROM contracts WHERE source_doc_id = %s",
+        (source_doc_id,),
+    )
+    return {r[0] for r in cur.fetchall()}
+
+
+def route_schedules(schedules: list[dict],
+                    sibling_units: set[str]) -> tuple[dict[str, list[dict]],
+                                                      list[dict]]:
+    """Partition parsed schedules by the bargaining unit they belong to, given
+    the units whose contracts share this PDF.
+
+    - Education/teacher schedules go ONLY to 'teachers'; with no teachers
+      contract on the PDF they are unattributed (never stamped on another unit).
+    - A schedule that names a specific non-teacher family goes to that unit when
+      a sibling contract has it.
+    - Anything else (ambiguous, or a family with no sibling) goes to the PDF's
+      primary unit — teachers if present, else the lexically-first sibling — but
+      an education schedule is never routed to a non-teacher primary.
+
+    Returns ({unit: [schedules]}, [unattributed schedules])."""
+    primary = ("teachers" if "teachers" in sibling_units
+               else (sorted(sibling_units)[0] if sibling_units else None))
+    routed: dict[str, list[dict]] = {}
+    unattributed: list[dict] = []
+    for s in schedules:
+        unit = grid.classify_schedule_unit(s)
+        if unit == "teachers":
+            if "teachers" in sibling_units:
+                routed.setdefault("teachers", []).append(s)
+            else:
+                unattributed.append(s)
+        elif unit is not None and unit in sibling_units:
+            routed.setdefault(unit, []).append(s)
+        elif primary is not None and not grid.is_education_schedule(s):
+            routed.setdefault(primary, []).append(s)
+        else:
+            unattributed.append(s)
+    return routed, unattributed
+
+
+def _resolve_pdf(target: dict, pdf_override: str | None):
+    return (
+        Path(pdf_override) if pdf_override
+        else resolve_pdf_path(target["source_url"], target["storage_key"])
+    )
+
+
+def _parse_pdf_with_fallback(pdf_path) -> list[dict]:
+    """Parse all schedules; if none are found and the PDF has no usable text
+    layer it is scanned — return a flag-and-defer placeholder so it lands in
+    review (deterministic grid parsing needs word boxes OCR-text cannot give)."""
+    schedules = grid.parse_pdf(str(pdf_path))
+    if not schedules:
+        try:
+            wc, npages = grid.pdf_text_stats(str(pdf_path))
+        except Exception:  # noqa: BLE001
+            wc, npages = 0, 1
+        if grid.is_scanned(wc, npages):
+            schedules = [grid.scanned_placeholder(npages)]
+    return schedules
+
+
 def store_schedules(conn, target: dict, schedules: list[dict],
                     dry_run: bool = False) -> tuple[int, int]:
     """Replace all salary schedules for a contract. Returns (n_schedules,
     n_cells) written."""
     contract_id = target["contract_id"]
     n_sched = n_cells = 0
+
+    # Dedupe by the DB unique key (schedule_name, school_year) BEFORE inserting.
+    # A single PDF can yield two schedules that collapse to the same (name, year)
+    # — e.g. the same grid detected on two pages, or a duplicated appendix. Two
+    # such rows violate contract_salary_schedules_uniq, and because the whole
+    # contract is one delete-then-insert transaction the collision would roll
+    # back ALL of the contract's schedules (leaving it empty). Keep only the
+    # richest of each colliding group: most cells, then confidence, then steps.
+    def _effective_year(s: dict) -> str:
+        return s["school_year"] or f"unknown-p{s['page_start']}"
+
+    def _richness(s: dict) -> tuple:
+        return (len(s["cells"]), s.get("confidence") or 0, s.get("step_count") or 0)
+
+    deduped: dict[tuple[str, str], dict] = {}
+    for s in schedules:
+        key = (s["schedule_name"], _effective_year(s))
+        prev = deduped.get(key)
+        if prev is None or _richness(s) > _richness(prev):
+            deduped[key] = s
+    schedules = list(deduped.values())
+
     with conn.cursor() as cur:
         if not dry_run:
             cur.execute(
@@ -157,52 +256,63 @@ def store_schedules(conn, target: dict, schedules: list[dict],
     return n_sched, n_cells
 
 
-def process_target(conn, target: dict, pdf_override: str | None,
-                   dry_run: bool) -> dict:
-    pdf_path = (
-        Path(pdf_override) if pdf_override
-        else resolve_pdf_path(target["source_url"], target["storage_key"])
-    )
-    if not pdf_path or not Path(pdf_path).exists():
-        log.warning("contract %s (%s): PDF not found (%s)",
-                    target["contract_id"], target["district_name"],
-                    pdf_override or target["storage_key"])
-        return {"contract_id": target["contract_id"], "status": "no_pdf",
-                "schedules": 0, "cells": 0}
-    try:
-        schedules = grid.parse_pdf(str(pdf_path))
-    except Exception as e:  # noqa: BLE001 - record, don't crash the batch
-        log.exception("contract %s parse failed: %s",
-                      target["contract_id"], e)
-        return {"contract_id": target["contract_id"], "status": "parse_error",
-                "schedules": 0, "cells": 0}
-
-    # No schedules parsed: if the PDF has no usable text layer it is scanned —
-    # flag-and-defer with a placeholder (deterministic grid parsing needs word
-    # boxes that text-only OCR cannot provide; real OCR/vision is a follow-up).
-    if not schedules:
+def _store_routed(conn, group: list[dict], routed: dict[str, list[dict]],
+                  dry_run: bool) -> list[dict]:
+    """Store each target's routed subset. Every target is rewritten (delete +
+    insert) even when it routes to ZERO schedules, so stale/leaked rows clear."""
+    results = []
+    for t in group:
+        subset = routed.get(t["bargaining_unit"], [])
         try:
-            wc, npages = grid.pdf_text_stats(str(pdf_path))
-        except Exception:  # noqa: BLE001
-            wc, npages = 0, 1
-        if grid.is_scanned(wc, npages):
-            log.info("contract %s (%s): scanned/no-text PDF — flagging for review",
-                     target["contract_id"], target["district_name"])
-            schedules = [grid.scanned_placeholder(npages)]
+            n_sched, n_cells = store_schedules(conn, t, subset, dry_run)
+        except Exception as e:  # noqa: BLE001 - one bad contract must not poison the batch
+            conn.rollback()
+            log.exception("contract %s store failed: %s", t["contract_id"], e)
+            results.append({"contract_id": t["contract_id"],
+                            "status": "store_error",
+                            "schedules": 0, "cells": 0, "flagged": 0})
+            continue
+        flagged = sum(1 for s in subset if s["needs_review"])
+        log.info("contract %s (%s) [%s]: %d schedules, %d cells, %d flagged%s",
+                 t["contract_id"], t.get("district_name", "?"),
+                 t["bargaining_unit"], n_sched, n_cells, flagged,
+                 " [dry-run]" if dry_run else "")
+        results.append({"contract_id": t["contract_id"], "status": "ok",
+                        "schedules": n_sched, "cells": n_cells,
+                        "flagged": flagged})
+    return results
 
+
+def process_doc_group(conn, group: list[dict], sibling_units: set[str],
+                      pdf_override: str | None,
+                      dry_run: bool) -> tuple[list[dict], int]:
+    """Parse one shared PDF once and route its schedules to the right contract.
+
+    ``group`` are the target contracts to write (all sharing one source_doc);
+    ``sibling_units`` is every unit on that doc (for routing). Returns
+    (per-contract results, count of unattributed schedules)."""
+    rep = group[0]
+    pdf_path = _resolve_pdf(rep, pdf_override)
+    if not pdf_path or not Path(pdf_path).exists():
+        log.warning("source_doc %s (%s): PDF not found (%s)",
+                    rep["source_doc_id"], rep.get("district_name", "?"),
+                    pdf_override or rep.get("storage_key"))
+        return ([{"contract_id": t["contract_id"], "status": "no_pdf",
+                  "schedules": 0, "cells": 0, "flagged": 0} for t in group], 0)
     try:
-        n_sched, n_cells = store_schedules(conn, target, schedules, dry_run)
-    except Exception as e:  # noqa: BLE001 - one bad contract must not poison the batch
-        conn.rollback()
-        log.exception("contract %s store failed: %s", target["contract_id"], e)
-        return {"contract_id": target["contract_id"], "status": "store_error",
-                "schedules": 0, "cells": 0}
-    flagged = sum(1 for s in schedules if s["needs_review"])
-    log.info("contract %s (%s): %d schedules, %d cells, %d flagged%s",
-             target["contract_id"], target["district_name"], n_sched, n_cells,
-             flagged, " [dry-run]" if dry_run else "")
-    return {"contract_id": target["contract_id"], "status": "ok",
-            "schedules": n_sched, "cells": n_cells, "flagged": flagged}
+        schedules = _parse_pdf_with_fallback(pdf_path)
+    except Exception as e:  # noqa: BLE001 - record, don't crash the batch
+        log.exception("source_doc %s parse failed: %s", rep["source_doc_id"], e)
+        return ([{"contract_id": t["contract_id"], "status": "parse_error",
+                  "schedules": 0, "cells": 0, "flagged": 0} for t in group], 0)
+
+    routed, unattributed = route_schedules(schedules, sibling_units)
+    if unattributed:
+        log.info("source_doc %s (%s): %d schedule(s) unattributed — no matching "
+                 "unit contract on this PDF; not stored",
+                 rep["source_doc_id"], rep.get("district_name", "?"),
+                 len(unattributed))
+    return _store_routed(conn, group, routed, dry_run), len(unattributed)
 
 
 def extract_for_contract(conn, *, contract_id: int, pdf_path,
@@ -211,8 +321,10 @@ def extract_for_contract(conn, *, contract_id: int, pdf_path,
 
     Intended to be called from the load pipeline (06_extract_contracts.main)
     immediately after upsert_contract, reusing the already-resolved PDF path.
-    The contract row is the authoritative bargaining-unit source (never the
-    appendix), so we look it up here rather than trusting the caller.
+    The contract row is the authoritative bargaining-unit source. We look up the
+    full sibling set on this PDF and ROUTE by content so this contract receives
+    only the schedules that belong to its unit — a teacher grid is never stored
+    under a non-teacher contract even when they share the PDF.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -225,16 +337,21 @@ def extract_for_contract(conn, *, contract_id: int, pdf_path,
             (contract_id,),
         )
         row = cur.fetchone()
-    if not row:
-        return {"contract_id": contract_id, "status": "no_contract",
-                "schedules": 0, "cells": 0}
-    district_id, source_doc_id, unit, dname = row
+        if not row:
+            return {"contract_id": contract_id, "status": "no_contract",
+                    "schedules": 0, "cells": 0}
+        district_id, source_doc_id, unit, dname = row
+        sibling_units = fetch_doc_units(cur, source_doc_id)
     target = {
         "contract_id": contract_id, "district_id": district_id,
         "source_doc_id": source_doc_id, "bargaining_unit": unit,
         "source_url": None, "storage_key": None, "district_name": dname,
     }
-    return process_target(conn, target, str(pdf_path), dry_run)
+    # Store only THIS contract (group of one), but route using the full sibling
+    # set so an education grid on a non-teacher contract is withheld, not leaked.
+    results, _ = process_doc_group(conn, [target], sibling_units,
+                                   str(pdf_path), dry_run)
+    return results[0]
 
 
 def main() -> None:
@@ -262,22 +379,35 @@ def main() -> None:
         if not targets:
             log.warning("no matching contracts")
             return
-        log.info("processing %d contract(s)%s", len(targets),
-                 " [dry-run]" if args.dry_run else "")
-        totals = {"ok": 0, "no_pdf": 0, "parse_error": 0, "store_error": 0,
-                  "schedules": 0, "cells": 0, "flagged": 0}
+
+        # Group targets by the PDF they share so each PDF is parsed ONCE and its
+        # schedules routed to the correct unit contract (no cross-unit leak).
+        groups: dict = {}
         for t in targets:
-            r = process_target(conn, t, args.pdf, args.dry_run)
-            totals[r["status"]] = totals.get(r["status"], 0) + 1
-            totals["schedules"] += r["schedules"]
-            totals["cells"] += r["cells"]
-            totals["flagged"] += r.get("flagged", 0)
+            groups.setdefault(t["source_doc_id"], []).append(t)
+        log.info("processing %d contract(s) across %d source doc(s)%s",
+                 len(targets), len(groups),
+                 " [dry-run]" if args.dry_run else "")
+
+        totals = {"ok": 0, "no_pdf": 0, "parse_error": 0, "store_error": 0,
+                  "schedules": 0, "cells": 0, "flagged": 0, "unattributed": 0}
+        with conn.cursor() as scur:
+            for source_doc_id, group in groups.items():
+                sibling_units = fetch_doc_units(scur, source_doc_id)
+                results, n_unattr = process_doc_group(
+                    conn, group, sibling_units, args.pdf, args.dry_run)
+                for r in results:
+                    totals[r["status"]] = totals.get(r["status"], 0) + 1
+                    totals["schedules"] += r["schedules"]
+                    totals["cells"] += r["cells"]
+                    totals["flagged"] += r.get("flagged", 0)
+                totals["unattributed"] += n_unattr
         log.info(
             "DONE: %d ok, %d no_pdf, %d parse_error, %d store_error | "
-            "%d schedules, %d cells, %d flagged",
+            "%d schedules, %d cells, %d flagged, %d unattributed",
             totals["ok"], totals["no_pdf"], totals["parse_error"],
             totals["store_error"], totals["schedules"], totals["cells"],
-            totals["flagged"],
+            totals["flagged"], totals["unattributed"],
         )
     finally:
         conn.close()

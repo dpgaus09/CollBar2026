@@ -419,12 +419,17 @@ router.get("/dashboard/districts/:id/salary-schedules", gate({ ownDistrict: true
     `);
     const availableUnits = (availUnits.rows as { bargaining_unit: string }[]).map((r) => r.bargaining_unit);
 
-    // Most recent (district, unit) contract that actually has schedules.
+    // Most recent (district, unit) contract that actually has *display-quality*
+    // schedules. Schedules flagged with an implausible salary magnitude (e.g. a
+    // stipend/differential table mis-parsed as a base grid) are withheld from
+    // the customer view — they remain in the DB for the human-review queue.
     const targetRows = await db.execute(sql`
       SELECT s.contract_id
       FROM contract_salary_schedules s
       JOIN contracts c ON c.id = s.contract_id
       WHERE c.district_id = ${districtId} AND c.bargaining_unit = ${unit}
+        AND (s.review_reason IS NULL
+             OR s.review_reason NOT LIKE '%implausible_salary_magnitude%')
       ORDER BY c.effective_start DESC NULLS LAST, c.id DESC
       LIMIT 1
     `);
@@ -434,6 +439,9 @@ router.get("/dashboard/districts/:id/salary-schedules", gate({ ownDistrict: true
     }
     const contractId = Number((targetRows.rows[0] as { contract_id: number | string }).contract_id);
 
+    // Same implausible-magnitude exclusion as targetRows: a single contract may
+    // hold both good grids and a mis-parsed stipend table, so withhold the bad
+    // ones here too (they stay in the DB for the human-review queue).
     const schedRows = await db.execute(sql`
       SELECT s.id, s.schedule_name, s.school_year, s.start_year, s.schedule_type,
              s.lane_labels, s.step_count, s.lane_count, s.page_start, s.page_end,
@@ -443,6 +451,8 @@ router.get("/dashboard/districts/:id/salary-schedules", gate({ ownDistrict: true
       FROM contract_salary_schedules s
       LEFT JOIN source_documents sd ON sd.id = s.source_doc_id
       WHERE s.contract_id = ${contractId}
+        AND (s.review_reason IS NULL
+             OR s.review_reason NOT LIKE '%implausible_salary_magnitude%')
       ORDER BY s.schedule_name, s.start_year NULLS LAST, s.school_year
     `);
 
@@ -453,6 +463,8 @@ router.get("/dashboard/districts/:id/salary-schedules", gate({ ownDistrict: true
       FROM contract_salary_schedule_cells cell
       JOIN contract_salary_schedules s ON s.id = cell.schedule_id
       WHERE s.contract_id = ${contractId}
+        AND (s.review_reason IS NULL
+             OR s.review_reason NOT LIKE '%implausible_salary_magnitude%')
       ORDER BY cell.step_order, cell.lane_order
     `);
 

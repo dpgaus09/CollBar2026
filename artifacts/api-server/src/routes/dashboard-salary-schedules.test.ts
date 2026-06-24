@@ -47,8 +47,10 @@ beforeAll(async () => {
   `);
   adminId = Number((a.rows[0] as { id: string | number }).id);
 
-  // An IL district with extracted teacher salary schedules. Prefer one that also
-  // has a non-teacher unit with schedules so the unit-scoping assertions bite.
+  // An IL district whose teachers unit actually has a (non-implausible)
+  // education lane grid with BA/MA lanes — otherwise the lane-grid assertions
+  // below have nothing to bind to. Among those, prefer a district that also has
+  // a non-teacher unit with schedules so the unit-scoping assertions bite.
   const d = await db.execute(sql`
     SELECT c.district_id,
            array_agg(DISTINCT c.bargaining_unit) AS units
@@ -57,7 +59,14 @@ beforeAll(async () => {
     JOIN districts dd ON dd.id = c.district_id AND dd.state = 'IL'
     WHERE c.bargaining_unit IS NOT NULL
     GROUP BY c.district_id
-    HAVING bool_or(c.bargaining_unit = 'teachers')
+    HAVING bool_or(
+      c.bargaining_unit = 'teachers'
+      AND s.schedule_type = 'lane_grid'
+      AND (s.review_reason IS NULL
+           OR s.review_reason NOT LIKE '%implausible_salary_magnitude%')
+      AND s.lane_labels::text ~* '"BA'
+      AND s.lane_labels::text ~* '"MA'
+    )
     ORDER BY COUNT(DISTINCT c.bargaining_unit) DESC, c.district_id
     LIMIT 1
   `);
@@ -151,6 +160,73 @@ describe("salary-schedules endpoint", () => {
     // The selector lists both units, teachers first.
     expect(ta.body.availableUnits[0]).toBe("teachers");
     expect(ta.body.availableUnits).toContain(nonTeacherUnit);
+  });
+
+  it("withholds schedules flagged with an implausible salary magnitude", async () => {
+    // The contract the endpoint selects for teachers (most-recent with grids).
+    const sel = await db.execute(sql`
+      SELECT s.contract_id, c.district_id, c.source_doc_id
+      FROM contract_salary_schedules s
+      JOIN contracts c ON c.id = s.contract_id
+      WHERE c.district_id = ${districtId} AND c.bargaining_unit = 'teachers'
+        AND (s.review_reason IS NULL
+             OR s.review_reason NOT LIKE '%implausible_salary_magnitude%')
+      ORDER BY c.effective_start DESC NULLS LAST, c.id DESC
+      LIMIT 1
+    `);
+    expect(sel.rows.length).toBeGreaterThan(0);
+    const r = sel.rows[0] as {
+      contract_id: number | string;
+      district_id: number | string;
+      source_doc_id: number | string | null;
+    };
+    const badName = `${MARK}-implausible`;
+
+    // Insert a temporary implausible-magnitude schedule (+ a tiny cell) onto that
+    // real contract. The customer view must drop it while keeping the good grids.
+    const ins = await db.execute(sql`
+      INSERT INTO contract_salary_schedules
+        (contract_id, district_id, bargaining_unit, source_doc_id, schedule_name,
+         school_year, schedule_type, lane_labels, needs_review, review_reason,
+         confidence)
+      VALUES (${r.contract_id}, ${r.district_id}, 'teachers', ${r.source_doc_id},
+              ${badName}, '2099-2100', 'lane_grid', ${'["BA","MA"]'}::jsonb,
+              true, 'implausible_salary_magnitude', 0.6)
+      RETURNING id
+    `);
+    const badId = (ins.rows[0] as { id: number | string }).id;
+    try {
+      await db.execute(sql`
+        INSERT INTO contract_salary_schedule_cells
+          (schedule_id, step_label, step_order, lane_label, lane_order,
+           salary_amount, page_ref)
+        VALUES (${badId}, '1', 0, 'BA', 0, 8000, 1)
+      `);
+
+      const res = await request(buildApp(adminId))
+        .get(`/dashboard/districts/${districtId}/salary-schedules`)
+        .query({ bargainingUnit: "teachers" });
+
+      expect(res.status).toBe(200);
+      // Good grids still served, the flagged one withheld entirely.
+      expect(res.body.schedules.length).toBeGreaterThan(0);
+      const names = (res.body.schedules as { scheduleName: string }[]).map(
+        (s) => s.scheduleName,
+      );
+      expect(names).not.toContain(badName);
+      for (const s of res.body.schedules as { reviewReason: string | null }[]) {
+        expect(s.reviewReason ?? "").not.toContain(
+          "implausible_salary_magnitude",
+        );
+      }
+      expect(res.body.jobFamilies).not.toContain(badName);
+      expect(res.body.schoolYears).not.toContain("2099-2100");
+    } finally {
+      // Cleanup (cells cascade on schedule delete).
+      await db.execute(
+        sql`DELETE FROM contract_salary_schedules WHERE id = ${badId}`,
+      );
+    }
   });
 
   it("returns 404 for an unknown district", async () => {

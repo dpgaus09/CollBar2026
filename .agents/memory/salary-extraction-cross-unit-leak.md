@@ -1,46 +1,48 @@
 ---
-name: Salary extraction cross-unit PDF leak (pilot finding)
-description: Why blind salary-grid backfill leaks teacher grids onto non-teacher units, plus the magnitude/recall gaps found in the first pilot batch.
+name: Salary extraction cross-unit PDF leak (RESOLVED)
+description: Why one CBA PDF backing several unit-rows leaked teacher grids onto non-teacher units, and the three guards (route, magnitude, dedupe) that fixed it. Recall gap remains open.
 ---
 
-# Salary extraction cross-unit PDF leak
+# Salary extraction cross-unit PDF leak — RESOLVED
 
-Found while running the first pilot batch of `18_extract_salary_schedules.py`
-(10 IL contracts) before the corpus backfill.
+First seen in the `18_extract_salary_schedules.py` pilot, fixed before the full IL
+backfill. The full IL backfill since runs clean — the key invariant (no education
+lane grid on any non-teacher unit) holds across the corpus.
 
-## Cross-unit leak (critical)
+## The trap (why the naive design was unsafe)
 - Many districts have SEVERAL `contracts` rows — one per bargaining unit
-  (teachers, support_staff, secretarial_clerical…) — that all reference the
-  SAME `source_doc_id` (one CBA PDF, usually the teachers' agreement).
-- `18_extract_salary_schedules` parses that one PDF and stores the resulting
-  grid under EVERY such contract, stamped with that contract's unit. So the
-  teachers' BS/MS lane grid gets written under support_staff / secretarial_clerical.
-- Net effect: a non-teacher unit displays an education (BA/MA/BS/MS) lane grid —
-  the exact thing the feature must never do. The frontend `laneKind` guard can't
+  (teachers, support_staff, secretarial_clerical…) — all pointing at the SAME
+  `source_doc_id` (one CBA PDF, usually the teachers' agreement).
+- The naive extractor parsed that one PDF and stored the grid under EVERY such
+  contract, stamped with that contract's unit → a teachers' BA/MA lane grid got
+  written under support_staff/secretarial. The frontend `laneKind` guard cannot
   catch it because those leaked rows are genuinely classified `education`.
-- The script's stated invariant ("bargaining_unit comes from the contract row")
-  is UNSAFE when one PDF backs multiple unit-rows.
-- **Fix direction:** one PDF → one unit's schedules. When multiple target
-  contracts share a `source_doc_id`, parse once and attribute only to the unit
-  the appendix actually represents (education lanes ⇒ teachers); do not replicate
-  onto the other units.
+- **Lesson:** "bargaining_unit comes from the contract row" is UNSAFE when one
+  PDF backs multiple unit-rows. Attribute by what the schedule *is*, not by which
+  contract row happens to reference the PDF.
 
-## Magnitude sanity gap
-- Anna Jonesboro parsed a differential/stipend-looking table as the base grid:
-  values $31–$9,963 with BS/MS lanes, NOT flagged. There is no plausibility
-  check on salary magnitude. Add one (flag/withhold grids whose max is outside a
-  sane base-salary range) and route to review instead of displaying.
+## Three guards that fixed it (all in lib_salary_grid.py / 18_extract…py)
+1. **Route, don't replicate.** Group target contracts by `source_doc_id`, parse
+   once, and `route_schedules` each parsed grid to ONE unit: education grids ⇒
+   teachers (or `unattributed`, NEVER a non-teacher unit); specific non-teacher
+   keyword ⇒ that unit; ambiguous ⇒ the PDF primary (teachers). One PDF → one
+   unit per grid.
+2. **Magnitude sanity.** `EDU_SALARY_FLOOR=15000 / CEILING=300000`; grids whose
+   base magnitude falls outside are flagged `implausible_salary_magnitude` and
+   the dashboard route EXCLUDES those rows (stipend/differential tables were
+   being read as base grids, e.g. Anna Jonesboro $31–$9,963).
+3. **Dedupe before insert.** Two parsed schedules can collapse to the same DB
+   unique key `(schedule_name, school_year)`; the delete-then-insert is ONE
+   transaction, so a dup aborts the WHOLE contract → it rolls back to empty
+   (silent `store_error`). `store_schedules` runs a dedupe pre-pass keeping the
+   richest row (cells, then confidence, then step_count) per key. **Why:** a
+   single noisy PDF must not zero out an entire district's schedules. Missing-year
+   rows are keyed by the same `unknown-p{page_start}` synthesis the insert uses.
+   Residual caveat: complementary split-page rows are dropped, not merged
+   (recall-only; merge-by-cell is a future option if audits show lost cells).
 
-## Recall gap (not scanned)
-- ~40% of pilot contracts (Adlai Stevenson, Canton, Dallas) produced 0 schedules
-  despite having a readable text layer (not scanned — the script stores a
-  scanned placeholder when `is_scanned`, and these stored nothing). The parser
-  did not recognize their schedule format. Improve recall before scaling.
-
-## Other noise
-- Aurora East captured step names ("STEP AA, A, B…") as lane labels and emitted
-  overlapping year ranges (2026-2030 alongside per-year). Caught by the
-  `lane_label_mismatch` review flag, but the flag rate was high (15 of 24).
-
-**Bottom line:** do NOT run the ~367-contract IL backfill until cross-unit
-attribution + magnitude sanity (and ideally recall) are fixed; then re-pilot.
+## Still open: recall
+- Only ~half of IL contracts yield any schedule. Some are scanned (placeholder),
+  some have a readable text layer the parser doesn't recognize. Architect signed
+  off with this as the one remaining caveat — improve recall before relying on
+  corpus-wide coverage, but it does NOT affect correctness of what IS extracted.

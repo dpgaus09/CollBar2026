@@ -43,7 +43,28 @@ _FAMILY_KW = (
     "AIDE", "CUSTOD", "SECRETAR", "THERAPIST", "LIBRARI", "PARAPROF",
 )
 
+# Maps a schedule's job-family heading to a *specific* non-teacher bargaining
+# unit, used to route schedules parsed from a PDF shared by several unit
+# contracts. Only families that clearly belong to a non-teacher unit are listed.
+# Certified sub-families (counselors, social workers, psychologists, speech
+# pathologists, nurses, therapists, librarians) are part of the TEACHERS unit and
+# are intentionally absent — they resolve to the PDF's primary (teachers) unit.
+_UNIT_KW: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("secretarial_clerical", ("SECRETAR", "CLERICAL", "CLERK")),
+    ("support_staff", ("CUSTOD", "MAINTEN", "JANITOR", "GROUNDS", "PARAPROF",
+                       "AIDE", "FOOD", "CAFETER", "BUS DRIV", "TRANSPORT")),
+)
+
 MIN_ROWS = 3  # a real schedule has at least this many step rows
+
+# Plausible annual base-salary bounds for an EDUCATION (teacher) lane grid. A
+# parsed education grid whose top value falls outside this range is almost
+# certainly not a base-salary table (e.g. a stipend/differential/index grid that
+# happens to carry BA/MA columns), so it is flagged as a problem and withheld
+# from the customer view. Bounds are intentionally generous — they only fire on
+# obviously-wrong magnitudes — and are NOT applied to non-education/hourly grids.
+EDU_SALARY_FLOOR = 15000.0
+EDU_SALARY_CEILING = 300000.0
 
 # Review reasons that are informational only (the extraction is still usable and
 # should NOT be forced into the human-review queue). Everything else is a problem.
@@ -309,6 +330,18 @@ def _parse_page(pageno: int, lines: list[dict],
     if not cells:
         return None
 
+    # Magnitude sanity for education (teacher) lane grids only: the top value of
+    # a real base-salary schedule is a plausible annual figure. A grid that looks
+    # like a teacher schedule (BA/MA columns) but tops out below the floor (e.g.
+    # a stipend/differential table) or above the ceiling is flagged as a problem
+    # so it lands in review and is withheld from the customer view. Skipped for
+    # non-education/hourly grids, whose values are legitimately small.
+    is_education = bool(lane_labels) and any(_LANE.search(l) for l in lane_labels)
+    if is_education and amounts:
+        top = max(amounts)
+        if top < EDU_SALARY_FLOOR or top > EDU_SALARY_CEILING:
+            review.add("implausible_salary_magnitude")
+
     steps = sorted({c["step_order"] for c in cells})
     problems = review - _INFO_REASONS
     if problems:
@@ -335,6 +368,36 @@ def _parse_page(pageno: int, lines: list[dict],
         "extraction_method": "pdfplumber",
         "cells": cells,
     }
+
+
+def is_education_schedule(schedule: dict) -> bool:
+    """True when a parsed schedule is a teacher/education schedule: its columns
+    are education degree lanes (BA/BS/MA/MS/…) or its heading names teachers.
+    Education schedules belong to the TEACHERS bargaining unit and must never be
+    attributed to a non-teacher contract."""
+    for label in schedule.get("lane_labels") or []:
+        if _LANE.search(str(label)):
+            return True
+    return "TEACHER" in (schedule.get("schedule_name") or "").upper()
+
+
+def classify_schedule_unit(schedule: dict) -> Optional[str]:
+    """Best-effort bargaining unit for a parsed schedule, used to route the
+    schedules from a PDF shared by several unit contracts.
+
+    Returns 'teachers' for education/teacher schedules; a specific non-teacher
+    unit ('secretarial_clerical' / 'support_staff') when the heading clearly
+    names that family; else None (ambiguous — the caller assigns it to the PDF's
+    primary unit). Certified sub-families (counselors, psychologists, social
+    workers, nurses, …) are part of the teachers unit, so they return None here
+    and resolve to teachers when a teachers contract shares the PDF."""
+    if is_education_schedule(schedule):
+        return "teachers"
+    name = (schedule.get("schedule_name") or "").upper()
+    for unit, kws in _UNIT_KW:
+        if any(kw in name for kw in kws):
+            return unit
+    return None
 
 
 def parse_pdf(pdf_path) -> list[dict]:

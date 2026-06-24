@@ -5,6 +5,7 @@ Proves lib_salary_grid.parse_pdf extracts the full salary schedules from a real
 CBA (Joliet District 86), including ragged teacher lane grids, garbled-header
 recovery from a sibling year, and single-column non-teacher schedules.
 """
+import importlib
 import sys
 import unittest
 from collections import Counter
@@ -12,6 +13,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import lib_salary_grid as L
+
+# 18_extract_salary_schedules starts with a digit, so import via importlib.
+extract18 = importlib.import_module("18_extract_salary_schedules")
 
 FIXTURE = Path(__file__).parent / "fixtures" / "joliet_d86_salary.pdf"
 TEACHER_LANES = ["BA", "BA+15", "MA or 36", "MA+30"]
@@ -142,6 +146,191 @@ class GenericColumnCaptureTest(unittest.TestCase):
         lines = [_line(52.0, [_w("Custodian", 110, 150)])]  # nothing over col1
         self.assertIsNone(
             L._capture_columns(lines, 70.0, col_lefts, col_rights))
+
+
+def _edu_page_lines(c0, c1):
+    """Build the line dicts for a 2-lane (BA, MA) education grid whose two money
+    columns top out at c0/c1 — used to exercise the magnitude sanity check."""
+    return [
+        _line(20.0, [_w("2025-2026", 100, 160)]),          # school-year line
+        _line(40.0, [_w("BA", 100, 120), _w("MA", 200, 220)]),  # lane header
+        _line(60.0, [_w("1", 80, 90), _w("3,000", 100, 120),
+                     _w("3,200", 200, 220)]),
+        _line(72.0, [_w("2", 80, 90), _w("4,000", 100, 120),
+                     _w("4,200", 200, 220)]),
+        _line(84.0, [_w("3", 80, 90),
+                     _w(f"{c0:,}", 100, 120), _w(f"{c1:,}", 200, 220)]),
+    ]
+
+
+class EducationMagnitudeTest(unittest.TestCase):
+    """An education (BA/MA) lane grid whose values are too small to be a base
+    schedule (e.g. a stipend/index table) is flagged + withheld; a plausible
+    one is not. The check must never fire on non-education grids."""
+
+    def test_implausibly_small_education_grid_is_flagged(self):
+        s = L._parse_page(1, _edu_page_lines(8000, 8500), "Teachers")
+        self.assertIsNotNone(s)
+        self.assertEqual(s["lane_labels"], ["BA", "MA"])
+        self.assertTrue(s["needs_review"])
+        self.assertIn("implausible_salary_magnitude", s["review_reason"])
+
+    def test_plausible_education_grid_is_not_flagged(self):
+        s = L._parse_page(1, _edu_page_lines(55000, 60000), "Teachers")
+        self.assertIsNotNone(s)
+        self.assertEqual(s["lane_labels"], ["BA", "MA"])
+        self.assertFalse(s["needs_review"])
+        self.assertNotIn("implausible_salary_magnitude", s["review_reason"] or "")
+
+    def test_small_non_education_grid_is_not_flagged(self):
+        # Same small magnitudes, but generic (job-class) columns: an hourly
+        # custodial table legitimately has small numbers and must NOT be flagged.
+        lines = [
+            _line(40.0, [_w("Custodian", 100, 150), _w("Engineer", 200, 250)]),
+            _line(60.0, [_w("1", 80, 90), _w("3,000", 100, 120),
+                         _w("3,200", 200, 220)]),
+            _line(72.0, [_w("2", 80, 90), _w("4,000", 100, 120),
+                         _w("4,200", 200, 220)]),
+            _line(84.0, [_w("3", 80, 90), _w("5,000", 100, 120),
+                         _w("5,500", 200, 220)]),
+        ]
+        s = L._parse_page(1, lines, "Custodians")
+        self.assertIsNotNone(s)
+        self.assertEqual(s["lane_labels"], ["Custodian", "Engineer"])
+        self.assertNotIn("implausible_salary_magnitude", s["review_reason"] or "")
+
+
+def _sched(name, lanes=None):
+    return {"schedule_name": name, "lane_labels": lanes}
+
+
+class ScheduleClassificationTest(unittest.TestCase):
+    def test_is_education_schedule(self):
+        self.assertTrue(L.is_education_schedule(_sched("Teachers", ["BA", "MA"])))
+        self.assertTrue(L.is_education_schedule(_sched("TEACHERS SALARY")))
+        self.assertFalse(
+            L.is_education_schedule(_sched("Custodians", ["Custodian", "Eng"])))
+        self.assertFalse(L.is_education_schedule(_sched("Secretaries")))
+
+    def test_classify_schedule_unit(self):
+        self.assertEqual(
+            L.classify_schedule_unit(_sched("Teachers", ["BA", "MA"])), "teachers")
+        self.assertEqual(
+            L.classify_schedule_unit(_sched("TEACHERS SALARY")), "teachers")
+        self.assertEqual(
+            L.classify_schedule_unit(_sched("Secretarial Salary Schedule")),
+            "secretarial_clerical")
+        self.assertEqual(
+            L.classify_schedule_unit(_sched("Custodian/Maintenance Grid")),
+            "support_staff")
+        # Certified sub-families are part of the teachers unit -> ambiguous here,
+        # so they resolve to the PDF primary, never to a non-teacher unit.
+        self.assertIsNone(
+            L.classify_schedule_unit(_sched("Counselors/Social Workers")))
+        self.assertIsNone(L.classify_schedule_unit(_sched("Index Stipends")))
+
+
+class RouteSchedulesTest(unittest.TestCase):
+    """route_schedules is the cross-unit-leak fix: a teacher grid must reach the
+    teachers contract only, and is withheld (unattributed) when no teachers
+    contract shares the PDF — never stamped onto a non-teacher unit."""
+
+    def test_teacher_grid_routes_to_teachers(self):
+        routed, unattr = extract18.route_schedules(
+            [_sched("Teachers", ["BA", "MA"])], {"teachers", "support_staff"})
+        self.assertEqual(list(routed), ["teachers"])
+        self.assertEqual(unattr, [])
+
+    def test_teacher_grid_withheld_when_no_teachers_contract(self):
+        teacher = _sched("Teachers", ["BA", "MA"])
+        routed, unattr = extract18.route_schedules([teacher], {"support_staff"})
+        self.assertNotIn("support_staff", routed)
+        self.assertEqual(unattr, [teacher])
+
+    def test_family_schedule_routes_to_its_unit(self):
+        routed, _ = extract18.route_schedules(
+            [_sched("Custodian Salary")], {"teachers", "support_staff"})
+        self.assertEqual(list(routed), ["support_staff"])
+
+    def test_ambiguous_routes_to_primary_teachers(self):
+        routed, unattr = extract18.route_schedules(
+            [_sched("Index Stipends")], {"teachers", "support_staff"})
+        self.assertEqual(list(routed), ["teachers"])
+        self.assertEqual(unattr, [])
+
+    def test_mixed_pdf_no_education_leak_to_support(self):
+        teacher = _sched("Teachers", ["BA", "MA"])
+        cust = _sched("Custodian Salary")
+        routed, unattr = extract18.route_schedules(
+            [teacher, cust], {"teachers", "support_staff"})
+        self.assertEqual(routed["teachers"], [teacher])
+        self.assertEqual(routed["support_staff"], [cust])
+        # The whole point: no education schedule under a non-teacher unit.
+        self.assertFalse(
+            any(L.is_education_schedule(s) for s in routed["support_staff"]))
+
+
+class _FakeCur:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeConn:
+    """Minimal conn for exercising store_schedules in dry_run (no DB)."""
+
+    def cursor(self):
+        return _FakeCur()
+
+    def commit(self):
+        pass
+
+
+def _store_sched(name, year, ncells, conf=0.9, step_count=1, page_start=1):
+    cell = {"step_label": "1", "step_order": 0, "lane_label": "BA",
+            "lane_order": 0, "salary_amount": 50000, "page_ref": page_start}
+    return {
+        "schedule_name": name, "school_year": year, "start_year": None,
+        "schedule_type": "lane_grid", "lane_labels": ["BA", "MA"],
+        "step_count": step_count, "lane_count": 2, "page_start": page_start,
+        "page_end": page_start, "min_salary": None, "max_salary": None,
+        "confidence": conf, "needs_review": False, "review_reason": None,
+        "extraction_method": "pdfplumber", "cells": [dict(cell)] * ncells,
+    }
+
+
+class StoreDedupeTest(unittest.TestCase):
+    """store_schedules must collapse rows that share the DB unique key
+    (schedule_name, school_year) so one PDF yielding the same grid twice does
+    not abort the whole contract's delete-then-insert transaction."""
+
+    def _store(self, schedules):
+        return extract18.store_schedules(
+            _FakeConn(), {"contract_id": 1}, schedules, dry_run=True)
+
+    def test_collision_keeps_richest(self):
+        # Same (name, year) twice — keep the one with more cells.
+        thin = _store_sched("Teachers", "2025-2026", ncells=0, conf=0.6)
+        rich = _store_sched("Teachers", "2025-2026", ncells=12, conf=0.9)
+        n_sched, n_cells = self._store([thin, rich])
+        self.assertEqual(n_sched, 1)
+        self.assertEqual(n_cells, 12)
+
+    def test_distinct_years_both_kept(self):
+        a = _store_sched("Teachers", "2025-2026", ncells=4)
+        b = _store_sched("Teachers", "2026-2027", ncells=4)
+        n_sched, _ = self._store([a, b])
+        self.assertEqual(n_sched, 2)
+
+    def test_missing_year_disambiguated_by_page(self):
+        # Two no-year schedules on different pages get distinct synthetic years.
+        a = _store_sched("Stipends", None, ncells=2, page_start=5)
+        b = _store_sched("Stipends", None, ncells=2, page_start=9)
+        same = _store_sched("Stipends", None, ncells=2, page_start=5)
+        self.assertEqual(self._store([a, b])[0], 2)
+        self.assertEqual(self._store([a, same])[0], 1)
 
 
 class ScannedHelperTest(unittest.TestCase):
