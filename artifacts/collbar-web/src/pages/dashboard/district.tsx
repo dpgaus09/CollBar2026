@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useParams, useLocation } from "wouter";
 import {
@@ -110,6 +110,57 @@ interface ProvisionMediansResult {
   n: number;
 }
 
+// Salary-schedule grid response (mirrors GET .../salary-schedules). laneKind
+// tells the UI how to render columns WITHOUT assuming education lanes:
+// 'education' (BA/MA…), 'columns' (non-teacher job classes), or null (single
+// salary column). The grid never shows BA/MA chrome unless laneKind is
+// 'education'.
+interface SalaryCell {
+  stepLabel: string;
+  stepOrder: number;
+  laneLabel: string | null;
+  laneOrder: number;
+  salary: number;
+  pageRef: number | null;
+}
+interface SalarySchedule {
+  id: number;
+  scheduleName: string;
+  schoolYear: string;
+  startYear: number | null;
+  scheduleType: string;
+  laneLabels: string[] | null;
+  laneKind: "education" | "columns" | null;
+  stepCount: number | null;
+  laneCount: number | null;
+  minSalary: number | null;
+  maxSalary: number | null;
+  confidence: number | null;
+  needsReview: boolean;
+  reviewReason: string | null;
+  extractionMethod: string | null;
+  sourceUrl: string | null;
+  pageStart: number | null;
+  pageEnd: number | null;
+  cells: SalaryCell[];
+}
+interface SalarySummary {
+  scheduleName: string;
+  schoolYear: string;
+  baseSalary: number | null;
+  maBaseSalary: number | null;
+  maxSalary: number | null;
+}
+interface SalaryResponse {
+  bargainingUnit: string;
+  contractId: number | null;
+  schedules: SalarySchedule[];
+  jobFamilies: string[];
+  schoolYears: string[];
+  summary: SalarySummary | null;
+  availableUnits: string[];
+}
+
 // ---------------------------------------------------------------------------
 // Data hooks
 // ---------------------------------------------------------------------------
@@ -171,6 +222,22 @@ function useSettlements(id: string, unit: string) {
       return fetch(apiUrl(`${basePath}?${params}`), {
         credentials: "include",
       }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      });
+    },
+    placeholderData: (prev, q) => keepSameDistrict(prev, q, basePath),
+    enabled: !!id,
+  });
+}
+
+function useSalarySchedules(id: string, unit: string) {
+  const basePath = `/api/dashboard/districts/${id}/salary-schedules`;
+  return useQuery<SalaryResponse>({
+    queryKey: [basePath, unit],
+    queryFn: () => {
+      const params = new URLSearchParams({ bargainingUnit: unit });
+      return fetch(apiUrl(`${basePath}?${params}`), { credentials: "include" }).then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       });
@@ -554,6 +621,255 @@ function SettlementTable({
 }
 
 // ---------------------------------------------------------------------------
+// Salary schedule grid — the extracted CBA appendix rendered as the table of
+// record (experience steps × columns). Education lanes (BA/BA+15/MA/MA+30…)
+// only ever appear when laneKind === 'education'; non-teacher units render
+// their own job-class columns or a single salary column. The caller only
+// mounts this when schedules exist, so there is no empty state here.
+// ---------------------------------------------------------------------------
+
+const salaryFmt = (val: number) =>
+  new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(val);
+
+function SalaryGrid({
+  response,
+  settlements,
+  countyMedian,
+  bandMedian,
+}: {
+  response: SalaryResponse;
+  settlements: Settlement[];
+  countyMedian: string | null;
+  bandMedian: string | null;
+}) {
+  const { jobFamilies, schedules } = response;
+  const defaultFamily = jobFamilies.includes("Teachers") ? "Teachers" : jobFamilies[0];
+
+  const [family, setFamily] = useState(defaultFamily);
+  // Years available for the selected family (oldest → newest); years are
+  // per-family because successive CBAs can cover different spans.
+  const familyYears = useMemo(
+    () =>
+      [...new Set(schedules.filter((s) => s.scheduleName === family).map((s) => s.schoolYear))].sort(),
+    [schedules, family],
+  );
+  const [year, setYear] = useState(familyYears[0]);
+
+  // Reset the family when a new contract/unit loads, and the year whenever the
+  // selected family no longer covers the chosen year.
+  useEffect(() => {
+    setFamily(jobFamilies.includes("Teachers") ? "Teachers" : jobFamilies[0]);
+  }, [response]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!familyYears.includes(year)) setYear(familyYears[0]);
+  }, [familyYears]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const schedule = useMemo(
+    () =>
+      schedules.find((s) => s.scheduleName === family && s.schoolYear === year) ??
+      schedules.find((s) => s.scheduleName === family),
+    [schedules, family, year],
+  );
+
+  // Build the grid model from the cells themselves rather than trusting
+  // stepCount/laneCount, so non-contiguous or text-labelled steps still render.
+  const grid = useMemo(() => {
+    if (!schedule) return null;
+    const cellMap = new Map<string, SalaryCell>();
+    const stepByOrder = new Map<number, string>();
+    const laneOrders = new Set<number>();
+    for (const c of schedule.cells) {
+      cellMap.set(`${c.stepOrder}_${c.laneOrder}`, c);
+      if (!stepByOrder.has(c.stepOrder)) stepByOrder.set(c.stepOrder, c.stepLabel);
+      laneOrders.add(c.laneOrder);
+    }
+    const steps = [...stepByOrder.entries()].sort((a, b) => a[0] - b[0]); // [order, label]
+    const labels = schedule.laneLabels && schedule.laneLabels.length ? schedule.laneLabels : null;
+    const laneCount = labels ? labels.length : Math.max(1, laneOrders.size);
+    // Per-cell labels are the fallback when the schedule-level labels are
+    // missing (some multi-column grids store job classes only on the cells, or
+    // not at all). Only a genuine single-lane schedule is "Salary"; multi-lane
+    // grids without labels fall back to neutral "Col N" — never BA/MA, which is
+    // reserved for laneKind === 'education'.
+    const cellLabelByLane = new Map<number, string>();
+    for (const c of schedule.cells) {
+      if (c.laneLabel && !cellLabelByLane.has(c.laneOrder)) cellLabelByLane.set(c.laneOrder, c.laneLabel);
+    }
+    // Strictly-anchored education-lane tokens (BA, MA, BA+15, MA+30, Ed.D, …).
+    // The match is the WHOLE label, so genuine job-class names like
+    // "Maintenance" or "Engineer" never trip it.
+    const eduLaneRe = /^\s*(BA|BS|MA|MS|MAS|CAS|EDS|EDD|ED\.D|PHD|PH\.D|DOCTORATE)(\s*\+\s*\d+)?\s*$/i;
+    const resolveLabel = (i: number): string => {
+      const raw = labels ? labels[i] : cellLabelByLane.get(i) ?? null;
+      // Defense-in-depth: a non-education schedule must never present education
+      // lane labels. If the API ever mislabels a unit, neutralize the chrome.
+      if (raw != null && !(schedule.laneKind !== "education" && eduLaneRe.test(raw))) return raw;
+      return laneCount === 1 ? "Salary" : `Col ${i + 1}`;
+    };
+    const lanes = Array.from({ length: laneCount }, (_, i) => ({ order: i, label: resolveLabel(i) }));
+    return { cellMap, steps, lanes };
+  }, [schedule]);
+
+  if (!schedule || !grid) return null;
+
+  const minStep = grid.steps.length ? grid.steps[0][0] : 0;
+  const baseSalary = schedule.minSalary;
+  const maxSalary = schedule.maxSalary;
+  // MA base only exists for genuine education lanes — never synthesise it for a
+  // non-teacher unit.
+  let maBaseSalary: number | null = null;
+  if (schedule.laneKind === "education" && schedule.laneLabels) {
+    const maLane = schedule.laneLabels.findIndex((l) => /^\s*(MA|MS|M\.A)\b/i.test(l));
+    if (maLane >= 0) maBaseSalary = grid.cellMap.get(`${minStep}_${maLane}`)?.salary ?? null;
+  }
+
+  const showFamilySelect = jobFamilies.length > 1;
+  const showYearSelect = familyYears.length > 1;
+  const sourceUrl = sourceHref(schedule.sourceUrl, schedule.pageStart ?? undefined);
+  const colNoun = grid.lanes.length === 1 ? "column" : schedule.laneKind === "education" ? "lanes" : "columns";
+
+  return (
+    <div className="md:col-span-2 rounded-lg border border-slate-800 bg-slate-900 overflow-hidden">
+      {/* Header + selectors */}
+      <div className="px-4 py-3 border-b border-slate-800 bg-slate-900 flex flex-wrap items-center justify-between gap-3">
+        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Compensation</h3>
+        <div className="flex flex-wrap items-center gap-3">
+          {showFamilySelect && (
+            <label className="flex items-center gap-1.5 text-[10px] text-slate-500 uppercase tracking-wider">
+              Job Family
+              <select
+                value={family}
+                onChange={(e) => setFamily(e.target.value)}
+                className="bg-slate-950 border border-slate-800 text-slate-200 text-xs rounded px-2 py-1 focus:ring-1 focus:ring-blue-500 focus:outline-none"
+              >
+                {jobFamilies.map((f) => (
+                  <option key={f} value={f}>{f}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          {showYearSelect && (
+            <label className="flex items-center gap-1.5 text-[10px] text-slate-500 uppercase tracking-wider">
+              School Year
+              <select
+                value={year}
+                onChange={(e) => setYear(e.target.value)}
+                className="bg-slate-950 border border-slate-800 text-slate-200 text-xs rounded px-2 py-1 focus:ring-1 focus:ring-blue-500 focus:outline-none"
+              >
+                {familyYears.map((y) => (
+                  <option key={y} value={y}>{y}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          {sourceUrl && (
+            <a
+              href={sourceUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-blue-500 hover:text-blue-400 whitespace-nowrap"
+            >
+              Source PDF
+              {schedule.pageStart
+                ? ` p.${schedule.pageStart}${schedule.pageEnd && schedule.pageEnd !== schedule.pageStart ? `–${schedule.pageEnd}` : ""}`
+                : ""} →
+            </a>
+          )}
+        </div>
+      </div>
+
+      {/* Anchors */}
+      <div className="px-4 py-2.5 bg-slate-900/60 border-b border-slate-800 flex flex-wrap items-center gap-x-8 gap-y-2">
+        <div>
+          <div className="text-[10px] text-slate-500 uppercase tracking-wide">Base Salary</div>
+          <div className="text-sm font-semibold text-slate-200 tabular-nums">
+            {baseSalary != null ? salaryFmt(baseSalary) : "—"}
+          </div>
+        </div>
+        {schedule.laneKind === "education" && maBaseSalary != null && (
+          <div>
+            <div className="text-[10px] text-slate-500 uppercase tracking-wide">MA Base</div>
+            <div className="text-sm font-semibold text-slate-200 tabular-nums">{salaryFmt(maBaseSalary)}</div>
+          </div>
+        )}
+        <div>
+          <div className="text-[10px] text-emerald-500/70 uppercase tracking-wide">Max Salary</div>
+          <div className="text-sm font-semibold text-emerald-400 tabular-nums">
+            {maxSalary != null ? salaryFmt(maxSalary) : "—"}
+          </div>
+        </div>
+        <div className="ml-auto self-center text-[10px] text-slate-600 tabular-nums">
+          {grid.steps.length} step{grid.steps.length === 1 ? "" : "s"} × {grid.lanes.length} {colNoun}
+        </div>
+      </div>
+
+      {/* Grid table */}
+      <div className="relative overflow-auto max-h-[60vh] bg-slate-950">
+        <table className="w-full text-sm text-left border-collapse">
+          <thead className="sticky top-0 z-20 bg-slate-900 border-b border-slate-800">
+            <tr>
+              <th className="sticky left-0 z-30 bg-slate-900 px-4 py-2 font-semibold text-slate-400 border-b border-r border-slate-800 w-16 text-center shadow-[1px_0_0_0_#1e293b]">
+                Step
+              </th>
+              {grid.lanes.map((lane) => (
+                <th
+                  key={lane.order}
+                  className="px-4 py-2 font-semibold text-slate-200 border-b border-slate-800 whitespace-nowrap text-right"
+                >
+                  {lane.label}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {grid.steps.map(([order, label]) => (
+              <tr
+                key={order}
+                className="hover:bg-slate-800/50 transition-colors group odd:bg-slate-950 even:bg-slate-900/30"
+              >
+                <td className="sticky left-0 z-10 bg-inherit px-4 py-2 font-medium text-slate-500 border-r border-slate-800 text-center shadow-[1px_0_0_0_#1e293b] group-hover:bg-slate-800/80">
+                  {label}
+                </td>
+                {grid.lanes.map((lane) => {
+                  const val = grid.cellMap.get(`${order}_${lane.order}`)?.salary;
+                  const isMin = val != null && val === baseSalary;
+                  const isMax = val != null && val === maxSalary;
+                  let cls = "px-4 py-2 text-right tabular-nums whitespace-nowrap border-b border-slate-800/50 ";
+                  if (isMax) cls += "text-emerald-300 font-bold bg-emerald-950/30";
+                  else if (isMin) cls += "text-slate-100 font-semibold bg-slate-800/40";
+                  else if (val != null) cls += "text-slate-300";
+                  else cls += "text-slate-700";
+                  return (
+                    <td key={lane.order} className={cls}>
+                      {val != null ? salaryFmt(val) : "—"}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Benchmark trend — preserves the median comparison from the legacy card */}
+      {settlements.length > 0 && (
+        <div className="px-4 pb-4 pt-1 border-t border-slate-800">
+          <CompensationSparkline
+            settlements={settlements}
+            countyMedian={countyMedian}
+            bandMedian={bandMedian}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main page
 // ---------------------------------------------------------------------------
 
@@ -586,6 +902,7 @@ export default function DistrictDashboardPage() {
   const { data: district, isLoading: distLoading } = useDistrictDetail(id, unit);
   const { data: provsData, isLoading: provsLoading } = useProvisions(id, unit);
   const { data: settlementsData } = useSettlements(id, unit);
+  const { data: salaryData } = useSalarySchedules(id, unit);
   const county = district?.county ?? null;
   const band = district?.enrollmentBand ?? "unknown";
   const districtState = district?.state ?? null;
@@ -612,6 +929,17 @@ export default function DistrictDashboardPage() {
 
   const provisions = provsData?.provisions ?? [];
   const settlements = settlementsData?.settlements ?? [];
+  // Show the real extracted salary grid when this unit has schedules; otherwise
+  // fall back to the legacy provision summary (most districts aren't backfilled
+  // yet) so the Compensation card never regresses to empty.
+  //
+  // The salary query keeps the previous unit's response as placeholderData while
+  // the new unit loads, so we MUST confirm the response is for the currently
+  // selected unit before rendering. Without this guard a teacher grid (with
+  // BA/MA lanes) could flash on a non-teacher unit — never show education lanes
+  // for the wrong unit.
+  const salaryHasGrids =
+    !!salaryData && salaryData.bargainingUnit === unit && salaryData.schedules.length > 0;
 
   // Benchmark coverage transparency for the selected unit: how many peer
   // districts have settlements for this unit (county or enrollment band).
@@ -818,7 +1146,17 @@ export default function DistrictDashboardPage() {
             {/* 6 data cards — ordered per spec */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
 
-              {/* Card 1: Compensation — salary anchors + year increases + sparkline vs medians */}
+              {/* Card 1: Compensation — real extracted salary grid when available,
+                  else the legacy provision summary + sparkline (most districts are
+                  not backfilled yet). The grid spans both columns. */}
+              {salaryHasGrids && salaryData ? (
+                <SalaryGrid
+                  response={salaryData}
+                  settlements={settlements}
+                  countyMedian={countyMedians?.median_base ?? null}
+                  bandMedian={bandMedians?.median_base ?? null}
+                />
+              ) : (
               <DataCard title="Compensation">
                 {comp.length === 0 && settlements.length === 0 ? (
                   <p className="text-slate-600 text-xs italic">Not yet extracted</p>
@@ -869,6 +1207,7 @@ export default function DistrictDashboardPage() {
                   </div>
                 )}
               </DataCard>
+              )}
 
               {/* Card 2: Insurance — premium shares vs. county medians */}
               <DataCard title="Insurance">
