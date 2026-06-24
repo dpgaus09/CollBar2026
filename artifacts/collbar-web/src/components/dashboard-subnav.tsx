@@ -1,6 +1,8 @@
 import { Lock } from "lucide-react";
+import { useSearchParams } from "wouter";
 import { useAuth } from "@/hooks/use-auth";
 import { useUpgradeLock } from "@/components/upgrade";
+import { DEFAULT_UNIT, isCanonicalUnit } from "@/lib/bargaining-units";
 
 export type SubNavTab = "home" | "clauses" | "comparables" | "ask-vs-got" | "final-offers" | "submit";
 
@@ -12,12 +14,22 @@ export function DashboardSubNav({ id, active }: { id: string; active: SubNavTab 
   const { isFree } = useAuth();
   const { showUpgrade } = useUpgradeLock();
 
+  // Carry the selected bargaining unit across tab navigation so the choice the
+  // user made on one tab survives to the next. The default unit (teachers) needs
+  // no param, keeping URLs clean.
+  const [params] = useSearchParams();
+  const rawUnit = params.get("unit");
+  const unitQuery =
+    rawUnit && isCanonicalUnit(rawUnit) && rawUnit !== DEFAULT_UNIT
+      ? `?unit=${encodeURIComponent(rawUnit)}`
+      : "";
+
   const tabs: { key: SubNavTab; label: string; href: string }[] = [
-    { key: "home", label: "Overview", href: base },
-    { key: "clauses", label: "Key Clauses", href: `${base}/clauses` },
-    { key: "comparables", label: "Comparables", href: `${base}/comparables` },
-    { key: "ask-vs-got", label: "Ask vs Got", href: `${base}/ask-vs-got` },
-    { key: "final-offers", label: "Final Offers", href: `${base}/final-offers` },
+    { key: "home", label: "Overview", href: `${base}${unitQuery}` },
+    { key: "clauses", label: "Key Clauses", href: `${base}/clauses${unitQuery}` },
+    { key: "comparables", label: "Comparables", href: `${base}/comparables${unitQuery}` },
+    { key: "ask-vs-got", label: "Ask vs Got", href: `${base}/ask-vs-got${unitQuery}` },
+    { key: "final-offers", label: "Final Offers", href: `${base}/final-offers${unitQuery}` },
   ];
 
   return (

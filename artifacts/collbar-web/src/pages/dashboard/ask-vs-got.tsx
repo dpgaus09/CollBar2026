@@ -9,7 +9,9 @@ import { useAuth, useLogout } from "@/hooks/use-auth";
 import { apiUrl, sourceHref } from "@/lib/api";
 import { ProvenanceValue } from "@/components/provenance";
 import { DashboardSubNav } from "@/components/dashboard-subnav";
+import { UnitSwitcher } from "@/components/unit-switcher";
 import { LockedPage } from "@/components/upgrade";
+import { useDistrictUnit } from "@/hooks/use-district-unit";
 
 interface Proposal {
   id: number;
@@ -45,6 +47,8 @@ export default function AskVsGotPage() {
   const [, setLocation] = useLocation();
   const { isAuthenticated, isLoading: authLoading, isFree } = useAuth();
   const logout = useLogout();
+  // Selected bargaining unit, persisted in the URL and shared across tabs.
+  const [unit, setUnit] = useDistrictUnit();
 
   const { data, isLoading } = useQuery<{ proposals: Proposal[] }>({
     queryKey: [`/api/dashboard/districts/${id}/factfinding`],
@@ -86,6 +90,8 @@ export default function AskVsGotPage() {
       <DashboardSubNav id={id} active="ask-vs-got" />
 
       <main className="max-w-4xl mx-auto px-6 py-8 space-y-8">
+        <UnitSwitcher districtId={id} unit={unit} onChange={setUnit} />
+
         <div>
           <h1 className="text-lg font-bold text-slate-100">Ask vs Got</h1>
           <p className="text-xs text-slate-500 mt-1">

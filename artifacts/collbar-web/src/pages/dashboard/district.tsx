@@ -9,8 +9,11 @@ import { useAuth, useLogout } from "@/hooks/use-auth";
 import { apiUrl, sourceHref } from "@/lib/api";
 import { ProvenanceRow, ProvenanceValue } from "@/components/provenance";
 import { DashboardSubNav } from "@/components/dashboard-subnav";
+import { UnitSwitcher } from "@/components/unit-switcher";
 import { useUpgradeLock } from "@/components/upgrade";
 import { TopNavTools } from "@/components/top-nav-tools";
+import { useDistrictUnit } from "@/hooks/use-district-unit";
+import { unitLabel } from "@/lib/bargaining-units";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -87,24 +90,6 @@ interface MedianResult {
   median_base: string | null;
   n: number;
   district_count?: number;
-}
-
-// Canonical bargaining-unit display labels (mirrors API bargaining-units.ts).
-const BARGAINING_UNIT_LABELS: Record<string, string> = {
-  teachers: "Teachers",
-  paraprofessionals: "Paraprofessionals",
-  custodial_maintenance: "Custodial & Maintenance",
-  transportation: "Transportation",
-  secretarial_clerical: "Secretarial & Clerical",
-  food_service: "Food Service",
-  nurses: "Nurses",
-  administrators: "Administrators",
-  support_staff: "Support Staff",
-  other: "Other",
-};
-
-function unitLabel(u: string): string {
-  return BARGAINING_UNIT_LABELS[u] ?? u;
 }
 
 interface ProvisionMediansResult {
@@ -966,20 +951,12 @@ export default function DistrictDashboardPage() {
     if (!isAuthenticated) { setLocation("/login"); return; }
   }, [authLoading, isAuthenticated, setLocation]);
 
-  // Reset to the default unit (teachers) synchronously whenever the viewed
-  // district changes, so SPA navigation between districts always starts on
-  // Teachers AND the data hooks below fetch teacher data immediately — no
-  // transient fetch for the unit selected on the previous district. This is
-  // React's documented "adjust state during render" pattern, preferred here over
-  // a useEffect (which would render once with the stale unit and fire an extra
-  // request before resetting).
-  const [unitState, setUnit] = useState("teachers");
-  const [prevId, setPrevId] = useState(id);
-  const unit = id !== prevId ? "teachers" : unitState;
-  if (id !== prevId) {
-    setPrevId(id);
-    setUnit("teachers");
-  }
+  // The selected bargaining unit lives in the URL (`?unit=`) so it persists as
+  // the user moves between this Overview and the sibling tabs (Key Clauses,
+  // Comparables, Ask vs Got, Final Offers). Each district is reached via a link
+  // WITHOUT `?unit=`, so switching districts naturally resets to the default
+  // (teachers) — no extra reset logic needed.
+  const [unit, setUnit] = useDistrictUnit();
 
   const { data: district, isLoading: distLoading } = useDistrictDetail(id, unit);
   const { data: provsData, isLoading: provsLoading } = useProvisions(id, unit);
@@ -1106,60 +1083,18 @@ export default function DistrictDashboardPage() {
             </section>
 
             {/* Bargaining unit selector — page-level switch at the top of the
-                Overview. A district can have several CBAs (teachers, support
-                staff, custodial…); each is a distinct group and benchmarks never
-                mix units, so switching re-scopes the ENTIRE Overview (contract,
-                compensation, settlements, medians) to the chosen unit. */}
-            {availableUnits.length > 0 && (
-              <section className="rounded-xl border border-slate-800 bg-slate-900 px-5 py-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="shrink-0">
-                    <div className="text-xs text-slate-400 uppercase tracking-widest font-semibold">
-                      Bargaining Unit
-                    </div>
-                    <div className="text-[11px] text-slate-500 mt-0.5">
-                      {availableUnits.length > 1
-                        ? "Switch to view this Overview for each group"
-                        : "This district has one bargaining unit on file"}
-                    </div>
-                  </div>
-                  {availableUnits.length === 1 ? (
-                    <div className="inline-flex items-center gap-1.5 self-start rounded-md bg-slate-800 px-3.5 py-1.5 text-sm font-medium text-slate-200 sm:self-auto">
-                      {unitLabel(availableUnits[0].bargaining_unit)}
-                      <span className="text-slate-500">({availableUnits[0].n})</span>
-                    </div>
-                  ) : (
-                    <div
-                      role="group"
-                      aria-label="Bargaining unit"
-                      className="flex flex-wrap gap-1.5"
-                    >
-                      {availableUnits.map((u) => {
-                        const active = unit === u.bargaining_unit;
-                        return (
-                          <button
-                            key={u.bargaining_unit}
-                            type="button"
-                            aria-pressed={active}
-                            onClick={() => setUnit(u.bargaining_unit)}
-                            className={`rounded-md border px-3.5 py-1.5 text-sm font-medium transition-colors ${
-                              active
-                                ? "border-blue-500 bg-blue-500/15 text-blue-200 shadow-sm"
-                                : "border-slate-700 bg-slate-800/40 text-slate-400 hover:border-slate-600 hover:text-slate-200"
-                            }`}
-                          >
-                            {unitLabel(u.bargaining_unit)}
-                            <span className={`ml-1 ${active ? "text-blue-300/70" : "text-slate-600"}`}>
-                              ({u.n})
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              </section>
-            )}
+                Overview, shared with the sibling tabs. A district can have
+                several CBAs (teachers, support staff, custodial…); each is a
+                distinct group and benchmarks never mix units, so switching
+                re-scopes the ENTIRE Overview (contract, compensation,
+                settlements, medians) to the chosen unit. The selection lives in
+                the URL so it carries over to the other tabs. */}
+            <UnitSwitcher
+              districtId={id}
+              unit={unit}
+              onChange={setUnit}
+              availableUnits={availableUnits}
+            />
 
             {/* Contract status */}
             {contract ? (

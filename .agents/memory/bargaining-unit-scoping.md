@@ -57,6 +57,21 @@ The est_annual_cost_impact and EIS cross-check CASEs are gated on
 Non-teacher settlements return NULL for these; keep it that way unless a
 unit-specific salary model is added.
 
+## Rule 5 — selected unit persists across district tabs via the URL
+The chosen bargaining unit lives in the URL query param `?unit=` (read/written by
+`useDistrictUnit`, validated against the canonical list in
+`web/src/lib/bargaining-units.ts`, default teachers → no param). `DashboardSubNav`
+appends `?unit=` to every tab link so the selection survives navigation between
+Overview, Key Clauses, Comparables, Ask vs Got, Final Offers; switching districts
+(links carry no `?unit=`) resets to teachers automatically. The shared
+`<UnitSwitcher>` renders the control on every tab.
+**Why:** users expect "the whole picture for one group," not a per-tab reset.
+**How to apply:** only the Overview and Comparables backends actually consume
+`bargainingUnit` today; clauses is intentionally unit-agnostic and
+factfinding/final-offers are not unit-partitioned, so on those tabs the switcher
+persists/links the selection but does NOT re-filter data. If you make one of those
+endpoints unit-scoped, thread `bargainingUnit` from the page's `useDistrictUnit`.
+
 ## Known latent gap — contracts uniqueness
 `contracts` still uniques on `(district_id, unit_scope, effective_start)`;
 `bargaining_unit` is NOT in the key (only `settlements` got the unit added to its

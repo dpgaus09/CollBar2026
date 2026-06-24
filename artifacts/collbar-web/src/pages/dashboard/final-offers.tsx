@@ -4,7 +4,9 @@ import { useParams, useLocation } from "wouter";
 import { useAuth, useLogout } from "@/hooks/use-auth";
 import { apiUrl } from "@/lib/api";
 import { DashboardSubNav } from "@/components/dashboard-subnav";
+import { UnitSwitcher } from "@/components/unit-switcher";
 import { LockedPage } from "@/components/upgrade";
+import { useDistrictUnit } from "@/hooks/use-district-unit";
 
 interface Comparison {
   posting_id: number;
@@ -154,6 +156,8 @@ export default function FinalOffersPage() {
   const [, setLocation] = useLocation();
   const { isAuthenticated, isLoading: authLoading, isFree } = useAuth();
   const logout = useLogout();
+  // Selected bargaining unit, persisted in the URL and shared across tabs.
+  const [unit, setUnit] = useDistrictUnit();
 
   const { data, isLoading, isError } = useQuery<{ postings: Posting[] }>({
     queryKey: [`/api/dashboard/districts/${id}/final-offers`],
@@ -187,6 +191,8 @@ export default function FinalOffersPage() {
       <DashboardSubNav id={id} active="final-offers" />
 
       <main className="max-w-5xl mx-auto px-6 py-8 space-y-6">
+        <UnitSwitcher districtId={id} unit={unit} onChange={setUnit} />
+
         <div>
           <h1 className="text-lg font-bold text-slate-100">Final Offers — Board vs Union</h1>
           <p className="text-xs text-slate-500 mt-1">

@@ -5,7 +5,9 @@ import { useAuth, useLogout } from "@/hooks/use-auth";
 import { apiUrl } from "@/lib/api";
 import { ProvenanceValue } from "@/components/provenance";
 import { DashboardSubNav } from "@/components/dashboard-subnav";
+import { UnitSwitcher } from "@/components/unit-switcher";
 import { LockedPage } from "@/components/upgrade";
+import { useDistrictUnit } from "@/hooks/use-district-unit";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -121,6 +123,8 @@ export default function ComparablesPage() {
   const [, setLocation] = useLocation();
   const { isAuthenticated, isLoading: authLoading, isFree } = useAuth();
   const logout = useLogout();
+  // Selected bargaining unit, persisted in the URL and shared across tabs.
+  const [unit, setUnit] = useDistrictUnit();
 
   // Read filters + peer_set_id from URL search params so a deep link from the
   // Ask page (?county=&band=&districtType=&yearFrom=&yearTo=) lands pre-filtered.
@@ -172,6 +176,7 @@ export default function ComparablesPage() {
     if (yearFrom) p.set("yearFrom", yearFrom);
     if (yearTo) p.set("yearTo", yearTo);
     if (selectedPeerSetId) p.set("peer_set_id", selectedPeerSetId);
+    p.set("bargainingUnit", unit);
     p.set("page", String(extra.page ?? page));
     p.set("limit", "50");
     return p;
@@ -180,7 +185,7 @@ export default function ComparablesPage() {
   const { data, isLoading } = useQuery<ComparablesResponse>({
     queryKey: [
       "/api/dashboard/comparables",
-      county, band, districtType, yearFrom, yearTo, page, selectedPeerSetId,
+      county, band, districtType, yearFrom, yearTo, page, selectedPeerSetId, unit,
     ],
     queryFn: () =>
       fetch(`${apiUrl("/api/dashboard/comparables")}?${buildParams()}`, {
@@ -237,6 +242,8 @@ export default function ComparablesPage() {
       <DashboardSubNav id={id} active="comparables" />
 
       <main className="max-w-6xl mx-auto px-6 py-8 space-y-5">
+
+        <UnitSwitcher districtId={id} unit={unit} onChange={setUnit} />
 
         {/* Title row */}
         <div className="flex items-center justify-between gap-4">
