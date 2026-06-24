@@ -21,9 +21,13 @@ args = ["pnpm", "--filter", "@workspace/api-server", "run", "build"]
 NODE_ENV = "production"
 
 [services.production.run]
-# Push DB schema non-interactively (--force skips TTY confirmation) then start the server.
-# This ensures the production database is always in sync with the current schema on each deploy.
-args = ["bash", "-c", "pnpm --filter db push-force && exec node --enable-source-maps artifacts/api-server/dist/index.mjs"]
+# Start the server directly. Do NOT run `drizzle-kit push` here: this DB has
+# tables Drizzle doesn't manage (and a populated `contracts` table), so a forced
+# push would DROP/TRUNCATE them — the `db push-force` script is intentionally
+# disabled and exits non-zero, which previously aborted startup. Additive schema
+# changes are applied idempotently by the API server's runMigrations() on boot
+# (see artifacts/api-server/src/app.ts); verify with `pnpm --filter @workspace/db run check-drift`.
+args = ["node", "--enable-source-maps", "artifacts/api-server/dist/index.mjs"]
 
 [services.production.run.env]
 PORT = "8080"

@@ -16,6 +16,14 @@ run blindly — it wants to DROP tables Drizzle doesn't manage and prompts to
 the DB use the read-only `pnpm --filter @workspace/db run check-drift` instead.
 See `drizzle-push-unique-constraints.md` for the full hybrid-management story.
 
+**Publish trap (cost us a failed build):** the api-server prod run command in
+`artifacts/api-server/.replit-artifact/artifact.toml` must NOT chain
+`pnpm --filter db push-force && exec node …`. Because `push-force` is neutered
+(exit 1), the `&&` short-circuits, node never starts, port 8080 never opens, and
+the `/api/healthz` startup probe fails → the whole publish fails at the promote
+step. The prod run command must launch node directly; the server applies additive
+schema itself via `runMigrations()` on boot (app.ts, after it starts listening).
+
 **How to apply (additive columns):** for a targeted additive change, skip push and
 run a surgical `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` against the dev DB only.
 The publish flow introspects the live dev DB schema, so the new columns still

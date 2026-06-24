@@ -295,3 +295,16 @@ doc_id,district_id,district_name,state,school_year,bargaining_unit,classificatio
 1056,22096,Test District tstrq-1782300350785-270495,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782300350785-270495/bulk-doc.pdf
 1060,22099,ZZ Unit Test tstunit-1782312037714-630489,IL,,teachers,unreadable,file_not_found,upload://tstunit-1782312037714-630489
 1061,22100,ZZ Unit Test tstunit-1782312086035-400101,IL,,teachers,unreadable,file_not_found,upload://tstunit-1782312086035-400101
+1074,22107,Test District tstrq-1782321037205-215828,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782321037205-215828/good-latest.pdf
+1075,22107,Test District tstrq-1782321037205-215828,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782321037205-215828/bad.pdf
+1076,22107,Test District tstrq-1782321037205-215828,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782321037205-215828/norun.pdf
+1077,22107,Test District tstrq-1782321037205-215828,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782321037205-215828/bulk-ids.pdf
+1078,22107,Test District tstrq-1782321037205-215828,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782321037205-215828/bulk-doc.pdf
+1079,22108,ZZ Unit Test tstunit-1782321067429-489547,IL,,teachers,unreadable,file_not_found,upload://tstunit-1782321067429-489547
+1080,22109,ZZ Unit Test tstunit-1782322130476-256411,IL,,teachers,unreadable,file_not_found,upload://tstunit-1782322130476-256411
+1083,22111,Test District tstrq-1782322196736-466023,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782322196736-466023/good-latest.pdf
+1084,22111,Test District tstrq-1782322196736-466023,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782322196736-466023/bad.pdf
+1085,22111,Test District tstrq-1782322196736-466023,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782322196736-466023/norun.pdf
+1086,22111,Test District tstrq-1782322196736-466023,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782322196736-466023/bulk-ids.pdf
+1087,22111,Test District tstrq-1782322196736-466023,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782322196736-466023/bulk-doc.pdf
+1088,10732,CUSD 200,IL,,teachers,needs-OCR,insufficient_text (0 chars),https://files-backend.assets.thrillshare.com/documents/asset/uploaded_file/3696/Cusd200/461fa813-c728-4cf6-bb95-355f4238a004/Appendix_B_-_Salary_Grades_-_Beginning_with_th.pdf?disposition=inline
