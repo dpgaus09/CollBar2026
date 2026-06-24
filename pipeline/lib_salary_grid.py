@@ -29,6 +29,45 @@ _MONEY = re.compile(r"^\$?[\d,]{3,}(?:\.\d{2})?$")
 _YEAR = re.compile(r"(19|20)(\d{2})\s*[-\u2013\u2014]\s*((?:19|20)?\d{2})")
 # A bare 1-2 digit experience step at the start of a row.
 _STEP = re.compile(r"^\d{1,2}$")
+# A clean textual step marker ("Step"/"Level") that precedes a *separate*
+# numeric step token, e.g. "Step 1  $50,000 ...". Only an exact keyword token is
+# accepted: glued or noisy variants from a degraded text layer ("STEP21",
+# "STEP?", "Step1.") deliberately do NOT match, so corrupt rows can never inject
+# silently-wrong salaries. Precision over recall.
+_STEP_WORD = re.compile(r"^(?:step|level)$", re.IGNORECASE)
+
+
+def _row_step(toks: list, allow_textual: bool = True) -> Optional[tuple[int, str]]:
+    """If a line leads with a step marker, return (step_int, step_label); else
+    None. Always accepts a bare 1-2 digit token. When ``allow_textual`` is set,
+    also accepts a clean textual 'Step'/'Level' keyword followed by a *separate*
+    1-2 digit token (e.g. "Step 1  $50,000 ...")."""
+    if not toks:
+        return None
+    t0 = toks[0]["text"]
+    if _STEP.match(t0):
+        return int(t0), t0
+    if (allow_textual and _STEP_WORD.match(t0) and len(toks) >= 2
+            and _STEP.match(toks[1]["text"])):
+        return int(toks[1]["text"]), toks[1]["text"]
+    return None
+
+
+def _collect_data_rows(lines: list[dict], allow_textual: bool) -> list[tuple]:
+    """Collect (step_int, step_label, money_words, line) for every line that
+    leads with a step marker and carries at least one money token."""
+    rows: list[tuple] = []
+    for ln in lines:
+        step = _row_step(ln["words"], allow_textual=allow_textual)
+        if step is None:
+            continue
+        step_i, step_label = step
+        monies = [w for w in ln["words"] if _is_money(w["text"])]
+        if monies:
+            rows.append((step_i, step_label, monies, ln))
+    return rows
+
+
 # Education-lane labels. Longer alternatives first so "BA + 15" wins over "BA".
 _LANE = re.compile(
     r"(?:BA|BS|MA|MS)\s*\+\s*\d+"          # BA+15, MA+30
@@ -150,7 +189,7 @@ def _detect_family(lines: list[dict]) -> Optional[str]:
 def _detect_year(lines: list[dict]) -> tuple[Optional[str], Optional[int]]:
     for ln in lines:
         toks = ln["words"]
-        if toks and _STEP.match(toks[0]["text"]):
+        if toks and _row_step(toks) is not None:
             continue  # skip data rows
         m = _YEAR.search(ln["text"])
         if m:
@@ -261,14 +300,19 @@ def _recover_sibling_lanes(schedules: list[dict]) -> None:
 def _parse_page(pageno: int, lines: list[dict],
                 family: Optional[str]) -> Optional[dict]:
     # Collect data rows: lead token is a step int and the row has >=1 money.
-    data_rows = []
-    for ln in lines:
-        toks = ln["words"]
-        if not toks or not _STEP.match(toks[0]["text"]):
-            continue
-        monies = [w for w in toks if _is_money(w["text"])]
-        if monies:
-            data_rows.append((int(toks[0]["text"]), toks[0]["text"], monies, ln))
+    # First pass uses bare-digit steps only, so existing grids are unchanged.
+    # Only when that finds too few rows do we fall back to clean textual labels
+    # ("Step 1 ..."); such a fallback grid is trusted ONLY if it is an education
+    # (BA/MA) grid (see the ``used_textual`` gate below), because a generic
+    # textual-step table (e.g. a stipend schedule) has small, plausible-looking
+    # values the magnitude floor cannot catch and must never be surfaced.
+    data_rows = _collect_data_rows(lines, allow_textual=False)
+    used_textual = False
+    if len(data_rows) < MIN_ROWS:
+        textual_rows = _collect_data_rows(lines, allow_textual=True)
+        if len(textual_rows) > len(data_rows):
+            data_rows = textual_rows
+            used_textual = True
     if len(data_rows) < MIN_ROWS:
         return None
 
@@ -337,6 +381,13 @@ def _parse_page(pageno: int, lines: list[dict],
     # so it lands in review and is withheld from the customer view. Skipped for
     # non-education/hourly grids, whose values are legitimately small.
     is_education = bool(lane_labels) and any(_LANE.search(l) for l in lane_labels)
+    if used_textual and not is_education:
+        # A grid recovered only via textual "Step N" labels is trusted only when
+        # it is a recognizable education (BA/MA) grid, whose values the magnitude
+        # floor can sanity-check. A non-education textual-step table (e.g. a
+        # stipend/differential schedule) has small but legitimate-looking values
+        # the floor cannot catch, so it is withheld entirely. Precision > recall.
+        return None
     if is_education and amounts:
         top = max(amounts)
         if top < EDU_SALARY_FLOOR or top > EDU_SALARY_CEILING:

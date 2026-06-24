@@ -333,6 +333,115 @@ class StoreDedupeTest(unittest.TestCase):
         self.assertEqual(self._store([a, same])[0], 1)
 
 
+class RowStepTest(unittest.TestCase):
+    """_row_step accepts bare-digit steps always and clean textual 'Step'/'Level'
+    labels only when allowed; glued/noisy labels are never matched."""
+
+    def test_bare_digit(self):
+        self.assertEqual(L._row_step([_w("5", 0, 10), _w("$50,000", 20, 40)]),
+                         (5, "5"))
+
+    def test_clean_textual_step_and_level(self):
+        self.assertEqual(L._row_step([_w("Step", 0, 20), _w("7", 22, 30)]),
+                         (7, "7"))
+        self.assertEqual(L._row_step([_w("Level", 0, 20), _w("3", 22, 30)]),
+                         (3, "3"))
+
+    def test_textual_disabled_by_flag(self):
+        self.assertIsNone(
+            L._row_step([_w("Step", 0, 20), _w("7", 22, 30)],
+                        allow_textual=False))
+
+    def test_glued_or_noisy_label_rejected(self):
+        # The degraded-text-layer family (Cicero SD 99): never matched.
+        self.assertIsNone(L._row_step([_w("STEP7", 0, 30)]))
+        self.assertIsNone(L._row_step([_w("Step1.", 0, 30)]))
+        self.assertIsNone(L._row_step([_w("STEPI7", 0, 30)]))
+
+    def test_three_digit_step_rejected(self):
+        self.assertIsNone(L._row_step([_w("100", 0, 30)]))
+
+    def test_textual_needs_a_separate_digit_token(self):
+        self.assertIsNone(L._row_step([_w("Step", 0, 20), _w("one", 22, 40)]))
+        self.assertIsNone(L._row_step([_w("Step", 0, 20)]))
+
+
+def _textual_edu_lines(top, kw="Step"):
+    """A 2-lane (BA, MA) education grid that uses *textual* step labels
+    ("Step 1 ..."); ``top`` sets the magnitude of the largest cell."""
+    lo = top - 5000
+    return [
+        _line(20.0, [_w("2025-2026", 100, 160)]),
+        _line(40.0, [_w("BA", 100, 120), _w("MA", 200, 220)]),
+        _line(60.0, [_w(kw, 60, 78), _w("1", 80, 90),
+                     _w(f"{lo:,}", 100, 120), _w(f"{lo + 1000:,}", 200, 220)]),
+        _line(72.0, [_w(kw, 60, 78), _w("2", 80, 90),
+                     _w(f"{lo + 2000:,}", 100, 120),
+                     _w(f"{lo + 3000:,}", 200, 220)]),
+        _line(84.0, [_w(kw, 60, 78), _w("3", 80, 90),
+                     _w(f"{top - 1000:,}", 100, 120), _w(f"{top:,}", 200, 220)]),
+    ]
+
+
+class TextualStepTest(unittest.TestCase):
+    """Clean textual 'Step N' / 'Level N' rows are a fallback used only when the
+    bare-digit pass finds nothing, and the resulting grid is trusted ONLY if it
+    is a recognizable education (BA/MA) grid the magnitude floor can validate."""
+
+    def test_textual_education_grid_recovered(self):
+        for kw in ("Step", "Level", "STEP", "level"):
+            s = L._parse_page(1, _textual_edu_lines(60000, kw), "Teachers")
+            self.assertIsNotNone(s, f"{kw} grid not parsed")
+            self.assertEqual(s["lane_labels"], ["BA", "MA"])
+            self.assertEqual(s["lane_count"], 2)
+            self.assertEqual(s["step_count"], 3)
+            self.assertFalse(s["needs_review"], s["review_reason"])
+
+    def test_textual_education_stipend_is_flagged_and_withheld(self):
+        # Education lanes but stipend-sized values -> flagged, never shown clean.
+        s = L._parse_page(1, _textual_edu_lines(9000), "Teachers")
+        self.assertIsNotNone(s)
+        self.assertTrue(s["needs_review"])
+        self.assertIn("implausible_salary_magnitude", s["review_reason"])
+
+    def test_textual_non_education_grid_rejected(self):
+        # Generic (non-BA/MA) textual-step table, e.g. a "Group I/II" stipend
+        # schedule (Glen Ellyn SD 41): its small values evade the education-only
+        # magnitude floor, so it must be withheld ENTIRELY (parser returns None).
+        lines = [
+            _line(40.0, [_w("Group", 95, 130), _w("I", 132, 140),
+                         _w("Group", 195, 230), _w("II", 232, 240)]),
+            _line(60.0, [_w("Step", 60, 78), _w("1", 80, 90),
+                         _w("1,210", 100, 120), _w("1,980", 200, 220)]),
+            _line(72.0, [_w("Step", 60, 78), _w("2", 80, 90),
+                         _w("1,210", 100, 120), _w("2,530", 200, 220)]),
+            _line(84.0, [_w("Step", 60, 78), _w("3", 80, 90),
+                         _w("1,210", 100, 120), _w("2,970", 200, 220)]),
+        ]
+        self.assertIsNone(L._parse_page(1, lines, "Stipends"))
+
+    def test_glued_step_label_grid_rejected(self):
+        # Even with BA/MA lanes, glued labels (STEP1) yield no data rows at all.
+        lines = [
+            _line(40.0, [_w("BA", 100, 120), _w("MA", 200, 220)]),
+            _line(60.0, [_w("STEP1", 70, 95), _w("50,000", 100, 120),
+                         _w("52,000", 200, 220)]),
+            _line(72.0, [_w("STEP2", 70, 95), _w("51,000", 100, 120),
+                         _w("53,000", 200, 220)]),
+            _line(84.0, [_w("STEP3", 70, 95), _w("52,000", 100, 120),
+                         _w("54,000", 200, 220)]),
+        ]
+        self.assertIsNone(L._parse_page(1, lines, "Teachers"))
+
+    def test_bare_digit_grid_unaffected_by_fallback(self):
+        # A normal bare-digit education grid still parses via the first pass and
+        # is NOT subject to the textual-only education gate.
+        s = L._parse_page(1, _edu_page_lines(55000, 60000), "Teachers")
+        self.assertIsNotNone(s)
+        self.assertEqual(s["lane_labels"], ["BA", "MA"])
+        self.assertFalse(s["needs_review"])
+
+
 class ScannedHelperTest(unittest.TestCase):
     def test_is_scanned_threshold(self):
         self.assertTrue(L.is_scanned(0, 10))    # image-only, many pages
