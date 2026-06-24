@@ -1706,7 +1706,22 @@ router.get("/admin/districts/:id/contracts", requireAdminToken, (req, res) => {
              c.term_years      AS "termYears",
              sd.source_url     AS "sourceUrl",
              (SELECT COUNT(*)::int FROM settlements s WHERE s.contract_id = c.id)
-               AS "settlementCount"
+               AS "settlementCount",
+             -- Shared-PDF unit mismatch (Task #163): when an admin reassigns a
+             -- contract backed by a PDF that's shared across multiple contracts,
+             -- the anti-clobber guard intentionally leaves the authoritative
+             -- source_documents.bargaining_unit unchanged. Surface that lingering
+             -- divergence so operators can audit it before a re-extraction
+             -- silently disagrees. Only flag when the doc backs >1 contract.
+             sd.bargaining_unit AS "sourceUnit",
+             (
+               sd.id IS NOT NULL
+               AND sd.bargaining_unit IS NOT NULL
+               AND sd.bargaining_unit <> c.bargaining_unit
+               AND (
+                 SELECT COUNT(*) FROM contracts c2 WHERE c2.source_doc_id = sd.id
+               ) > 1
+             ) AS "sharedPdfUnitMismatch"
       FROM contracts c
       LEFT JOIN source_documents sd ON sd.id = c.source_doc_id
       WHERE c.district_id = ${districtId}

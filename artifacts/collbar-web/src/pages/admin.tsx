@@ -4451,6 +4451,8 @@ interface DistrictContract {
   termYears: string | null;
   sourceUrl: string | null;
   settlementCount: number;
+  sourceUnit: string | null;
+  sharedPdfUnitMismatch: boolean;
 }
 
 function unitLabel(value: string): string {
@@ -4659,6 +4661,19 @@ function EditContractUnitSection() {
                       {` · ${c.settlementCount} settlement(s)`}
                       {c.unitOverride ? " · pinned" : ""}
                     </p>
+                    {c.sharedPdfUnitMismatch && (
+                      <p className="mt-1.5 flex items-start gap-1.5 rounded border border-amber-700/60 bg-amber-950/40 px-2 py-1 text-[11px] text-amber-300">
+                        <span aria-hidden="true">⚠</span>
+                        <span>
+                          Shared-PDF unit mismatch: this contract is set to{" "}
+                          <strong>{unitLabel(c.bargainingUnit)}</strong>, but its
+                          source document (shared with other contracts) still
+                          reads{" "}
+                          <strong>{unitLabel(c.sourceUnit ?? "")}</strong>. A
+                          re-extraction may revert this contract's unit.
+                        </span>
+                      </p>
+                    )}
                   </div>
                   <div className="flex items-center gap-2">
                     <select
