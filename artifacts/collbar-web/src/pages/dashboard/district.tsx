@@ -114,44 +114,68 @@ interface ProvisionMediansResult {
 // Data hooks
 // ---------------------------------------------------------------------------
 
-function useDistrictDetail(id: string) {
+// All Overview data hooks are keyed by the selected bargaining unit so toggling
+// the unit selector refetches the contract, provisions, and settlements for that
+// unit. The placeholderData callback keeps the *current district's* previous-unit
+// data on screen while the new unit loads (smooth toggle), but returns undefined
+// when the district id changes — so navigating to another district shows a normal
+// loading state instead of briefly flashing the prior district's data.
+function keepSameDistrict<T>(
+  prev: T | undefined,
+  prevQuery: { queryKey: readonly unknown[] } | undefined,
+  basePath: string,
+): T | undefined {
+  return prevQuery && prevQuery.queryKey[0] === basePath ? prev : undefined;
+}
+
+function useDistrictDetail(id: string, unit: string) {
+  const basePath = `/api/dashboard/districts/${id}`;
   return useQuery<DistrictDetail>({
-    queryKey: [`/api/dashboard/districts/${id}`],
-    queryFn: () =>
-      fetch(apiUrl(`/api/dashboard/districts/${id}`), { credentials: "include" }).then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      }),
-    enabled: !!id,
-  });
-}
-
-function useProvisions(id: string) {
-  return useQuery<{ provisions: Provision[] }>({
-    queryKey: [`/api/dashboard/districts/${id}/provisions`],
-    queryFn: () =>
-      fetch(apiUrl(`/api/dashboard/districts/${id}/provisions`), { credentials: "include" }).then(
-        (r) => {
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          return r.json();
-        },
-      ),
-    enabled: !!id,
-  });
-}
-
-function useSettlements(id: string, unit: string) {
-  return useQuery<SettlementsResponse>({
-    queryKey: [`/api/dashboard/districts/${id}/settlements`, unit],
+    queryKey: [basePath, unit],
     queryFn: () => {
       const params = new URLSearchParams({ bargainingUnit: unit });
-      return fetch(apiUrl(`/api/dashboard/districts/${id}/settlements?${params}`), {
+      return fetch(apiUrl(`${basePath}?${params}`), { credentials: "include" }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      });
+    },
+    placeholderData: (prev, q) => keepSameDistrict(prev, q, basePath),
+    enabled: !!id,
+  });
+}
+
+function useProvisions(id: string, unit: string) {
+  const basePath = `/api/dashboard/districts/${id}/provisions`;
+  return useQuery<{ provisions: Provision[] }>({
+    queryKey: [basePath, unit],
+    queryFn: () => {
+      const params = new URLSearchParams({ bargainingUnit: unit });
+      return fetch(apiUrl(`${basePath}?${params}`), {
         credentials: "include",
       }).then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       });
     },
+    placeholderData: (prev, q) => keepSameDistrict(prev, q, basePath),
+    enabled: !!id,
+  });
+}
+
+function useSettlements(id: string, unit: string) {
+  const basePath = `/api/dashboard/districts/${id}/settlements`;
+  return useQuery<SettlementsResponse>({
+    queryKey: [basePath, unit],
+    queryFn: () => {
+      const params = new URLSearchParams({ bargainingUnit: unit });
+      return fetch(apiUrl(`${basePath}?${params}`), {
+        credentials: "include",
+      }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      });
+    },
+    placeholderData: (prev, q) => keepSameDistrict(prev, q, basePath),
     enabled: !!id,
   });
 }
@@ -193,14 +217,16 @@ function useProvisionMedians(
   county: string | null,
   band: string,
   state: string | null = null,
+  unit = "teachers",
 ) {
   return useQuery<ProvisionMediansResult>({
-    queryKey: [`/api/dashboard/provision-medians`, category, county, band, state],
+    queryKey: [`/api/dashboard/provision-medians`, category, county, band, state, unit],
     queryFn: () => {
       const params = new URLSearchParams({ category });
       if (county) params.set("county", county);
       if (band && band !== "unknown") params.set("band", band);
       if (state) params.set("state", state);
+      params.set("bargainingUnit", unit);
       return fetch(`${apiUrl("/api/dashboard/provision-medians")}?${params}`, {
         credentials: "include",
       }).then((r) => r.json());
@@ -542,9 +568,23 @@ export default function DistrictDashboardPage() {
     if (!isAuthenticated) { setLocation("/login"); return; }
   }, [authLoading, isAuthenticated, setLocation]);
 
-  const [unit, setUnit] = useState("teachers");
-  const { data: district, isLoading: distLoading } = useDistrictDetail(id);
-  const { data: provsData, isLoading: provsLoading } = useProvisions(id);
+  // Reset to the default unit (teachers) synchronously whenever the viewed
+  // district changes, so SPA navigation between districts always starts on
+  // Teachers AND the data hooks below fetch teacher data immediately — no
+  // transient fetch for the unit selected on the previous district. This is
+  // React's documented "adjust state during render" pattern, preferred here over
+  // a useEffect (which would render once with the stale unit and fire an extra
+  // request before resetting).
+  const [unitState, setUnit] = useState("teachers");
+  const [prevId, setPrevId] = useState(id);
+  const unit = id !== prevId ? "teachers" : unitState;
+  if (id !== prevId) {
+    setPrevId(id);
+    setUnit("teachers");
+  }
+
+  const { data: district, isLoading: distLoading } = useDistrictDetail(id, unit);
+  const { data: provsData, isLoading: provsLoading } = useProvisions(id, unit);
   const { data: settlementsData } = useSettlements(id, unit);
   const county = district?.county ?? null;
   const band = district?.enrollmentBand ?? "unknown";
@@ -564,9 +604,9 @@ export default function DistrictDashboardPage() {
 
   const { data: countyMedians } = useCountyMedians(county, districtState, unit);
   const { data: bandMedians } = useBandMedians(band, districtState, unit);
-  const { data: insMedians } = useProvisionMedians("insurance", county, band, districtState);
-  const { data: retMedians } = useProvisionMedians("retirement", county, band, districtState);
-  const { data: leaveMedians } = useProvisionMedians("leave", county, band, districtState);
+  const { data: insMedians } = useProvisionMedians("insurance", county, band, districtState, unit);
+  const { data: retMedians } = useProvisionMedians("retirement", county, band, districtState, unit);
+  const { data: leaveMedians } = useProvisionMedians("leave", county, band, districtState, unit);
 
   if (authLoading || !isAuthenticated) return null;
 

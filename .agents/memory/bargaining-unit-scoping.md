@@ -18,6 +18,24 @@ default the unit to `teachers` when no param is given.
 mixing. **How to apply:** if you add a new settlement rollup, scope it by a
 single unit; never `GROUP BY` across units into one benchmark number.
 
+## Rule 1b — provision benchmarks AND the whole customer Overview are single-unit
+The no-mixing rule covers `contract_provisions` aggregations too, not just
+settlements. The customer Overview is fully unit-scoped: `/dashboard/districts/:id`
+(currentContract), `/districts/:id/provisions`, `/districts/:id/settlements`, and
+`/dashboard/provision-medians` ALL take `?bargainingUnit=` via `parseUnit`
+(default teachers) and filter `c.bargaining_unit = <unit>`. The front-end district
+page keys every Overview query by unit and resets the selector to teachers on
+district change (synchronous "adjust state during render", not a useEffect, to
+avoid a stale-unit fetch). The settlements route's `availableUnits` is the UNION
+of settlement + contract units (teachers ordered first) so a CBA-only unit with no
+settlements is still selectable.
+**Why:** the unit selector must drive the entire Overview — header, provision
+cards, AND the "vs median" context inside them; a teacher-vs-custodian mixed
+median is meaningless (this was the "frozen cards" bug). **How to apply:** any new
+Overview/provision rollup must thread the unit param; never `GROUP BY` across
+units into one number. NOTE: the paid `/districts/:id/clauses` route is a separate
+feature and was intentionally left unit-agnostic.
+
 ## Rule 2 — unit param is whitelisted, never interpolated raw
 Resolve the unit through `parseUnit()` (api-server/src/routes/bargaining-units.ts)
 before use. Some queries interpolate the unit into `sql.raw(...)`; parseUnit's

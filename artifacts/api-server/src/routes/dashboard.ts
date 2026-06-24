@@ -109,6 +109,10 @@ router.get("/dashboard/districts", requireAuth, async (req: Request, res: Respon
 router.get("/dashboard/districts/:id", gate({ ownDistrict: true }), async (req: Request, res: Response) => {
   const districtId = parseInt(String(req.params.id), 10);
   if (isNaN(districtId)) { res.status(400).json({ error: "Invalid district id" }); return; }
+  // Overview is scoped to one bargaining unit (CBAs are negotiated per unit and
+  // never mixed). Defaults to teachers; the current contract + provisions below
+  // reflect the selected unit so toggling the unit selector actually changes them.
+  const unit = parseUnit(req.query.bargainingUnit);
 
   try {
     const distRows = await db.execute(sql`
@@ -132,7 +136,8 @@ router.get("/dashboard/districts/:id", gate({ ownDistrict: true }), async (req: 
       FROM contracts c
       LEFT JOIN source_documents sd ON c.source_doc_id = sd.id
       WHERE c.district_id = ${districtId}
-      ORDER BY c.effective_start DESC NULLS LAST
+        AND c.bargaining_unit = ${unit}
+      ORDER BY c.effective_start DESC NULLS LAST, c.effective_end DESC NULLS LAST, c.id DESC
       LIMIT 5
     `);
 
@@ -186,6 +191,9 @@ router.get("/dashboard/districts/:id/provisions", gate({ ownDistrict: true }), a
   const VALID = new Set(["compensation","insurance","retirement","leave","workday","evaluation","rif","grievance","other"]);
   const rawCat = req.query.category ? String(req.query.category) : "";
   if (rawCat && !VALID.has(rawCat)) { res.status(400).json({ error: "Invalid category" }); return; }
+  // Provisions belong to a single bargaining unit's contract; scope to the
+  // selected unit (default teachers) so the Overview cards switch with the unit.
+  const unit = parseUnit(req.query.bargainingUnit);
 
   try {
     if (!(await isCustomerDistrict(districtId))) { res.status(404).json({ error: "District not found" }); return; }
@@ -199,6 +207,7 @@ router.get("/dashboard/districts/:id/provisions", gate({ ownDistrict: true }), a
       JOIN contracts c ON cp.contract_id = c.id
       LEFT JOIN source_documents sd ON c.source_doc_id = sd.id
       WHERE c.district_id = ${districtId}
+        AND c.bargaining_unit = ${unit}
       ${catCondition}
       ORDER BY c.effective_start DESC NULLS LAST, cp.category, cp.provision_key
       LIMIT 200
@@ -346,14 +355,25 @@ router.get("/dashboard/districts/:id/settlements", gate({ ownDistrict: true }), 
       ORDER BY s.from_year DESC
     `);
 
-    // Which bargaining units does this district actually have settlements for?
-    // Drives the unit selector + coverage transparency in the UI.
+    // Which bargaining units does this district have? Drives the unit selector.
+    // Each unit (CBA) is a distinct employee group, so the selector lists every
+    // unit that has EITHER a contract or settlements — a unit with a CBA but no
+    // settlement history must still be selectable. `n` is the settlement count
+    // (0 for contract-only units). Teachers is ordered first so it is the default.
     const unitRows = await db.execute(sql`
-      SELECT bargaining_unit, COUNT(*)::int AS n
-      FROM settlements
-      WHERE district_id = ${districtId}
-      GROUP BY bargaining_unit
-      ORDER BY n DESC
+      WITH units AS (
+        SELECT bargaining_unit FROM settlements
+        WHERE district_id = ${districtId} AND bargaining_unit IS NOT NULL
+        UNION
+        SELECT bargaining_unit FROM contracts
+        WHERE district_id = ${districtId} AND bargaining_unit IS NOT NULL
+      )
+      SELECT u.bargaining_unit,
+             (SELECT COUNT(*)::int FROM settlements s
+              WHERE s.district_id = ${districtId}
+                AND s.bargaining_unit = u.bargaining_unit) AS n
+      FROM units u
+      ORDER BY (u.bargaining_unit = 'teachers') DESC, n DESC, u.bargaining_unit
     `);
 
     res.json({
@@ -808,6 +828,10 @@ router.get("/dashboard/provision-medians", gate({ ownFilters: true }), async (re
   const county = req.query.county ? String(req.query.county) : null;
   const band = req.query.band ? String(req.query.band) : null;
   const state = CUSTOMER_STATE;
+  // Provision medians are a per-unit benchmark: mixing (e.g.) teacher and
+  // custodian insurance contributions into one median is meaningless, so scope
+  // to the selected bargaining unit (default teachers).
+  const unit = parseUnit(req.query.bargainingUnit);
 
   if (!category) {
     res.status(400).json({ error: "category query parameter is required" });
@@ -817,6 +841,7 @@ router.get("/dashboard/provision-medians", gate({ ownFilters: true }), async (re
   const conds: Array<SQL | null> = [
     sql`cp.category = ${category}`,
     sql`cp.value_numeric IS NOT NULL`,
+    sql`c.bargaining_unit = ${unit}`,
     state ? sql`d.state = ${state}` : null,
     county ? sql`d.county = ${county}` : null,
     band ? bandSql(band) : null,
