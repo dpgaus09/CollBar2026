@@ -1105,6 +1105,62 @@ export default function DistrictDashboardPage() {
               </div>
             </section>
 
+            {/* Bargaining unit selector — page-level switch at the top of the
+                Overview. A district can have several CBAs (teachers, support
+                staff, custodial…); each is a distinct group and benchmarks never
+                mix units, so switching re-scopes the ENTIRE Overview (contract,
+                compensation, settlements, medians) to the chosen unit. */}
+            {availableUnits.length > 0 && (
+              <section className="rounded-xl border border-slate-800 bg-slate-900 px-5 py-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="shrink-0">
+                    <div className="text-xs text-slate-400 uppercase tracking-widest font-semibold">
+                      Bargaining Unit
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-0.5">
+                      {availableUnits.length > 1
+                        ? "Switch to view this Overview for each group"
+                        : "This district has one bargaining unit on file"}
+                    </div>
+                  </div>
+                  {availableUnits.length === 1 ? (
+                    <div className="inline-flex items-center gap-1.5 self-start rounded-md bg-slate-800 px-3.5 py-1.5 text-sm font-medium text-slate-200 sm:self-auto">
+                      {unitLabel(availableUnits[0].bargaining_unit)}
+                      <span className="text-slate-500">({availableUnits[0].n})</span>
+                    </div>
+                  ) : (
+                    <div
+                      role="group"
+                      aria-label="Bargaining unit"
+                      className="flex flex-wrap gap-1.5"
+                    >
+                      {availableUnits.map((u) => {
+                        const active = unit === u.bargaining_unit;
+                        return (
+                          <button
+                            key={u.bargaining_unit}
+                            type="button"
+                            aria-pressed={active}
+                            onClick={() => setUnit(u.bargaining_unit)}
+                            className={`rounded-md border px-3.5 py-1.5 text-sm font-medium transition-colors ${
+                              active
+                                ? "border-blue-500 bg-blue-500/15 text-blue-200 shadow-sm"
+                                : "border-slate-700 bg-slate-800/40 text-slate-400 hover:border-slate-600 hover:text-slate-200"
+                            }`}
+                          >
+                            {unitLabel(u.bargaining_unit)}
+                            <span className={`ml-1 ${active ? "text-blue-300/70" : "text-slate-600"}`}>
+                              ({u.n})
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </section>
+            )}
+
             {/* Contract status */}
             {contract ? (
               <section className="rounded-xl border border-slate-800 bg-slate-900 p-5">
@@ -1197,31 +1253,6 @@ export default function DistrictDashboardPage() {
                 <p className="text-amber-400 text-sm">
                   No contract data extracted yet for this district.
                 </p>
-              </section>
-            )}
-
-            {/* Bargaining unit selector — benchmarks never mix units */}
-            {availableUnits.length > 0 && (
-              <section className="flex items-center gap-3 flex-wrap">
-                <span className="text-xs text-slate-500 uppercase tracking-widest font-semibold">
-                  Bargaining Unit
-                </span>
-                <div className="flex gap-1 flex-wrap">
-                  {availableUnits.map((u) => (
-                    <button
-                      key={u.bargaining_unit}
-                      onClick={() => setUnit(u.bargaining_unit)}
-                      className={`px-3 py-1 rounded text-xs font-medium border transition-colors ${
-                        unit === u.bargaining_unit
-                          ? "border-blue-500 bg-blue-500/10 text-blue-300"
-                          : "border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-600"
-                      }`}
-                    >
-                      {unitLabel(u.bargaining_unit)}
-                      <span className="text-slate-600 ml-1">({u.n})</span>
-                    </button>
-                  ))}
-                </div>
               </section>
             )}
 
