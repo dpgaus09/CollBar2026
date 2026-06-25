@@ -16,6 +16,27 @@ export const MIN_ROWS = 3;
 export const EDU_SALARY_FLOOR = 15000;
 export const EDU_SALARY_CEILING = 300000;
 
+// Plausible bounds for an HOURLY wage RATE (support-staff wage schedules:
+// custodial, transportation, food service, …). A rate outside this range flags
+// the schedule for review rather than trusting it blindly.
+export const HOURLY_RATE_FLOOR = 5;
+export const HOURLY_RATE_CEILING = 200;
+
+// Per-COLUMN unit detection. Support-staff wage appendices routinely pair an
+// hourly-rate column with an annual-salary column in one table (e.g. Palatine
+// custodial "STARTING WAGES": Hourly $20.43 | Salary $42,500). The schedule's
+// scheduleType describes the table as a whole; these read the unit of an
+// individual lane from its header so formatting and magnitude sanity can be
+// scoped per column instead of judged on a meaningless mixed-unit aggregate.
+export function isHourlyLane(label: string | null | undefined): boolean {
+  if (!label) return false;
+  return /\bhourly\b|\bhour\b|per\s*hour|\/\s*hr\b|\bhr\b|\brate\b/i.test(label);
+}
+export function isAnnualLane(label: string | null | undefined): boolean {
+  if (!label) return false;
+  return /\bsalary\b|\bannual\b|\byear(ly)?\b|per\s*year|\/\s*yr\b/i.test(label);
+}
+
 // Recognizes education pay lanes: BA/BS/MA/MS optionally with "+N" or "or N"
 // increments, plus doctorate lanes (PhD / EdD / Doctorate). Case-insensitive,
 // NON-global so `.test()` stays stateless.

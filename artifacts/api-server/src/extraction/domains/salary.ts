@@ -23,8 +23,12 @@ import type { ExtractionStatus, SalaryCell, SalarySchedule } from "../types";
 import {
   canonLane,
   isEducationSchedule,
+  isHourlyLane,
+  isAnnualLane,
   EDU_SALARY_FLOOR,
   EDU_SALARY_CEILING,
+  HOURLY_RATE_FLOOR,
+  HOURLY_RATE_CEILING,
   MIN_ROWS,
 } from "./salary-grid";
 import { verifySalaryAgainstText } from "./salary-verify";
@@ -32,7 +36,9 @@ import { verifySalaryAgainstText } from "./salary-verify";
 const DOMAIN = "salary";
 // Bump when the prompt or normalization changes so the cache misses old results.
 // v2: Option B text-layer verification now annotates the normalized result.
-export const SALARY_PROMPT_VERSION = "salary-v2";
+// v3: capture support-staff wage tables (classification row keys + hourly rates).
+// v4: mixed hourly+annual tables -> lane_grid (per-column unit), per-lane sanity.
+export const SALARY_PROMPT_VERSION = "salary-v4";
 
 // Triage: low-res thumbnails are enough to tell "is there a grid of dollars".
 const TRIAGE_DPI = 60;
@@ -52,36 +58,52 @@ const EXTRACT_PROMPT =
   "You are reading scanned pages from a school-district collective bargaining " +
   "agreement. Each image is one PDF page, labeled '=== PDF page N ===' just " +
   "before it.\n\n" +
-  "Extract EVERY base salary schedule shown across these pages. A salary " +
-  "schedule is a table of experience STEPS (rows) by pay LANES (columns) with " +
-  "dollar amounts, or a single step->salary column. If the same schedule " +
-  "repeats for multiple SCHOOL YEARS (e.g. 2024-2025, 2025-2026), output a " +
-  "SEPARATE element per school year.\n\n" +
+  "Extract EVERY base pay schedule shown across these pages. Include BOTH:\n" +
+  "  (a) teacher BASE SALARY schedules — experience STEPS (rows) by education " +
+  "LANES (columns, e.g. BA, BA+15, MA, MA+30) with annual dollar amounts; and\n" +
+  "  (b) support-staff WAGE/RATE schedules (custodial, maintenance, " +
+  "transportation / bus drivers, food service, aides, paraprofessionals, " +
+  "secretarial / clerical). These are often keyed by JOB CLASSIFICATION " +
+  '(e.g. "Custodian I", "Bus Driver") instead of a step number, and the pay ' +
+  "may be an HOURLY rate (e.g. 22.50) or an annual salary.\n" +
+  "If the same schedule repeats for multiple SCHOOL YEARS (e.g. 2024-2025, " +
+  "2025-2026), output a SEPARATE element per school year.\n\n" +
   "Return ONLY a JSON array. Each element represents ONE schedule for ONE " +
   "school year:\n" +
   '{"schedule_name": str, "school_year": "YYYY-YYYY" or null, ' +
-  '"schedule_type": "lane_grid" or "single_column", ' +
+  '"schedule_type": "lane_grid" | "single_column" | "hourly", ' +
   '"lane_labels": [str, ...], "page": int, ' +
-  '"rows": [[step, v1, v2, ...], ...]}\n\n' +
+  '"rows": [[step_or_classification, v1, v2, ...], ...]}\n\n' +
   "Rules:\n" +
-  "- lane_labels are the column headers, left-to-right, EXACTLY as printed.\n" +
-  "- Each row is [step_number, then ONE value per lane in lane_labels order].\n" +
+  '- schedule_name describes the group (e.g. "Teacher Salary Schedule", ' +
+  '"Custodial Hourly Wages", "Bus Driver Wages").\n' +
+  '- Use schedule_type "hourly" ONLY when EVERY pay column is an hourly RATE ' +
+  "(not an annual salary). If ONE table has BOTH an hourly-rate column AND an " +
+  'annual-salary column, use "lane_grid" and label each column exactly (e.g. ' +
+  '["Hourly", "Salary"]) — do NOT drop either column.\n' +
+  "- lane_labels are the column headers, left-to-right, EXACTLY as printed " +
+  "(degree lanes for teachers; step/year or rate columns otherwise).\n" +
+  "- Each row's FIRST cell is the step number OR the job classification name, " +
+  "copied EXACTLY as printed; then ONE value per column in lane_labels order.\n" +
   "- Use null for a blank/empty cell. NEVER invent or carry a value into a " +
   "blank cell.\n" +
-  "- step_number is an integer; salary values are integers with no $ or commas " +
-  "(ignore any cents).\n" +
-  "- Use the EXACT column headers and step numbers as printed.\n" +
-  '- single_column schedule: lane_labels ["Salary"], each row [step, salary].\n' +
-  "- Do NOT include stipend, extra-duty, longevity, or index tables — only base " +
-  "salary schedules.\n" +
+  "- Pay values have no $ or commas. For HOURLY rates KEEP the cents " +
+  "(e.g. 22.50); for annual salaries the cents may be omitted.\n" +
+  '- single_column / hourly with one pay column: lane_labels ["Salary"] or ' +
+  '["Hourly Rate"], each row [step_or_classification, amount].\n' +
+  "- Do NOT include stipend, extra-duty, coaching, longevity, or index / " +
+  "supplemental tables — only BASE salary or BASE wage schedules.\n" +
   "- 'page' is the PDF page number (from the label) where the schedule appears.\n" +
-  "- If no salary schedule is present, return [].\n" +
+  "- If no salary or wage schedule is present, return [].\n" +
   "Output only the JSON array, no prose.";
 
 const TRIAGE_PROMPT =
-  "Which of the labeled pages show a SALARY SCHEDULE (a table of experience " +
-  "steps and dollar salary amounts, or a step->salary column)? Return ONLY a " +
-  "JSON array of the page numbers, e.g. [48,49,50]. If none, return [].";
+  "Which of the labeled pages show a PAY SCHEDULE — a table of experience " +
+  "STEPS or job CLASSIFICATIONS with dollar pay amounts? This covers teacher " +
+  "salary schedules (steps x education lanes) AND support-staff wage schedules " +
+  "(custodial, maintenance, transportation, food service, aides, secretarial) " +
+  "with annual salaries or hourly rates. Return ONLY a JSON array of the page " +
+  "numbers, e.g. [48,49,50]. If none, return [].";
 
 function imgBlock(base64: string): VisionBlock {
   return {
@@ -101,17 +123,85 @@ export function toIntMoney(v: unknown): number | null {
   return n > 0 ? n : null;
 }
 
-// Conservative checks: education grids must fall within plausible base-salary
-// bounds, and a schedule needs enough step rows. Failures are flagged for review
-// (and confidence lowered), never silently trusted.
+// Parse a pay value PRESERVING cents — an hourly wage rate like 22.50 must not
+// be rounded to whole dollars (toIntMoney would corrupt it). Returns a positive
+// number rounded to 2 decimals (matching the numeric(12,2) column) or null for
+// blank/zero/unparseable input. Annual salaries pass through unchanged.
+export function toMoney(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim().replace(/\$/g, "").replace(/,/g, "");
+  if (!s || ["null", "none", "-"].includes(s.toLowerCase())) return null;
+  const f = Number(s);
+  if (!Number.isFinite(f)) return null;
+  const n = Math.round(f * 100) / 100;
+  return n > 0 ? n : null;
+}
+
+// A salary row's first cell is either an experience STEP number (teacher grids)
+// or a job CLASSIFICATION label (support-staff wage tables, e.g. "Custodian I").
+// Numeric steps keep their value as the sort order; classification labels are
+// kept verbatim and ordered by their printed position so the grid renders
+// top-to-bottom as written. Returns null for an empty/unusable key.
+export function parseRowKey(
+  raw: unknown,
+  rowIdx: number,
+): { stepLabel: string; stepOrder: number } | null {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).trim();
+  if (!s || ["null", "none", "-"].includes(s.toLowerCase())) return null;
+  // A bare integer, optionally prefixed "Step" (e.g. "Step 3" -> 3).
+  const m = s.match(/^(?:step\s*)?(\d{1,3})$/i);
+  if (m) {
+    const n = Number(m[1]);
+    return { stepLabel: String(n), stepOrder: n };
+  }
+  // Any other finite number (e.g. "3.5") truncates to an integer step.
+  const n = Number(s);
+  if (Number.isFinite(n)) {
+    const t = Math.trunc(n);
+    return { stepLabel: String(t), stepOrder: t };
+  }
+  // Classification label — keep as printed (bounded), order by row position.
+  return { stepLabel: s.slice(0, 120), stepOrder: rowIdx };
+}
+
+// Conservative checks: pay values must fall within plausible bounds for their
+// UNIT, and a schedule needs enough step rows. Bounds are scoped per column, not
+// to the schedule's aggregate min/max: a support-staff table that pairs an
+// hourly column with an annual salary column spans (e.g.) 20.43 .. 80000, and an
+// aggregate hourly-ceiling check would falsely flag every such schedule. So the
+// hourly window is applied only to hourly-rate lanes and the salary floor only
+// to annual lanes. Failures are flagged for review (and confidence lowered),
+// never silently trusted.
 function applySanity(sched: SalarySchedule): void {
   const reasons = new Set<string>();
+  const valuesForLane = (pred: (label: string | null | undefined) => boolean): number[] =>
+    sched.cells.filter((c) => pred(c.laneLabel)).map((c) => c.salaryAmount);
+
   if (isEducationSchedule(sched)) {
+    // Education grids are all annual teacher-salary columns: the aggregate is
+    // homogeneous, so bound it with the education base-salary window.
     if (sched.minSalary !== null && sched.minSalary < EDU_SALARY_FLOOR) {
       reasons.add("salary_below_floor");
     }
     if (sched.maxSalary !== null && sched.maxSalary > EDU_SALARY_CEILING) {
       reasons.add("salary_above_ceiling");
+    }
+  } else {
+    // Support-staff tables may mix hourly + annual columns. Validate the hourly
+    // lane(s) against the hourly-rate window and leave annual support salaries
+    // unbounded (they vary too widely across job families to bound safely).
+    // A pure-hourly schedule with no per-lane headers still gets checked via its
+    // (homogeneous) aggregate. A header that reads as BOTH (e.g. "Annual Rate")
+    // is treated as annual, so an annual column is never judged on rate bounds.
+    const isHourlyOnly = (l: string | null | undefined) => isHourlyLane(l) && !isAnnualLane(l);
+    const hourlyVals =
+      sched.scheduleType === "hourly" && !sched.cells.some((c) => isHourlyOnly(c.laneLabel))
+        ? sched.cells.map((c) => c.salaryAmount)
+        : valuesForLane(isHourlyOnly);
+    if (hourlyVals.length) {
+      if (Math.min(...hourlyVals) < HOURLY_RATE_FLOOR) reasons.add("rate_below_floor");
+      if (Math.max(...hourlyVals) > HOURLY_RATE_CEILING) reasons.add("rate_above_ceiling");
     }
   }
   if (sched.stepCount < MIN_ROWS) reasons.add("too_few_steps");
@@ -141,22 +231,39 @@ export function normalize(data: unknown[]): SalarySchedule[] {
     }
     page = page || 1;
 
-    let stype = s.schedule_type;
-    if (stype !== "lane_grid" && stype !== "single_column") {
+    const KNOWN_TYPES = new Set(["lane_grid", "single_column", "hourly"]);
+    let stype = String(s.schedule_type ?? "");
+    if (!KNOWN_TYPES.has(stype)) {
       stype = laneLabels.length > 1 ? "lane_grid" : "single_column";
     }
-    const isLaneGrid = stype === "lane_grid" && laneLabels.length >= 2;
+    // Cell alignment: any schedule with >= 2 lane columns is a grid (each row
+    // must carry one value per lane), EXCEPT an explicitly single column. An
+    // "hourly" wage table may be single-column (classification -> rate) or a
+    // grid (classification x step/year).
+    const isLaneGrid = laneLabels.length >= 2 && stype !== "single_column";
+    // "hourly" is a schedule-WIDE property: it holds only when EVERY pay column
+    // is an hourly rate. Support-staff wage appendices often pair an hourly
+    // column with an annual salary column in one table (custodial "STARTING
+    // WAGES": Hourly | Salary) — that table is a lane_grid, and each column is
+    // formatted and magnitude-checked by its own header. Trust the model's
+    // "hourly" call unless a lane header contradicts it with an annual column.
+    const hasAnnualLane = laneLabels.some(isAnnualLane);
+    const isPureHourly = stype === "hourly" && !hasAnnualLane;
 
     const cells: SalaryCell[] = [];
     const salaries: number[] = [];
-    const steps = new Set<number>();
+    const stepKeys = new Set<string>();
     let badShape = false;
+    let rowIdx = 0;
 
     for (const row of (s.rows as unknown[]) ?? []) {
       if (!Array.isArray(row) || row.length < 2) continue;
-      const stepN = Number(row[0]);
-      if (!Number.isFinite(stepN)) continue;
-      const step = Math.trunc(stepN);
+      rowIdx += 1;
+      // The first cell is an experience STEP number (teacher grids) or a job
+      // CLASSIFICATION label (support-staff wage tables). Both are kept.
+      const key = parseRowKey(row[0], rowIdx);
+      if (key === null) continue;
+      const { stepLabel, stepOrder } = key;
       const values = row.slice(1);
       // The model dropped null placeholders for blank cells (or added stray
       // columns): cell->lane alignment is no longer reliable and salaries could
@@ -168,23 +275,23 @@ export function normalize(data: unknown[]): SalarySchedule[] {
       }
       if (isLaneGrid) {
         values.forEach((v, li) => {
-          const salary = toIntMoney(v);
+          const salary = toMoney(v);
           if (salary === null) return;
           cells.push({
-            stepLabel: String(step),
-            stepOrder: step,
+            stepLabel,
+            stepOrder,
             laneLabel: laneLabels[li],
             laneOrder: li,
             salaryAmount: salary,
             pageRef: page as number,
           });
           salaries.push(salary);
-          steps.add(step);
+          stepKeys.add(stepLabel);
         });
       } else {
         let salary: number | null = null;
         for (const v of values) {
-          const m = toIntMoney(v);
+          const m = toMoney(v);
           if (m !== null) {
             salary = m;
             break;
@@ -192,15 +299,15 @@ export function normalize(data: unknown[]): SalarySchedule[] {
         }
         if (salary === null) continue;
         cells.push({
-          stepLabel: String(step),
-          stepOrder: step,
-          laneLabel: laneLabels[0] ?? "Salary",
+          stepLabel,
+          stepOrder,
+          laneLabel: laneLabels[0] ?? (isPureHourly ? "Hourly Rate" : "Salary"),
           laneOrder: 0,
           salaryAmount: salary,
           pageRef: page as number,
         });
         salaries.push(salary);
-        steps.add(step);
+        stepKeys.add(stepLabel);
       }
     }
 
@@ -224,13 +331,15 @@ export function normalize(data: unknown[]): SalarySchedule[] {
     }
 
     const name = String(s.schedule_name ?? "").trim();
+    const scheduleType: SalarySchedule["scheduleType"] =
+      isPureHourly ? "hourly" : isLaneGrid ? "lane_grid" : "single_column";
     const sched: SalarySchedule = {
       scheduleName: (name || "Salary Schedule").slice(0, 200),
       schoolYear,
       startYear,
-      scheduleType: isLaneGrid ? "lane_grid" : "single_column",
+      scheduleType,
       laneLabels: laneLabels.length ? laneLabels : null,
-      stepCount: steps.size,
+      stepCount: stepKeys.size,
       laneCount: isLaneGrid ? laneLabels.length : 1,
       pageStart: page,
       pageEnd: page,

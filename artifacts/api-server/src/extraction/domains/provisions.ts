@@ -33,7 +33,7 @@ import type {
 
 const DOMAIN = "provisions";
 // Bump when the prompt or normalization changes so the cache misses old results.
-export const PROVISIONS_PROMPT_VERSION = "provisions-v1";
+export const PROVISIONS_PROMPT_VERSION = "provisions-v2";
 
 // Triage (scanned-doc fallback): low-res thumbnails locate provision pages.
 const TRIAGE_DPI = 60;
@@ -47,7 +47,8 @@ const EXTRACT_MAX_PX = 1600;
 const EXTRACT_MAX_TOKENS = 12000;
 const EXTRACT_BATCH = 8; // pages per extraction request
 
-export const MAX_PROVISION_PAGES = 40; // hard cap on high-res extraction pages
+export const MAX_PROVISION_PAGES = 60; // hard cap on tier-1 high-res extraction pages
+const DEEP_MAX_PAGES = 100; // cap for the no-triage completeness deep-retry pass
 const SMALL_DOC_PAGES = 6; // docs this small skip triage (extract every page)
 const MIN_PAGE_TEXT_CHARS = 40; // a page with less text is treated as scanned
 const DIGITAL_DOC_MIN_CHARS = 1000; // whole-doc text below this => scanned doc
@@ -423,6 +424,10 @@ export interface ProvisionsExtractionResult {
   modelVersion: string;
   pageCount: number;
   pagesExtracted: number[];
+  // Pages that could not be extracted even at single-page granularity (rare).
+  pagesSkipped: number[];
+  // True when the cheap triaged pass came back empty and a no-triage deep pass ran.
+  deepRetried: boolean;
 }
 
 export async function extractProvisions(
@@ -466,6 +471,8 @@ export async function extractProvisions(
         modelVersion: hit.modelVersion,
         pageCount: 0,
         pagesExtracted: [],
+        pagesSkipped: [],
+        deepRetried: false,
       };
     }
   }
@@ -478,13 +485,17 @@ export async function extractProvisions(
   let status: ExtractionStatus = "success";
   let contracts: ExtractedContract[] = [];
   let pagesExtracted: number[] = [];
+  const pagesSkipped: number[] = [];
+  let deepRetried = false;
   let rawResponse: string | null = null;
 
-  // Render + extract one batch; on truncation retry once at half size, else fail.
-  async function extractBatch(
-    pages: number[],
-    allowSplit: boolean,
-  ): Promise<ExtractedContract[]> {
+  // Render + extract one batch. Fail-closed at PAGE granularity (not whole-doc):
+  // a truncated or unparseable batch is split and retried smaller so one bad page
+  // cannot discard the entire document's provisions. A single page that still
+  // fails is skipped (recorded in pagesSkipped) rather than thrown — losing one
+  // page is strictly better than losing everything. Each page is still extracted
+  // whole, so the no-partial-JSON guarantee holds per page.
+  async function extractBatch(pages: number[]): Promise<ExtractedContract[]> {
     const blocks: VisionBlock[] = [];
     for (const i of pages) {
       blocks.push({ type: "text", text: `=== PDF page ${i + 1} ===` });
@@ -497,22 +508,33 @@ export async function extractProvisions(
     modelVersion = resp.model;
     rawResponse = resp.text;
 
-    if (resp.truncated && allowSplit && pages.length > 1) {
+    const outcome = classifyBatchResponse(resp.text, resp.truncated, "contracts");
+    if (outcome.ok) {
+      return outcome.items
+        .map((c) => normalizeContractObject(c))
+        .filter((c): c is ExtractedContract => c !== null);
+    }
+    if (pages.length > 1) {
       const mid = Math.ceil(pages.length / 2);
-      const a = await extractBatch(pages.slice(0, mid), false);
-      const b = await extractBatch(pages.slice(mid), false);
+      const a = await extractBatch(pages.slice(0, mid));
+      const b = await extractBatch(pages.slice(mid));
       return [...a, ...b];
     }
-    const outcome = classifyBatchResponse(resp.text, resp.truncated, "contracts");
-    if (!outcome.ok) {
-      if (outcome.reason === "truncated") {
-        throw new TruncatedError(`provisions batch truncated on ${pages.length} page(s)`);
-      }
-      throw new ParseError(`provisions batch returned no parseable JSON on ${pages.length} page(s)`);
+    pagesSkipped.push(pages[0]);
+    logger.warn(
+      { fileHash, page: pages[0] + 1, reason: outcome.reason },
+      "provisions: skipping unextractable page (fail-closed per-page)",
+    );
+    return [];
+  }
+
+  // Run the per-page-resilient extraction over a page set and merge across batches.
+  async function runBatches(pageSet: number[]): Promise<ExtractedContract[]> {
+    const batches: ExtractedContract[][] = [];
+    for (let i = 0; i < pageSet.length; i += EXTRACT_BATCH) {
+      batches.push(await extractBatch(pageSet.slice(i, i + EXTRACT_BATCH)));
     }
-    return outcome.items
-      .map((c) => normalizeContractObject(c))
-      .filter((c): c is ExtractedContract => c !== null);
+    return mergeContracts(batches);
   }
 
   try {
@@ -551,13 +573,30 @@ export async function extractProvisions(
 
     if (pages.length) {
       pagesExtracted = pages;
-      const batches: ExtractedContract[][] = [];
-      for (let i = 0; i < pages.length; i += EXTRACT_BATCH) {
-        batches.push(await extractBatch(pages.slice(i, i + EXTRACT_BATCH), true));
-      }
-      contracts = mergeContracts(batches);
+      contracts = await runBatches(pages);
     } else {
       logger.info({ fileHash }, "provisions: no candidate pages located");
+    }
+
+    // Completeness deep-retry. The cheap triaged tier-1 pass can come back empty
+    // when triage missed the provision articles entirely. Rather than silently
+    // store zero provisions, escalate ONCE to a no-triage deep pass over every
+    // page (bounded by DEEP_MAX_PAGES). This is what makes extraction reliable:
+    // a unit never ends up with no provisions when the data is in the document.
+    const tier1Empty = contracts.every((c) => c.provisions.length === 0);
+    if (tier1Empty && pageCount > SMALL_DOC_PAGES) {
+      deepRetried = true;
+      const deepCap = Math.min(pageCount, DEEP_MAX_PAGES);
+      const allPages = Array.from({ length: deepCap }, (_, i) => i);
+      logger.info(
+        { fileHash, pageCount, deepCap },
+        "provisions: tier-1 empty — deep retry over all pages",
+      );
+      const deep = await runBatches(allPages);
+      if (deep.some((c) => c.provisions.length > 0)) {
+        pagesExtracted = allPages;
+        contracts = deep;
+      }
     }
   } catch (err) {
     if (err instanceof TruncatedError) {
@@ -615,5 +654,7 @@ export async function extractProvisions(
     modelVersion,
     pageCount,
     pagesExtracted,
+    pagesSkipped,
+    deepRetried,
   };
 }

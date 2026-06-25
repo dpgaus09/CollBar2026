@@ -253,3 +253,122 @@ describe("normalize — fail-closed parsing", () => {
     expect(out[0].startYear).toBeNull();
   });
 });
+
+describe("normalize — hourly & mixed support-staff wage tables", () => {
+  it("treats a mixed hourly+annual table as a lane_grid and does NOT flag the annual column on hourly bounds", () => {
+    // Custodial "STARTING WAGES": Hourly rate beside an annual salary. The model
+    // may call this "hourly"; the annual lane header must override that so the
+    // table becomes a lane_grid and the $42,500 column is never judged as a rate.
+    const out = normalize([
+      {
+        schedule_name: "Custodial Starting Wages",
+        school_year: "2024-2025",
+        schedule_type: "hourly",
+        lane_labels: ["Hourly", "Salary"],
+        page: 26,
+        rows: [
+          ["Custodian I", 20.43, 42500],
+          ["Custodian II", 21.5, 44000],
+          ["Custodian III", 22.6, 46000],
+        ],
+      },
+    ]);
+    expect(out).toHaveLength(1);
+    const s = out[0];
+    expect(s.scheduleType).toBe("lane_grid");
+    expect(s.laneCount).toBe(2);
+    expect(s.cells).toHaveLength(6);
+    expect(s.needsReview).toBe(false);
+    expect(s.reviewReason).toBeNull();
+    // Hourly rate keeps its cents; annual salary is preserved whole.
+    const hr = s.cells.find((c) => c.laneLabel === "Hourly" && c.stepLabel === "Custodian I");
+    expect(hr?.salaryAmount).toBe(20.43);
+    const an = s.cells.find((c) => c.laneLabel === "Salary" && c.stepLabel === "Custodian I");
+    expect(an?.salaryAmount).toBe(42500);
+  });
+
+  it("flags ONLY the hourly column when its rate is out of the hourly window", () => {
+    const out = normalize([
+      {
+        schedule_name: "Maintenance Wages",
+        school_year: "2024-2025",
+        schedule_type: "hourly",
+        lane_labels: ["Hourly", "Salary"],
+        page: 10,
+        rows: [
+          ["Maint I", 250.0, 42000], // 250 > HOURLY_RATE_CEILING (200)
+          ["Maint II", 21.0, 44000],
+          ["Maint III", 22.0, 46000],
+        ],
+      },
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].needsReview).toBe(true);
+    expect(out[0].reviewReason).toContain("rate_above_ceiling");
+  });
+
+  it("keeps a pure-hourly single-column table as 'hourly' with a default 'Hourly Rate' lane and decimal rates", () => {
+    const out = normalize([
+      {
+        schedule_name: "Bus Driver Wages",
+        school_year: "2024-2025",
+        schedule_type: "hourly",
+        lane_labels: [],
+        page: 35,
+        rows: [
+          ["New Driver", 24.0],
+          ["After 1 yr", 25.5],
+          ["After 5 yr", 27.0],
+        ],
+      },
+    ]);
+    expect(out).toHaveLength(1);
+    const s = out[0];
+    expect(s.scheduleType).toBe("hourly");
+    expect(s.cells).toHaveLength(3);
+    expect(s.cells.every((c) => c.laneLabel === "Hourly Rate")).toBe(true);
+    expect(s.cells[0].salaryAmount).toBe(24);
+    expect(s.needsReview).toBe(false);
+  });
+
+  it("does NOT flag an annual support-salary column above the hourly ceiling (the custodial/secretary fix)", () => {
+    const out = normalize([
+      {
+        schedule_name: "Secretary Salary",
+        school_year: "2024-2025",
+        schedule_type: "single_column",
+        lane_labels: ["Salary"],
+        page: 40,
+        rows: [
+          ["Secretary I", 38000],
+          ["Secretary II", 42000],
+          ["Secretary III", 46000],
+        ],
+      },
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].scheduleType).toBe("single_column");
+    expect(out[0].needsReview).toBe(false);
+    expect(out[0].reviewReason).toBeNull();
+  });
+
+  it("treats an ambiguous 'Annual Rate' header as annual, not hourly (no false rate flag)", () => {
+    const out = normalize([
+      {
+        schedule_name: "Aide Wages",
+        school_year: "2024-2025",
+        schedule_type: "single_column",
+        lane_labels: ["Annual Rate"],
+        page: 12,
+        rows: [
+          ["Aide I", 30000],
+          ["Aide II", 32000],
+          ["Aide III", 34000],
+        ],
+      },
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].needsReview).toBe(false);
+    expect(out[0].reviewReason).toBeNull();
+  });
+});

@@ -699,6 +699,22 @@ const salaryFmt = (val: number) =>
     maximumFractionDigits: 0,
   }).format(val);
 
+// Per-COLUMN unit detection (mirrors salary-grid.ts on the server). A single
+// support-staff wage table can pair an hourly-rate column with an annual-salary
+// column, so each cell is formatted by its own lane header rather than the
+// schedule as a whole.
+const isHourlyLane = (label: string | null | undefined) =>
+  !!label && /\bhourly\b|\bhour\b|per\s*hour|\/\s*hr\b|\bhr\b|\brate\b/i.test(label);
+const isAnnualLane = (label: string | null | undefined) =>
+  !!label && /\bsalary\b|\bannual\b|\byear(ly)?\b|per\s*year|\/\s*yr\b/i.test(label);
+const hourlyFmt = (val: number) =>
+  `${new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(val)}/hr`;
+
 function SalaryGrid({
   response,
   settlements,
@@ -783,6 +799,25 @@ function SalaryGrid({
   const minStep = grid.steps.length ? grid.steps[0][0] : 0;
   const baseSalary = schedule.minSalary;
   const maxSalary = schedule.maxSalary;
+  // Each pay column is formatted by ITS OWN unit: a support-staff wage table can
+  // carry an hourly-rate column beside an annual-salary column, so an aggregate
+  // "hourly" vs "annual" choice would mis-render half the grid.
+  // A header that reads as BOTH (e.g. "Annual Rate") is treated as annual, so an
+  // annual column is never rendered with a "/hr" suffix.
+  const laneIsHourly = (label: string | null | undefined) =>
+    isHourlyLane(label) && !isAnnualLane(label);
+  const hasHourlyLane = grid.lanes.some((l) => laneIsHourly(l.label));
+  const hasAnnualLane = grid.lanes.some((l) => isAnnualLane(l.label));
+  // A mixed-unit schedule has no meaningful scalar Base/Max — its aggregate
+  // min/max span both units — so those anchors are hidden; the grid is truth.
+  const mixedUnits = hasHourlyLane && hasAnnualLane;
+  const pureHourly = !mixedUnits && (schedule.scheduleType === "hourly" || hasHourlyLane);
+  const fmtCell = (val: number, laneLabel: string) =>
+    laneIsHourly(laneLabel) ? hourlyFmt(val) : salaryFmt(val);
+  // Anchors only render for pure (single-unit) schedules.
+  const fmt = (val: number) => (pureHourly ? hourlyFmt(val) : salaryFmt(val));
+  const baseLabel = pureHourly ? "Base Rate" : "Base Salary";
+  const maxLabel = pureHourly ? "Max Rate" : "Max Salary";
   // MA base only exists for genuine education lanes — never synthesise it for a
   // non-teacher unit.
   let maBaseSalary: number | null = null;
@@ -848,24 +883,32 @@ function SalaryGrid({
 
       {/* Anchors */}
       <div className="px-4 py-2.5 bg-slate-900/60 border-b border-slate-800 flex flex-wrap items-center gap-x-8 gap-y-2">
-        <div>
-          <div className="text-[10px] text-slate-500 uppercase tracking-wide">Base Salary</div>
-          <div className="text-sm font-semibold text-slate-200 tabular-nums">
-            {baseSalary != null ? salaryFmt(baseSalary) : "—"}
+        {mixedUnits ? (
+          <div className="text-[10px] text-slate-500 uppercase tracking-wide self-center">
+            Hourly &amp; annual columns — see grid
           </div>
-        </div>
-        {schedule.laneKind === "education" && maBaseSalary != null && (
-          <div>
-            <div className="text-[10px] text-slate-500 uppercase tracking-wide">MA Base</div>
-            <div className="text-sm font-semibold text-slate-200 tabular-nums">{salaryFmt(maBaseSalary)}</div>
-          </div>
+        ) : (
+          <>
+            <div>
+              <div className="text-[10px] text-slate-500 uppercase tracking-wide">{baseLabel}</div>
+              <div className="text-sm font-semibold text-slate-200 tabular-nums">
+                {baseSalary != null ? fmt(baseSalary) : "—"}
+              </div>
+            </div>
+            {schedule.laneKind === "education" && maBaseSalary != null && (
+              <div>
+                <div className="text-[10px] text-slate-500 uppercase tracking-wide">MA Base</div>
+                <div className="text-sm font-semibold text-slate-200 tabular-nums">{fmt(maBaseSalary)}</div>
+              </div>
+            )}
+            <div>
+              <div className="text-[10px] text-emerald-500/70 uppercase tracking-wide">{maxLabel}</div>
+              <div className="text-sm font-semibold text-emerald-400 tabular-nums">
+                {maxSalary != null ? fmt(maxSalary) : "—"}
+              </div>
+            </div>
+          </>
         )}
-        <div>
-          <div className="text-[10px] text-emerald-500/70 uppercase tracking-wide">Max Salary</div>
-          <div className="text-sm font-semibold text-emerald-400 tabular-nums">
-            {maxSalary != null ? salaryFmt(maxSalary) : "—"}
-          </div>
-        </div>
         <div className="ml-auto self-center text-[10px] text-slate-600 tabular-nums">
           {grid.steps.length} step{grid.steps.length === 1 ? "" : "s"} × {grid.lanes.length} {colNoun}
         </div>
@@ -900,8 +943,11 @@ function SalaryGrid({
                 </td>
                 {grid.lanes.map((lane) => {
                   const val = grid.cellMap.get(`${order}_${lane.order}`)?.salary;
-                  const isMin = val != null && val === baseSalary;
-                  const isMax = val != null && val === maxSalary;
+                  // Don't badge a cross-unit min/max on mixed-unit grids — the
+                  // global min (an hourly rate) and max (an annual salary) live
+                  // in different columns and the comparison is meaningless.
+                  const isMin = !mixedUnits && val != null && val === baseSalary;
+                  const isMax = !mixedUnits && val != null && val === maxSalary;
                   let cls = "px-4 py-2 text-right tabular-nums whitespace-nowrap border-b border-slate-800/50 ";
                   if (isMax) cls += "text-emerald-300 font-bold bg-emerald-950/30";
                   else if (isMin) cls += "text-slate-100 font-semibold bg-slate-800/40";
@@ -909,7 +955,7 @@ function SalaryGrid({
                   else cls += "text-slate-700";
                   return (
                     <td key={lane.order} className={cls}>
-                      {val != null ? salaryFmt(val) : "—"}
+                      {val != null ? fmtCell(val, lane.label) : "—"}
                     </td>
                   );
                 })}
