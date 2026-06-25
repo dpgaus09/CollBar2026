@@ -20,6 +20,15 @@ import {
   PROVISIONS_PROMPT_VERSION,
 } from "../domains/provisions";
 import { verifyProvisionsAgainstText } from "../domains/provisions-verify";
+import {
+  deriveStatedSettlements,
+  SETTLEMENT_DERIVE_VERSION,
+} from "../domains/settlements";
+import {
+  extractFinalOffer,
+  FINAL_OFFER_PROMPT_VERSION,
+} from "../domains/final-offers";
+import { findPostingSide } from "../domains/final-offers-store";
 import { openPdf, RENDER_VERSION } from "../pdf/renderer";
 import {
   claimNextJob,
@@ -87,6 +96,30 @@ async function extractDomain(
   const doc = await loadSourceDoc(sourceDocId);
   if (!doc) return { ok: false, domain, status: "no_doc" };
 
+  // Settlements are DERIVED from the doc's already-extracted contract provisions
+  // (no PDF / vision call) — handle before resolving PDF bytes.
+  if (domain === "settlement") {
+    const derived = await deriveStatedSettlements(sourceDocId);
+    const summary: Record<string, unknown> = {
+      domain,
+      settlementCount: derived.settlements.length,
+      units: [...new Set(derived.settlements.map((s) => s.bargainingUnit))],
+      skipped: derived.skipped,
+      flaggedOutOfRange: derived.flaggedOutOfRange.length,
+    };
+    return {
+      ok: true,
+      domain,
+      fileHash: doc.fileHash ?? "",
+      normalized: { settlements: derived.settlements },
+      summary,
+      model: null,
+      modelVersion: "derive",
+      promptVersion: SETTLEMENT_DERIVE_VERSION,
+      renderVersion: "n/a",
+    };
+  }
+
   const buf = await resolvePdfBuffer(doc);
   if (!buf) {
     return { ok: false, domain, status: "no_pdf", fileHash: doc.fileHash ?? undefined };
@@ -96,6 +129,42 @@ async function extractDomain(
     doc.fileHash && /^[0-9a-f]{64}$/i.test(doc.fileHash)
       ? doc.fileHash.toLowerCase()
       : crypto.createHash("sha256").update(buf).digest("hex");
+
+  if (domain === "final_offer") {
+    // A final-offer doc is one party's filing on a posting. Resolve the posting +
+    // side first; a doc not wired to any posting fails the job (fail-closed).
+    const ps = await findPostingSide(sourceDocId);
+    if (!ps) return { ok: false, domain, status: "extract_failed", fileHash };
+    const extraction = await extractFinalOffer(buf, fileHash, { model: opts.model });
+    if (!extraction.ok) return { ok: false, domain, status: "extract_failed", fileHash };
+    const items = extraction.items;
+    const summary: Record<string, unknown> = {
+      domain,
+      postingId: ps.postingId,
+      caseNumber: ps.caseNumber,
+      side: ps.side,
+      itemCount: items.length,
+      topics: items.map((i) => i.topic),
+      costUsd: extraction.costUsd,
+      inputTokens: extraction.inputTokens,
+      outputTokens: extraction.outputTokens,
+      modelVersion: extraction.modelVersion,
+      pageCount: extraction.pageCount,
+      pagesExtracted: extraction.pagesExtracted,
+      fromCache: extraction.fromCache,
+    };
+    return {
+      ok: true,
+      domain,
+      fileHash,
+      normalized: { postingId: ps.postingId, side: ps.side, items },
+      summary,
+      model: opts.model ?? null,
+      modelVersion: extraction.modelVersion,
+      promptVersion: FINAL_OFFER_PROMPT_VERSION,
+      renderVersion: RENDER_VERSION,
+    };
+  }
 
   if (domain === "salary") {
     const extraction = await extractSalarySchedules(buf, fileHash, { model: opts.model });

@@ -90,3 +90,20 @@ export interface OfferItem {
   numericUnit: string | null;
   rawText: string | null;
 }
+
+// Settlement domain (Task #176). A single 'stated' settlement derived from ONE
+// contract's already-extracted compensation provisions (NOT a vision call).
+// Mirrors the columns the Python `derive_settlements` 'stated' pass writes.
+export interface DerivedSettlement {
+  districtId: string;
+  bargainingUnit: string;
+  fromYear: string;
+  toYear: string;
+  baseIncreasePct: number;
+  year2Pct: number | null;
+  year3Pct: number | null;
+  offSchedulePayment: number | null;
+  termYears: number | null;
+  confidence: number;
+  contractId: string;
+}

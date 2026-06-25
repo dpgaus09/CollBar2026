@@ -357,6 +357,38 @@ interface PostingRow {
   unionSourceDocId: string | null;
 }
 
+export interface PostingSide {
+  postingId: string;
+  caseNumber: string;
+  side: OfferSide;
+}
+
+// Resolve a source document to the posting + side it represents (Task #176).
+// A final-offer doc is one party's filing: it is referenced by exactly one of a
+// posting's district_source_doc_id / union_source_doc_id. Returns null when the
+// doc isn't wired to any posting yet (the engine then fails the job, fail-closed).
+export async function findPostingSide(
+  sourceDocId: number | string,
+): Promise<PostingSide | null> {
+  const res = await db.execute(sql`
+    SELECT id::text       AS "postingId",
+           case_number    AS "caseNumber",
+           CASE
+             WHEN district_source_doc_id = ${sourceDocId} THEN 'district'
+             WHEN union_source_doc_id = ${sourceDocId} THEN 'union'
+           END            AS "side"
+    FROM final_offer_postings
+    WHERE district_source_doc_id = ${sourceDocId}
+       OR union_source_doc_id = ${sourceDocId}
+    LIMIT 1
+  `);
+  const row = res.rows[0] as
+    | { postingId: string; caseNumber: string; side: OfferSide | null }
+    | undefined;
+  if (!row || (row.side !== "district" && row.side !== "union")) return null;
+  return { postingId: row.postingId, caseNumber: row.caseNumber, side: row.side };
+}
+
 async function loadPosting(postingId: number | string): Promise<PostingRow | null> {
   const res = await db.execute(sql`
     SELECT id::text                     AS "id",

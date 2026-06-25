@@ -4800,6 +4800,7 @@ function ExtractionEngineTab() {
   const [activeDocId, setActiveDocId] = useState<number | null>(null);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<string>("");
+  const [enqueueDomain, setEnqueueDomain] = useState<string>("cba");
 
   const { data: queue } = useQuery<{ stats: QueueStatsT; jobs: ExtractionJobT[] }>({
     queryKey: ["/api/admin/extraction/queue"],
@@ -4863,6 +4864,33 @@ function ExtractionEngineTab() {
       );
       queryClient.invalidateQueries({ queryKey: ["/api/admin/extraction/versions", activeDocId] });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/extraction/diff", selectedVersionId] });
+    },
+    onError: (e: Error) => setActionMsg(e.message),
+  });
+
+  const enqueue = useMutation({
+    mutationFn: (vars: { docId: number; domain: string }) =>
+      fetch(apiUrl("/api/admin/extraction/enqueue"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(vars),
+      }).then(async (r) => {
+        const j = (await r.json()) as {
+          job?: { id: string; domain: string };
+          deduped?: boolean;
+          error?: string;
+        };
+        if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
+        return j;
+      }),
+    onSuccess: (j) => {
+      setActionMsg(
+        j.deduped
+          ? `A job is already queued/running for this doc — not duplicated.`
+          : `Queued ${j.job?.domain} extraction (job ${j.job?.id}).`,
+      );
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/extraction/queue"] });
     },
     onError: (e: Error) => setActionMsg(e.message),
   });
@@ -5038,6 +5066,33 @@ function ExtractionEngineTab() {
             className="text-xs px-3 py-1.5 rounded border border-slate-700 text-slate-300 hover:border-blue-600 hover:text-blue-300 transition-colors"
           >
             Load versions
+          </button>
+          <span className="mx-1 text-slate-700">|</span>
+          <select
+            value={enqueueDomain}
+            onChange={(e) => setEnqueueDomain(e.target.value)}
+            className="bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-600"
+          >
+            <option value="cba">cba (salary + provisions)</option>
+            <option value="salary">salary</option>
+            <option value="provisions">provisions</option>
+            <option value="settlement">settlement</option>
+            <option value="final_offer">final_offer</option>
+          </select>
+          <button
+            type="button"
+            disabled={enqueue.isPending}
+            onClick={() => {
+              const n = parseInt(docIdInput, 10);
+              if (!Number.isFinite(n) || n < 1) {
+                setActionMsg("Enter a valid source document id to enqueue.");
+                return;
+              }
+              enqueue.mutate({ docId: n, domain: enqueueDomain });
+            }}
+            className="text-xs px-3 py-1.5 rounded border border-slate-700 text-emerald-300 hover:border-emerald-600 transition-colors disabled:opacity-50"
+          >
+            {enqueue.isPending ? "Queuing…" : "Enqueue extraction"}
           </button>
         </form>
 

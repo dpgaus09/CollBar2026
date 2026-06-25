@@ -19,9 +19,24 @@ import { sql } from "drizzle-orm";
 import { logger } from "../../lib/logger";
 import { storeSalaryForDoc } from "../domains/salary-store";
 import { storeProvisionsForDoc } from "../domains/provisions-store";
-import type { SalarySchedule, ExtractedContract } from "../types";
+import { storeSettlementsForDoc } from "../domains/settlements-store";
+import {
+  storeOfferItems,
+  computeComparisons,
+} from "../domains/final-offers-store";
+import type {
+  SalarySchedule,
+  ExtractedContract,
+  DerivedSettlement,
+  OfferItem,
+  OfferSide,
+} from "../types";
 
-export type VersionDomain = "salary" | "provisions";
+export type VersionDomain =
+  | "salary"
+  | "provisions"
+  | "settlement"
+  | "final_offer";
 
 // Deterministic JSON: recursively sort object keys so result_hash is stable
 // regardless of property insertion order.
@@ -224,7 +239,14 @@ export async function promoteVersion(
   // Advisory lock keyed by (sourceDocId, domain). Two-int form: doc id (mod
   // int4 range) + a small per-domain salt.
   const lockA = Number(BigInt(v.sourceDocId) % 2147483647n);
-  const lockB = domain === "salary" ? 1 : 2;
+  const lockB =
+    domain === "salary"
+      ? 1
+      : domain === "provisions"
+        ? 2
+        : domain === "settlement"
+          ? 3
+          : 4;
 
   return await db.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(${lockA}, ${lockB})`);
@@ -245,12 +267,48 @@ export async function promoteVersion(
       const r = await storeSalaryForDoc(v.sourceDocId, schedules);
       store = r;
       targets = r.results.length;
-    } else {
+    } else if (domain === "provisions") {
       const contracts =
         ((v.normalized as { contracts?: ExtractedContract[] })?.contracts) ?? [];
       const r = await storeProvisionsForDoc(v.sourceDocId, contracts);
       store = r;
       targets = r.results.length;
+    } else if (domain === "settlement") {
+      const settlements =
+        ((v.normalized as { settlements?: DerivedSettlement[] })?.settlements) ??
+        [];
+      const r = await storeSettlementsForDoc(v.sourceDocId, settlements);
+      store = r;
+      targets = r.inserted;
+    } else {
+      // final_offer: project this doc's side into final_offer_items, then rebuild
+      // the posting's board-vs-union comparison from both stored sides.
+      const n = v.normalized as {
+        postingId?: string;
+        side?: OfferSide;
+        items?: OfferItem[];
+      };
+      const items = n.items ?? [];
+      if (n.postingId && (n.side === "district" || n.side === "union")) {
+        const stored = await storeOfferItems(
+          n.postingId,
+          n.side,
+          v.sourceDocId,
+          items,
+          false,
+        );
+        const comparisons = await computeComparisons(n.postingId, false);
+        store = {
+          postingId: n.postingId,
+          side: n.side,
+          items: stored,
+          comparisons,
+        };
+        targets = stored;
+      } else {
+        store = { reason: "no_posting_in_version" };
+        targets = 0;
+      }
     }
 
     await tx.execute(sql`

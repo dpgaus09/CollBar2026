@@ -9,6 +9,9 @@ const h = vi.hoisted(() => ({
   extractSalarySchedules: vi.fn(),
   extractProvisions: vi.fn(),
   verifyProvisionsAgainstText: vi.fn(),
+  deriveStatedSettlements: vi.fn(),
+  extractFinalOffer: vi.fn(),
+  findPostingSide: vi.fn(),
   openPdf: vi.fn(),
   createVersion: vi.fn(),
   promoteVersion: vi.fn(),
@@ -33,6 +36,17 @@ vi.mock("../domains/provisions", () => ({
 }));
 vi.mock("../domains/provisions-verify", () => ({
   verifyProvisionsAgainstText: h.verifyProvisionsAgainstText,
+}));
+vi.mock("../domains/settlements", () => ({
+  deriveStatedSettlements: h.deriveStatedSettlements,
+  SETTLEMENT_DERIVE_VERSION: "settlement-test",
+}));
+vi.mock("../domains/final-offers", () => ({
+  extractFinalOffer: h.extractFinalOffer,
+  FINAL_OFFER_PROMPT_VERSION: "final-offer-test",
+}));
+vi.mock("../domains/final-offers-store", () => ({
+  findPostingSide: h.findPostingSide,
 }));
 vi.mock("../pdf/renderer", () => ({
   openPdf: h.openPdf,
@@ -127,6 +141,64 @@ describe("processJob — auto-promote only on first extraction", () => {
     expect(h.createVersion).toHaveBeenCalledTimes(1);
     expect(h.promoteVersion).not.toHaveBeenCalled();
     expect(h.markJobDone).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("processJob — settlement domain (derive, no PDF/vision)", () => {
+  it("derives stated settlements and auto-promotes on first run", async () => {
+    h.deriveStatedSettlements.mockResolvedValue({
+      settlements: [{ districtId: "7", bargainingUnit: "teachers" }],
+      skipped: {},
+      flaggedOutOfRange: [],
+    });
+    h.getPromotedVersionId.mockResolvedValue(null);
+    await processJob(job({ domain: "settlement" }));
+    // settlements need NO PDF — the worker must not resolve PDF bytes for them.
+    expect(h.resolvePdfBuffer).not.toHaveBeenCalled();
+    expect(h.deriveStatedSettlements).toHaveBeenCalledTimes(1);
+    expect(h.createVersion).toHaveBeenCalledTimes(1);
+    expect(h.createVersion.mock.calls[0][0]).toMatchObject({ domain: "settlement" });
+    expect(h.promoteVersion).toHaveBeenCalledTimes(1);
+    expect(h.markJobDone).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("processJob — final_offer domain", () => {
+  it("resolves posting+side, extracts, versions and auto-promotes on first run", async () => {
+    h.findPostingSide.mockResolvedValue({
+      postingId: "9",
+      caseNumber: "S-MA-2024-001",
+      side: "district",
+    });
+    h.extractFinalOffer.mockResolvedValue({
+      ok: true,
+      status: "success",
+      items: [{ topic: "salary" }],
+      costUsd: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      modelVersion: "claude-test",
+      pageCount: 1,
+      pagesExtracted: 1,
+      fromCache: false,
+    });
+    h.getPromotedVersionId.mockResolvedValue(null);
+    await processJob(job({ domain: "final_offer" }));
+    expect(h.findPostingSide).toHaveBeenCalledTimes(1);
+    expect(h.extractFinalOffer).toHaveBeenCalledTimes(1);
+    expect(h.createVersion).toHaveBeenCalledTimes(1);
+    expect(h.createVersion.mock.calls[0][0]).toMatchObject({ domain: "final_offer" });
+    expect(h.promoteVersion).toHaveBeenCalledTimes(1);
+    expect(h.markJobDone).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed (no version) when the doc is wired to no posting", async () => {
+    h.findPostingSide.mockResolvedValue(null);
+    await processJob(job({ domain: "final_offer" }));
+    expect(h.extractFinalOffer).not.toHaveBeenCalled();
+    expect(h.createVersion).not.toHaveBeenCalled();
+    expect(h.promoteVersion).not.toHaveBeenCalled();
+    expect(h.markJobFailed).toHaveBeenCalledTimes(1);
   });
 });
 

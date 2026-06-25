@@ -16,7 +16,12 @@ import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import { logger } from "../../lib/logger";
 
-export type JobDomain = "salary" | "provisions" | "cba";
+export type JobDomain =
+  | "salary"
+  | "provisions"
+  | "cba"
+  | "settlement"
+  | "final_offer";
 export type JobStatus = "queued" | "running" | "done" | "failed" | "canceled";
 
 export interface ExtractionJob {

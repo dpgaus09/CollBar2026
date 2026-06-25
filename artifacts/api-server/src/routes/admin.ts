@@ -1881,6 +1881,49 @@ router.post("/admin/extraction/rerun-flagged", requireAdminToken, async (req, re
   }
 });
 
+// POST /admin/extraction/enqueue — queue a single-doc extraction job for any
+// domain (Task #176). Lets an admin re-run salary/provisions ("cba" = both),
+// "settlement" (re-derive the doc's 'stated' settlements), or "final_offer"
+// (re-extract this filing's positions) through the in-process worker. The result
+// is versioned; promotion (auto on first, manual on re-run) writes live tables.
+// Only one active job per doc is allowed (queue dedupes by source_doc_id), so
+// enqueue domains for the same doc one at a time.
+const ENQUEUE_DOMAINS = new Set([
+  "cba",
+  "salary",
+  "provisions",
+  "settlement",
+  "final_offer",
+]);
+
+router.post("/admin/extraction/enqueue", requireAdminToken, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { docId?: number | string; domain?: string };
+    const docId = parseInt(String(body.docId ?? ""), 10);
+    const domain = String(body.domain ?? "");
+    if (!Number.isInteger(docId) || docId < 1) {
+      res.status(400).json({ error: "docId is required and must be a positive integer" });
+      return;
+    }
+    if (!ENQUEUE_DOMAINS.has(domain)) {
+      res.status(400).json({
+        error: `domain must be one of ${[...ENQUEUE_DOMAINS].join(", ")}`,
+      });
+      return;
+    }
+    const { job, deduped } = await enqueueJob({
+      sourceDocId: docId,
+      domain: domain as Parameters<typeof enqueueJob>[0]["domain"],
+      requestedBy: requestedByFromReq(req),
+      requestReason: "admin-enqueue",
+    });
+    res.json({ job, deduped });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Fix a contract's bargaining unit (Task #158)
 //

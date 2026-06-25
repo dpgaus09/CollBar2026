@@ -57,3 +57,18 @@ run a live store over prod data during dev. A no-paid-run parity harness
 (`validation/parity.ts`) encodes the hard gates — fail-closed-on-non-success, no
 teacher-grid-on-non-teacher-unit leak, salary cells exact-or-flagged vs baseline —
 so they can be checked over fixtures or stored rows without model calls.
+
+**settlement and final_offer domains differ from the vision domains.**
+**Why:** settlement is DERIVED from a doc's already-extracted compensation
+provisions (no PDF, no model) — only the 'stated' method is per-doc; 'ba_min_delta'
+and 'tss_diff' are cross-document and stay in the Python pipeline. final_offer is
+one party's filing on an ELRB posting, so it is meaningless without a posting+side.
+**How to apply:** branch settlement BEFORE resolving PDF bytes (model=null,
+modelVersion="derive"). For final_offer, resolve findPostingSide first and
+fail-closed if the doc maps to no posting (never store orphan items). Both still
+flow through the same version/diff/promote path as salary/provisions.
+
+**Job queue dedupes by source_doc_id across ALL domains.**
+**Why:** the partial-unique index allows only one active job per doc regardless of
+domain. **How to apply:** to (re-)run several domains on the same doc, enqueue them
+one at a time (admin enqueue returns deduped:true if one is already active).
