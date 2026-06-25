@@ -29,6 +29,10 @@ import {
   FINAL_OFFER_PROMPT_VERSION,
 } from "../domains/final-offers";
 import { findPostingSide } from "../domains/final-offers-store";
+import {
+  extractContractMeta,
+  CONTRACT_META_PROMPT_VERSION,
+} from "../domains/contract-meta";
 import { openPdf, RENDER_VERSION } from "../pdf/renderer";
 import {
   claimNextJob,
@@ -166,6 +170,45 @@ async function extractDomain(
     };
   }
 
+  if (domain === "contract_meta") {
+    const extraction = await extractContractMeta(buf, fileHash, { model: opts.model });
+    if (!extraction.ok) return { ok: false, domain, status: "extract_failed", fileHash };
+    const m = extraction.meta;
+    const summary: Record<string, unknown> = {
+      domain,
+      unionName: m.unionName,
+      affiliation: m.affiliation,
+      effectiveStart: m.effectiveStart,
+      effectiveEnd: m.effectiveEnd,
+      termYears: m.termYears,
+      fieldsFound: [
+        m.unionName,
+        m.affiliation,
+        m.effectiveStart,
+        m.effectiveEnd,
+        m.termYears,
+      ].filter((x) => x != null).length,
+      costUsd: extraction.costUsd,
+      inputTokens: extraction.inputTokens,
+      outputTokens: extraction.outputTokens,
+      modelVersion: extraction.modelVersion,
+      pageCount: extraction.pageCount,
+      pagesExtracted: extraction.pagesExtracted,
+      fromCache: extraction.fromCache,
+    };
+    return {
+      ok: true,
+      domain,
+      fileHash,
+      normalized: { meta: m },
+      summary,
+      model: opts.model ?? null,
+      modelVersion: extraction.modelVersion,
+      promptVersion: CONTRACT_META_PROMPT_VERSION,
+      renderVersion: RENDER_VERSION,
+    };
+  }
+
   if (domain === "salary") {
     const extraction = await extractSalarySchedules(buf, fileHash, { model: opts.model });
     if (!extraction.ok) return { ok: false, domain, status: "extract_failed", fileHash };
@@ -247,7 +290,9 @@ async function extractDomain(
 // Exported for unit tests; not part of the module's runtime public surface.
 export async function processJob(job: ExtractionJob): Promise<void> {
   const domains: VersionDomain[] =
-    job.domain === "cba" ? ["salary", "provisions"] : [job.domain as VersionDomain];
+    job.domain === "cba"
+      ? ["salary", "provisions", "contract_meta"]
+      : [job.domain as VersionDomain];
 
   const perDomain: Array<Record<string, unknown>> = [];
   let anySuccess = false;

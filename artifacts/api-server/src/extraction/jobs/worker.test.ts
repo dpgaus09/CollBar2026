@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
   deriveStatedSettlements: vi.fn(),
   extractFinalOffer: vi.fn(),
   findPostingSide: vi.fn(),
+  extractContractMeta: vi.fn(),
   openPdf: vi.fn(),
   createVersion: vi.fn(),
   promoteVersion: vi.fn(),
@@ -47,6 +48,10 @@ vi.mock("../domains/final-offers", () => ({
 }));
 vi.mock("../domains/final-offers-store", () => ({
   findPostingSide: h.findPostingSide,
+}));
+vi.mock("../domains/contract-meta", () => ({
+  extractContractMeta: h.extractContractMeta,
+  CONTRACT_META_PROMPT_VERSION: "contract-meta-test",
 }));
 vi.mock("../pdf/renderer", () => ({
   openPdf: h.openPdf,
@@ -104,12 +109,34 @@ function job(overrides: Record<string, unknown> = {}) {
   } as Parameters<typeof processJob>[0];
 }
 
+function contractMetaOk() {
+  return {
+    ok: true,
+    status: "success",
+    meta: {
+      unionName: "Test EA",
+      affiliation: "IEA-NEA",
+      effectiveStart: "2022-07-01",
+      effectiveEnd: "2025-06-30",
+      termYears: 3,
+    },
+    costUsd: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    modelVersion: "claude-test",
+    pageCount: 1,
+    pagesExtracted: [1],
+    fromCache: false,
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   h.loadSourceDoc.mockResolvedValue({ id: "42", fileHash: "a".repeat(64) });
   h.resolvePdfBuffer.mockResolvedValue(Buffer.from("%PDF-1.4 test"));
   h.createVersion.mockResolvedValue({ version: { id: "V2" }, duplicate: false });
   h.promoteVersion.mockResolvedValue({ ok: true, targets: 1 });
+  h.extractContractMeta.mockResolvedValue(contractMetaOk());
 });
 
 describe("processJob — fail-closed", () => {
@@ -202,8 +229,8 @@ describe("processJob — final_offer domain", () => {
   });
 });
 
-describe("processJob — cba expands to both domains", () => {
-  it("runs salary and provisions for a 'cba' job", async () => {
+describe("processJob — cba expands to all three domains", () => {
+  it("runs salary, provisions, and contract_meta for a 'cba' job", async () => {
     h.extractSalarySchedules.mockResolvedValue(salaryOk());
     h.extractProvisions.mockResolvedValue({
       ok: true,
@@ -217,11 +244,13 @@ describe("processJob — cba expands to both domains", () => {
       pagesExtracted: [1],
       fromCache: false,
     });
+    h.extractContractMeta.mockResolvedValue(contractMetaOk());
     h.getPromotedVersionId.mockResolvedValue(null);
     await processJob(job({ domain: "cba" }));
     expect(h.extractSalarySchedules).toHaveBeenCalledTimes(1);
     expect(h.extractProvisions).toHaveBeenCalledTimes(1);
-    expect(h.createVersion).toHaveBeenCalledTimes(2);
+    expect(h.extractContractMeta).toHaveBeenCalledTimes(1);
+    expect(h.createVersion).toHaveBeenCalledTimes(3);
     expect(h.markJobDone).toHaveBeenCalledTimes(1);
   });
 });

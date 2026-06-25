@@ -24,6 +24,8 @@ import {
   storeOfferItems,
   computeComparisons,
 } from "../domains/final-offers-store";
+import { storeContractMetaForDoc } from "../domains/contract-meta-store";
+import { EMPTY_CONTRACT_META, type ContractMeta } from "../domains/contract-meta";
 import type {
   SalarySchedule,
   ExtractedContract,
@@ -36,7 +38,8 @@ export type VersionDomain =
   | "salary"
   | "provisions"
   | "settlement"
-  | "final_offer";
+  | "final_offer"
+  | "contract_meta";
 
 // Deterministic JSON: recursively sort object keys so result_hash is stable
 // regardless of property insertion order.
@@ -248,7 +251,9 @@ export async function promoteVersion(
         ? 2
         : domain === "settlement"
           ? 3
-          : 4;
+          : domain === "final_offer"
+            ? 4
+            : 5;
 
   return await db.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(${lockA}, ${lockB})`);
@@ -286,6 +291,12 @@ export async function promoteVersion(
       const r = await storeSettlementsForDoc(v.sourceDocId, settlements);
       store = r;
       targets = r.inserted;
+    } else if (domain === "contract_meta") {
+      const meta =
+        ((v.normalized as { meta?: ContractMeta })?.meta) ?? EMPTY_CONTRACT_META;
+      const r = await storeContractMetaForDoc(v.sourceDocId, meta);
+      store = r;
+      targets = r.updated;
     } else {
       // final_offer: project this doc's side into final_offer_items, then rebuild
       // the posting's board-vs-union comparison from both stored sides.

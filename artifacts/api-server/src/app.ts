@@ -417,7 +417,7 @@ async function runMigrations(): Promise<void> {
         finished_at    timestamptz,
         created_at     timestamptz NOT NULL DEFAULT NOW(),
         updated_at     timestamptz NOT NULL DEFAULT NOW(),
-        CONSTRAINT extraction_jobs_domain_check CHECK (domain IN ('salary','provisions','cba')),
+        CONSTRAINT extraction_jobs_domain_check CHECK (domain IN ('salary','provisions','cba','settlement','final_offer','contract_meta')),
         CONSTRAINT extraction_jobs_status_check CHECK (status IN ('queued','running','done','failed','canceled'))
       )
     `);
@@ -458,7 +458,7 @@ async function runMigrations(): Promise<void> {
         duplicate_of_version_id bigint REFERENCES extraction_versions(id) ON DELETE SET NULL,
         created_by              text,
         created_at              timestamptz NOT NULL DEFAULT NOW(),
-        CONSTRAINT extraction_versions_domain_check CHECK (domain IN ('salary','provisions'))
+        CONSTRAINT extraction_versions_domain_check CHECK (domain IN ('salary','provisions','settlement','final_offer','contract_meta'))
       )
     `);
     await db.execute(sql`
@@ -482,8 +482,36 @@ async function runMigrations(): Promise<void> {
         promoted_by         text,
         promoted_at         timestamptz NOT NULL DEFAULT NOW(),
         PRIMARY KEY (source_doc_id, domain),
-        CONSTRAINT extraction_promotions_domain_check CHECK (domain IN ('salary','provisions'))
+        CONSTRAINT extraction_promotions_domain_check CHECK (domain IN ('salary','provisions','settlement','final_offer','contract_meta'))
       )
+    `);
+
+    // Widen the per-(doc,domain) CHECK constraints on EXISTING databases. The
+    // CREATE TABLE IF NOT EXISTS above only applies to a fresh DB; on an existing
+    // one the original (salary,provisions[,cba]) constraint persists, which would
+    // reject settlement / final_offer / contract_meta version & promotion rows.
+    // Adding values to an IN-list only widens the constraint, so every existing
+    // row stays valid; DROP/ADD keeps it idempotent across restarts.
+    await db.execute(sql`
+      ALTER TABLE extraction_jobs DROP CONSTRAINT IF EXISTS extraction_jobs_domain_check
+    `);
+    await db.execute(sql`
+      ALTER TABLE extraction_jobs ADD CONSTRAINT extraction_jobs_domain_check
+        CHECK (domain IN ('salary','provisions','cba','settlement','final_offer','contract_meta'))
+    `);
+    await db.execute(sql`
+      ALTER TABLE extraction_versions DROP CONSTRAINT IF EXISTS extraction_versions_domain_check
+    `);
+    await db.execute(sql`
+      ALTER TABLE extraction_versions ADD CONSTRAINT extraction_versions_domain_check
+        CHECK (domain IN ('salary','provisions','settlement','final_offer','contract_meta'))
+    `);
+    await db.execute(sql`
+      ALTER TABLE extraction_promotions DROP CONSTRAINT IF EXISTS extraction_promotions_domain_check
+    `);
+    await db.execute(sql`
+      ALTER TABLE extraction_promotions ADD CONSTRAINT extraction_promotions_domain_check
+        CHECK (domain IN ('salary','provisions','settlement','final_offer','contract_meta'))
     `);
 
     logger.info("Migration OK: extraction job queue + versions + promotions ensured");

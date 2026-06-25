@@ -1894,6 +1894,7 @@ const ENQUEUE_DOMAINS = new Set([
   "provisions",
   "settlement",
   "final_offer",
+  "contract_meta",
 ]);
 
 router.post("/admin/extraction/enqueue", requireAdminToken, async (req, res) => {
