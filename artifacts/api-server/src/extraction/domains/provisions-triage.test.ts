@@ -76,4 +76,20 @@ describe("extractProvisions — scanned-doc vision triage is fail-closed", () =>
     expect(res.ok).toBe(true);
     expect(res.status).toBe("success");
   });
+
+  it("succeeds when triage wraps the page array in a code fence / prose", async () => {
+    // Regression: the model commonly returns the array inside a markdown fence or
+    // after a sentence despite "Return ONLY a JSON array". This must parse, not
+    // fail-closed (the old object-wrapping parser threw ParseError here).
+    h.callVision.mockImplementation(async ({ maxTokens }: { maxTokens: number }) =>
+      maxTokens <= 4096
+        ? visionResp({ text: "Here are the pages:\n```json\n[1, 2, 3]\n```" })
+        : visionResp({ text: '{"contracts": []}' }),
+    );
+    const res = await extractProvisions(Buffer.from("%PDF"), "f".repeat(64), {
+      useCache: false,
+    });
+    expect(res.ok).toBe(true);
+    expect(res.status).toBe("success");
+  });
 });

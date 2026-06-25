@@ -20,7 +20,7 @@
 
 import { openPdf, RENDER_VERSION, type PdfDoc } from "../pdf/renderer";
 import { callVision, DEFAULT_MODEL, type VisionBlock } from "../vision/client";
-import { extractJsonObject, classifyBatchResponse } from "../vision/parse";
+import { extractJsonArray, classifyBatchResponse } from "../vision/parse";
 import { requestHash, getCached, putCached } from "../cache";
 import { costFromUsage } from "../cost";
 import { logger } from "../../lib/logger";
@@ -383,13 +383,19 @@ async function visionTriagePages(
         `provisions vision triage truncated on pages ${start + 1}-${end}`,
       );
     }
-    const obj = extractJsonObject(`{"p":${resp.text.trim()}}`);
-    if (obj === null || !Array.isArray(obj.p)) {
+    // The triage prompt asks for a top-level JSON array (e.g. [3,4,12]). Use the
+    // tolerant array extractor (handles code fences / surrounding prose), mirroring
+    // the salary domain — a bare-array reconstruction via extractJsonObject broke
+    // whenever the model wrapped the array in a fence or prose, falsely tripping
+    // the fail-closed ParseError and storing zero provisions. A genuinely
+    // unparseable response (no array at all) still fails closed.
+    const arr = extractJsonArray(resp.text);
+    if (arr === null) {
       throw new ParseError(
         `provisions vision triage returned no parseable page list on pages ${start + 1}-${end}`,
       );
     }
-    for (const x of obj.p) {
+    for (const x of arr) {
       const p = Number(x);
       if (Number.isFinite(p) && p >= 1 && p <= npages) found.add(Math.trunc(p) - 1);
     }
