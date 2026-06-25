@@ -39,6 +39,7 @@ import psycopg2.extras
 
 import common
 import lib_salary_grid as grid
+import lib_salary_vision as vision
 
 # resolve_pdf_path lives in 06_extract_contracts (module name starts with a
 # digit, so it must be imported via importlib).
@@ -140,19 +141,33 @@ def _resolve_pdf(target: dict, pdf_override: str | None):
     )
 
 
-def _parse_pdf_with_fallback(pdf_path) -> list[dict]:
-    """Parse all schedules; if none are found and the PDF has no usable text
-    layer it is scanned — return a flag-and-defer placeholder so it lands in
-    review (deterministic grid parsing needs word boxes OCR-text cannot give)."""
+def _parse_pdf_with_fallback(pdf_path, *, use_vision: bool = True,
+                             vision_max_pages: int = vision.DEFAULT_MAX_PAGES) -> list[dict]:
+    """Parse all schedules. If none are found and the PDF has no usable text
+    layer it is scanned — deterministic grid parsing needs word boxes OCR-text
+    cannot give, so try Claude vision (render pages -> read the grid). If vision
+    is disabled, finds nothing, or errors, fall back to a flag-and-defer
+    placeholder so the doc lands in review instead of being dropped silently."""
     schedules = grid.parse_pdf(str(pdf_path))
-    if not schedules:
+    if schedules:
+        return schedules
+
+    try:
+        wc, npages = grid.pdf_text_stats(str(pdf_path))
+    except Exception:  # noqa: BLE001
+        wc, npages = 0, 1
+    if not grid.is_scanned(wc, npages):
+        return schedules  # digital PDF with no detectable grid — nothing to add
+
+    if use_vision:
         try:
-            wc, npages = grid.pdf_text_stats(str(pdf_path))
-        except Exception:  # noqa: BLE001
-            wc, npages = 0, 1
-        if grid.is_scanned(wc, npages):
-            schedules = [grid.scanned_placeholder(npages)]
-    return schedules
+            vsched = vision.extract_schedules(str(pdf_path), npages,
+                                              max_pages=vision_max_pages)
+            if vsched:
+                return vsched
+        except Exception as e:  # noqa: BLE001 - vision must never crash the batch
+            log.warning("vision extraction failed for %s: %s", pdf_path, e)
+    return [grid.scanned_placeholder(npages)]
 
 
 def store_schedules(conn, target: dict, schedules: list[dict],
@@ -285,7 +300,9 @@ def _store_routed(conn, group: list[dict], routed: dict[str, list[dict]],
 
 def process_doc_group(conn, group: list[dict], sibling_units: set[str],
                       pdf_override: str | None,
-                      dry_run: bool) -> tuple[list[dict], int]:
+                      dry_run: bool, *, use_vision: bool = True,
+                      vision_max_pages: int = vision.DEFAULT_MAX_PAGES,
+                      ) -> tuple[list[dict], int]:
     """Parse one shared PDF once and route its schedules to the right contract.
 
     ``group`` are the target contracts to write (all sharing one source_doc);
@@ -300,7 +317,8 @@ def process_doc_group(conn, group: list[dict], sibling_units: set[str],
         return ([{"contract_id": t["contract_id"], "status": "no_pdf",
                   "schedules": 0, "cells": 0, "flagged": 0} for t in group], 0)
     try:
-        schedules = _parse_pdf_with_fallback(pdf_path)
+        schedules = _parse_pdf_with_fallback(
+            pdf_path, use_vision=use_vision, vision_max_pages=vision_max_pages)
     except Exception as e:  # noqa: BLE001 - record, don't crash the batch
         log.exception("source_doc %s parse failed: %s", rep["source_doc_id"], e)
         return ([{"contract_id": t["contract_id"], "status": "parse_error",
@@ -366,6 +384,13 @@ def main() -> None:
                          "(resumable backfill)")
     ap.add_argument("--dry-run", action="store_true",
                     help="parse and report without writing")
+    ap.add_argument("--no-vision", action="store_true",
+                    help="disable the Claude-vision fallback for scanned PDFs "
+                         "(scanned docs then defer to review as before)")
+    ap.add_argument("--vision-max-pages", type=int,
+                    default=vision.DEFAULT_MAX_PAGES,
+                    help="cap on pages sent to vision for high-res extraction "
+                         f"(default {vision.DEFAULT_MAX_PAGES})")
     args = ap.parse_args()
 
     common.setup_logging()
@@ -395,7 +420,9 @@ def main() -> None:
             for source_doc_id, group in groups.items():
                 sibling_units = fetch_doc_units(scur, source_doc_id)
                 results, n_unattr = process_doc_group(
-                    conn, group, sibling_units, args.pdf, args.dry_run)
+                    conn, group, sibling_units, args.pdf, args.dry_run,
+                    use_vision=not args.no_vision,
+                    vision_max_pages=args.vision_max_pages)
                 for r in results:
                     totals[r["status"]] = totals.get(r["status"], 0) + 1
                     totals["schedules"] += r["schedules"]
