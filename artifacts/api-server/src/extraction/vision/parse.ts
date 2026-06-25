@@ -57,3 +57,22 @@ export function classifyBatchResponse(
   const v = obj[key];
   return { ok: true, items: Array.isArray(v) ? v : [] };
 }
+
+// Same fail-closed contract as classifyBatchResponse, but for a prompt that asks
+// for a top-level JSON ARRAY (e.g. the salary domain) instead of an object with a
+// list-bearing key:
+//   - truncated (hit max_tokens)        -> NOT ok (fail-closed)
+//   - no parseable JSON array in text   -> NOT ok (parse_error)
+//   - a JSON array (incl. empty [])     -> ok, items (valid "no results" answer)
+// The crucial distinction: an unparsable response is NOT a valid-empty result.
+// Only an ok result (incl. ok+empty) may be stored/cached; a truncated/parse_error
+// response must leave existing rows untouched.
+export function classifyArrayResponse(
+  text: string,
+  truncated: boolean,
+): BatchOutcome {
+  if (truncated) return { ok: false, reason: "truncated" };
+  const arr = extractJsonArray(text);
+  if (arr === null) return { ok: false, reason: "parse_error" };
+  return { ok: true, items: arr };
+}

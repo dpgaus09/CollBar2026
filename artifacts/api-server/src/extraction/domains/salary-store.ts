@@ -244,7 +244,7 @@ export async function storeSalaryForDoc(
 }
 
 export interface RunSalaryResult {
-  status: "ok" | "no_doc" | "no_pdf";
+  status: "ok" | "no_doc" | "no_pdf" | "extract_failed";
   sourceDocId: string;
   fileHash?: string;
   extraction?: SalaryExtractionResult;
@@ -283,6 +283,24 @@ export async function runSalaryForDoc(
     maxPages: opts?.maxPages,
     useCache: opts?.useCache,
   });
+
+  // Fail-closed: a truncated/unparseable extraction must NOT reach the store. The
+  // per-contract delete-then-insert (incl. zero rows) would wipe every existing
+  // salary schedule for this doc's contracts and replace them with nothing. Skip
+  // the store entirely and leave existing rows intact.
+  if (!extraction.ok) {
+    logger.warn(
+      { sourceDocId: doc.id, status: extraction.status },
+      "salary: extraction not ok; preserving existing rows (no store)",
+    );
+    return {
+      status: "extract_failed",
+      sourceDocId: String(doc.id),
+      fileHash,
+      extraction,
+      dryRun,
+    };
+  }
 
   const store = await storeSalaryForDoc(doc.id, extraction.schedules, { dryRun });
 

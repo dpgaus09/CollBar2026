@@ -15,11 +15,11 @@
 
 import { openPdf, RENDER_VERSION, type PdfDoc } from "../pdf/renderer";
 import { callVision, DEFAULT_MODEL, type VisionBlock } from "../vision/client";
-import { extractJsonArray } from "../vision/parse";
+import { extractJsonArray, classifyArrayResponse } from "../vision/parse";
 import { requestHash, getCached, putCached } from "../cache";
 import { costFromUsage } from "../cost";
 import { logger } from "../../lib/logger";
-import type { SalaryCell, SalarySchedule } from "../types";
+import type { ExtractionStatus, SalaryCell, SalarySchedule } from "../types";
 import {
   canonLane,
   isEducationSchedule,
@@ -259,9 +259,22 @@ interface TriageResult {
   model: string;
 }
 
+// Fail-closed sentinels: a truncated or unparseable model response must abort the
+// salary extraction (status -> truncated / parse_error) so no store or cache runs
+// on a partial/garbled result. Declared above their first use. Mirrors the
+// provisions domain.
+class TruncatedError extends Error {}
+class ParseError extends Error {}
+
 // Cheap, low-res vision triage: return 0-based page indexes that show a salary
-// schedule. Batched so request bodies stay small; a failing batch is skipped
-// rather than aborting the whole locate.
+// schedule. Batched so request bodies stay small.
+//
+// Fail-closed: a truncated or unparseable triage batch leaves the candidate page
+// set unknown. It is NOT safe to "skip" the batch and continue with a partial
+// page set — the downstream per-contract delete-then-insert store would then wipe
+// any schedule that lived on an un-triaged page and replace it with nothing. So a
+// bad batch throws (TruncatedError/ParseError) and a genuine callVision error
+// propagates; the caller turns these into a non-success status and stores nothing.
 async function locateSalaryPages(
   doc: PdfDoc,
   npages: number,
@@ -282,25 +295,30 @@ async function locateSalaryPages(
       blocks.push(imgBlock(img.base64));
     }
     blocks.push({ type: "text", text: TRIAGE_PROMPT });
-    try {
-      const resp = await callVision({
-        blocks,
-        maxTokens: TRIAGE_MAX_TOKENS,
-        model,
-      });
-      inputTokens += resp.usage.inputTokens;
-      outputTokens += resp.usage.outputTokens;
-      resolvedModel = resp.model;
-      const arr = extractJsonArray(resp.text) ?? [];
-      for (const x of arr) {
-        const p = Number(x);
-        if (Number.isFinite(p) && p >= 1 && p <= npages) {
-          found.add(Math.trunc(p) - 1);
-        }
+    const resp = await callVision({
+      blocks,
+      maxTokens: TRIAGE_MAX_TOKENS,
+      model,
+    });
+    inputTokens += resp.usage.inputTokens;
+    outputTokens += resp.usage.outputTokens;
+    resolvedModel = resp.model;
+    if (resp.truncated) {
+      throw new TruncatedError(
+        `vision salary triage truncated on pages ${batchStart + 1}-${end}`,
+      );
+    }
+    const arr = extractJsonArray(resp.text);
+    if (arr === null) {
+      throw new ParseError(
+        `vision salary triage returned no parseable page list on pages ${batchStart + 1}-${end}`,
+      );
+    }
+    for (const x of arr) {
+      const p = Number(x);
+      if (Number.isFinite(p) && p >= 1 && p <= npages) {
+        found.add(Math.trunc(p) - 1);
       }
-    } catch (err) {
-      logger.warn({ err, batchStart, end }, "vision triage batch failed; skipping");
-      continue;
     }
   }
 
@@ -317,6 +335,10 @@ async function locateSalaryPages(
 
 export interface SalaryExtractionResult {
   schedules: SalarySchedule[];
+  // ok === (status === "success"); only an ok result may be stored or cached. A
+  // truncated/parse_error result is fail-closed (empty schedules, never stored).
+  ok: boolean;
+  status: ExtractionStatus;
   fromCache: boolean;
   truncated: boolean;
   inputTokens: number;
@@ -367,6 +389,8 @@ export async function extractSalarySchedules(
     if (hit) {
       return {
         schedules: (hit.normalized as SalarySchedule[]) ?? [],
+        ok: true,
+        status: "success",
         fromCache: true,
         truncated: false,
         inputTokens: hit.inputTokens,
@@ -384,7 +408,7 @@ export async function extractSalarySchedules(
   let inputTokens = 0;
   let outputTokens = 0;
   let modelVersion = model;
-  let truncated = false;
+  let status: ExtractionStatus = "success";
   let schedules: SalarySchedule[] = [];
   let pagesExtracted: number[] = [];
   let rawResponse: string | null = null;
@@ -421,41 +445,63 @@ export async function extractSalarySchedules(
       modelVersion = resp.model;
       rawResponse = resp.text;
 
-      if (resp.truncated) {
-        // A truncated response yields partial/last-schedule-clipped JSON; do not
-        // store any of it. Fail closed (and do NOT cache) so a re-run retries.
-        truncated = true;
-        logger.warn(
-          { fileHash },
-          "vision salary extraction truncated (max_tokens); discarding output",
+      // Fail-closed: a truncated (clipped JSON) or unparseable response is NOT a
+      // valid-empty result. Treating it as [] then storing would let the
+      // downstream per-contract delete-then-insert wipe existing schedules and
+      // replace them with nothing. Surface it as a non-success status instead.
+      const outcome = classifyArrayResponse(resp.text, resp.truncated);
+      if (!outcome.ok) {
+        if (outcome.reason === "truncated") {
+          throw new TruncatedError(
+            "vision salary extraction truncated (max_tokens)",
+          );
+        }
+        throw new ParseError(
+          "vision salary extraction returned no parseable JSON array",
         );
-      } else {
-        const parsed = extractJsonArray(resp.text);
-        schedules = parsed ? normalize(parsed) : [];
-        // Option B: corroborate each salary against the digital text layer (the
-        // doc is still open here). Scanned pages are skipped inside verify.
-        if (verify && schedules.length) {
-          const vstats = verifySalaryAgainstText(schedules, doc);
-          if (vstats.cellsChecked) {
-            logger.info(
-              { fileHash, ...vstats },
-              "vision salary: text-layer verification",
-            );
-          }
+      }
+      schedules = normalize(outcome.items);
+      // Option B: corroborate each salary against the digital text layer (the
+      // doc is still open here). Scanned pages are skipped inside verify.
+      if (verify && schedules.length) {
+        const vstats = verifySalaryAgainstText(schedules, doc);
+        if (vstats.cellsChecked) {
+          logger.info(
+            { fileHash, ...vstats },
+            "vision salary: text-layer verification",
+          );
         }
       }
     } else {
       logger.info({ fileHash }, "vision salary: no salary pages located");
     }
-  } finally {
-    doc.destroy();
+  } catch (err) {
+    if (err instanceof TruncatedError) {
+      status = "truncated";
+      schedules = [];
+      logger.warn(
+        { fileHash, err: err.message },
+        "vision salary extraction truncated; not storing (fail-closed)",
+      );
+    } else if (err instanceof ParseError) {
+      status = "parse_error";
+      schedules = [];
+      logger.warn(
+        { fileHash, err: err.message },
+        "vision salary extraction unparseable; not storing (fail-closed)",
+      );
+    } else {
+      doc.destroy();
+      throw err;
+    }
   }
+  doc.destroy();
 
   const costUsd = costFromUsage(modelVersion, inputTokens, outputTokens);
 
-  // Cache successful (non-truncated) results — including a confident empty
-  // result — so a re-run skips the paid calls. Never cache a truncated run.
-  if (useCache && fileHash && !truncated) {
+  // Cache only a successful result — including a confident empty result — so a
+  // re-run skips the paid calls. Never cache a truncated/parse_error run.
+  if (useCache && fileHash && status === "success") {
     try {
       await putCached({
         fileHash,
@@ -483,8 +529,10 @@ export async function extractSalarySchedules(
 
   return {
     schedules,
+    ok: status === "success",
+    status,
     fromCache: false,
-    truncated,
+    truncated: status === "truncated",
     inputTokens,
     outputTokens,
     costUsd,
