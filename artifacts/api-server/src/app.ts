@@ -348,6 +348,45 @@ async function runMigrations(): Promise<void> {
     `);
 
     logger.info("Migration OK: contracts.unit_override ensured");
+
+    // -----------------------------------------------------------------------
+    // TS-native extraction engine cache (Task #174). Operational cache table
+    // (managed here like login_events / sync_run_status, not by Drizzle). One
+    // row per (file_hash, request_hash) — the deterministic key for a vision
+    // extraction call (domain + model + prompt/render versions + render params).
+    // Lets bulk re-runs skip already-paid Claude calls and records token usage
+    // and estimated cost per call for the cost estimator. Additive + idempotent.
+    // -----------------------------------------------------------------------
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS vision_extraction_cache (
+        id                 bigserial PRIMARY KEY,
+        file_hash          text NOT NULL,
+        request_hash       text NOT NULL,
+        domain             text NOT NULL,
+        model              text NOT NULL,
+        model_version      text NOT NULL,
+        prompt_version     text NOT NULL,
+        render_version     text NOT NULL,
+        page_set           text NOT NULL DEFAULT '*',
+        status             text NOT NULL DEFAULT 'success',
+        error              text,
+        raw_response       text,
+        normalized         jsonb,
+        input_tokens       integer NOT NULL DEFAULT 0,
+        output_tokens      integer NOT NULL DEFAULT 0,
+        estimated_cost_usd numeric(12,6) NOT NULL DEFAULT 0,
+        finish_reason      text,
+        created_at         timestamptz NOT NULL DEFAULT NOW(),
+        CONSTRAINT vision_extraction_cache_key_unique UNIQUE (file_hash, request_hash),
+        CONSTRAINT vision_extraction_cache_status_check CHECK (status IN ('success','failure'))
+      )
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS vision_extraction_cache_file_domain_idx
+        ON vision_extraction_cache (file_hash, domain)
+    `);
+
+    logger.info("Migration OK: vision_extraction_cache ensured");
   } catch (err) {
     logger.warn({ err }, "Migration failed — will retry on next restart");
     return;

@@ -49,3 +49,4 @@
 - [Dev login lock pileup](db-login-lock-pileup.md) — leaked idle-in-txn lock on `users` + boot ALTER's ACCESS EXCLUSIVE froze all logins; pool's idle_in_transaction_session_timeout fixes it; `test` workflow vs live dev DB is the likely trigger.
 - [Project run button aggregate](project-run-button-aggregate.md) — "Project" runButton auto-aggregates ALL agent leaf workflows (autoStart:false doesn't exclude); can't edit it (prohibited name); artifact web/API workflows auto-start separately.
 - [Mods not reaching prod = domain mapping](prod-domain-mapping-check.md) — successful publish ≠ visible; check getDeploymentInfo primaryUrl/additionalUrls; a 404 from the user's URL means no deployment is mapped to that hostname (linking issue, not a code bug).
+- [TS vision extraction engine](ts-extraction-engine.md) — Claude-Vision extractors in api-server: every result path fail-closed (incl. scanned triage) or the delete-then-insert store wipes rows; dryRun until merge UX.

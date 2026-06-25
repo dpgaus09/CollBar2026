@@ -82,6 +82,18 @@ export async function uploadBuffer(
   });
 }
 
+// Download an object's full bytes into a Buffer. Returns null (instead of
+// throwing) when the object does not exist, so callers can fall back to a
+// local copy. Used by the extraction engine to fetch a source PDF before
+// rendering it for vision extraction.
+export async function downloadBuffer(key: string): Promise<Buffer | null> {
+  const file = fileForKey(key);
+  const [exists] = await file.exists();
+  if (!exists) return null;
+  const [buf] = await file.download();
+  return buf;
+}
+
 // Stream an object to an Express response. Returns false (without writing a
 // body) when the object does not exist, so the caller can fall back / 404.
 export async function streamObjectTo(

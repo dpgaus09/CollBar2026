@@ -31,6 +31,9 @@ async function buildAll() {
     // - use path traversal to read files (e.g. @google-cloud/secret-manager loads sibling .proto files)
     external: [
       "*.node",
+      // mupdf is ESM and ships a sibling mupdf-wasm.wasm that it loads by path
+      // at runtime; bundling breaks that lookup, so resolve it from node_modules.
+      "mupdf",
       "sharp",
       "better-sqlite3",
       "sqlite3",
