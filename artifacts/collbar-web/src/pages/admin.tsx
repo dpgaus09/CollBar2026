@@ -1049,7 +1049,7 @@ function MinSalaryCard() {
 
       {lastStatus === "error" && (
         <div className="rounded border border-red-900/60 bg-red-950/40 px-3 py-2 text-xs text-red-300">
-          ✗ Last sync failed. Check the log below — the scheduled annual run may need attention.
+          ✗ Last sync failed. Check the log below and re-run it when the issue is resolved.
         </div>
       )}
 
@@ -1147,7 +1147,7 @@ function ScheduledAutomationsCard() {
   const jobs = [
     {
       label: "IL CBA Crawl",
-      schedule: "2 AM · 1st & 15th of month",
+      schedule: "on demand",
       running: crawlData?.running ?? false,
       lastRunAt: crawlData?.lastRunAt ?? null,
       lastStatus: crawlData?.lastStatus ?? null,
@@ -1156,8 +1156,8 @@ function ScheduledAutomationsCard() {
       isPending: runCrawl.isPending,
     },
     {
-      label: "Extraction Cron",
-      schedule: "3 AM · nightly",
+      label: "Extraction",
+      schedule: "on demand",
       running: cronData?.running ?? false,
       lastRunAt: cronData?.lastRunAt ?? null,
       lastStatus: cronData?.lastStatus ?? null,
@@ -1555,9 +1555,9 @@ function CrawlReportTab() {
           ISBE Directory Refresh
         </h2>
         <p className="text-xs text-slate-500">
-          Downloads the ISBE district directory daily at 7 AM Central and upserts district
-          website URLs, names, and county info. SHA-256 deduplicated — unchanged files are
-          logged but not reprocessed. Schedule fires only on a reserved VM deployment.
+          Downloads the ISBE district directory on demand and upserts district website URLs,
+          names, and county info. SHA-256 deduplicated — unchanged files are logged but not
+          reprocessed.
         </p>
         <DirectoryRefreshCard />
       </section>
@@ -1569,49 +1569,42 @@ function CrawlReportTab() {
         </h2>
         <p className="text-xs text-slate-500">
           Ingests the CGFA-certified statutory minimum full-time teacher salary (PA 103-515),
-          published each July. Runs annually on July 25 at 6 AM Central. SHA-256 deduplicated —
-          an unchanged certification is skipped. Upserts one row per school year.
+          published each July. Run it on demand once the new certification is out. SHA-256
+          deduplicated — an unchanged certification is skipped. Upserts one row per school year.
         </p>
         <MinSalaryCard />
       </section>
 
-      {/* Scheduled Automations */}
+      {/* Data Refresh (on demand) */}
       <section className="space-y-3">
         <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
-          Scheduled Automations
+          Data Refresh
         </h2>
         <p className="text-xs text-slate-500">
-          Four jobs keep the dataset current automatically. All times are America/Chicago
-          (Central), and each job skips its run if a previous one is still in progress:
+          The underlying data changes only a handful of times a year, so there is no scheduled
+          automation — you pull fresh data on demand with the “Run now” buttons below. Each job
+          skips its run if a previous one is still in progress. This lets the site run as a
+          stateless reader on Autoscale (no always-on server required).
         </p>
         <ul className="text-xs text-slate-400 space-y-1.5 list-none">
-          <li className="flex gap-2">
-            <span className="font-mono text-sky-400 whitespace-nowrap">7:00 AM daily</span>
-            <span>ISBE Directory Refresh — re-pulls the public district list so new/closed districts and changed websites are reflected before crawling.</span>
+          <li>
+            <span className="font-mono text-slate-300">ISBE Directory Refresh</span> — re-pulls the
+            public district list so new/closed districts and changed websites are reflected before
+            crawling.
           </li>
-          <li className="flex gap-2">
-            <span className="font-mono text-sky-400 whitespace-nowrap">3:00 AM nightly</span>
-            <span>Extraction Cron — extracts contract terms from any CBA PDFs that have not yet been processed.</span>
+          <li>
+            <span className="font-mono text-slate-300">Extraction</span> — extracts contract terms
+            from any CBA PDFs that have not yet been processed.
           </li>
-          <li className="flex gap-2">
-            <span className="font-mono text-sky-400 whitespace-nowrap">2:00 AM 1st &amp; 15th</span>
-            <span>IL CBA Crawl — re-crawls every district website twice a month to discover newly posted contracts.</span>
+          <li>
+            <span className="font-mono text-slate-300">IL CBA Crawl</span> — re-crawls every
+            district website to discover newly posted contracts.
           </li>
-          <li className="flex gap-2">
-            <span className="font-mono text-sky-400 whitespace-nowrap">6:00 AM Jul 25</span>
-            <span>IL Minimum Teacher Salary — pulls the new CGFA statutory minimum salary certification once a year.</span>
+          <li>
+            <span className="font-mono text-slate-300">IL Minimum Teacher Salary</span> — pulls the
+            latest CGFA statutory minimum salary certification (published each July).
           </li>
         </ul>
-        <div className="rounded-lg border border-amber-800 bg-amber-950/20 p-4 space-y-1">
-          <div className="text-xs font-semibold text-amber-300">⚠ Requires a Reserved VM deployment</div>
-          <p className="text-xs text-amber-400/90">
-            These schedules only fire when the API server runs continuously. Autoscale
-            deployments sleep when idle and will silently skip every job. Publish this app as a{" "}
-            <span className="font-semibold">Reserved VM</span> (set in the Replit Publishing UI)
-            to keep the pipeline running for years. The manual “Run now” triggers below work in any
-            environment.
-          </p>
-        </div>
         <ScheduledAutomationsCard />
       </section>
 
@@ -2949,7 +2942,7 @@ function AlertsTab() {
           </p>
           <p className="text-slate-500 text-xs mt-1">
             {statusFilter === "pending"
-              ? "Run the nightly cron (pipeline/08_cron_incremental.py) to detect new IL CBA documents."
+              ? "Run the Extraction job (Data Refresh tab) to detect new IL CBA documents."
               : "Acknowledged alerts will appear here."}
           </p>
         </div>

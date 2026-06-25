@@ -1,7 +1,5 @@
 import app from "./app";
 import { logger } from "./lib/logger";
-import { schedule } from "node-cron";
-import { spawnDirectoryRefresh, spawnExtractionCron, spawnIlCrawl, spawnMinSalarySync } from "./routes/admin";
 
 const rawPort = process.env["PORT"];
 
@@ -26,49 +24,10 @@ app.listen(port, (err) => {
   logger.info({ port }, "Server listening");
 });
 
-// Daily ISBE directory refresh — 7:00 AM America/Chicago
-schedule(
-  "0 7 * * *",
-  () => {
-    logger.info("Cron: starting daily ISBE directory refresh");
-    spawnDirectoryRefresh();
-  },
-  { timezone: "America/Chicago" },
-);
-logger.info("Cron registered: ISBE directory refresh at 07:00 America/Chicago daily");
-
-// Nightly IL extraction cron — 3:00 AM America/Chicago
-schedule(
-  "0 3 * * *",
-  () => {
-    logger.info("Cron: starting nightly extraction cron");
-    spawnExtractionCron();
-  },
-  { timezone: "America/Chicago" },
-);
-logger.info("Cron registered: extraction cron at 03:00 America/Chicago daily");
-
-// Bi-monthly IL CBA crawl — 2:00 AM on the 1st and 15th of each month, America/Chicago
-// (Districts settle on a fiscal-year calendar; weekly is unnecessary churn)
-schedule(
-  "0 2 1,15 * *",
-  () => {
-    logger.info("Cron: starting bi-monthly IL CBA crawl");
-    spawnIlCrawl();
-  },
-  { timezone: "America/Chicago" },
-);
-logger.info("Cron registered: IL CBA crawl at 02:00 America/Chicago on 1st and 15th of each month");
-
-// Annual IL minimum teacher salary sync — 6:00 AM America/Chicago on July 25.
-// CGFA certifies/publishes the statutory minimum by July 20 (PA 103-515); a
-// late-July run picks up the freshly published certification each year.
-schedule(
-  "0 6 25 7 *",
-  () => {
-    logger.info("Cron: starting annual IL minimum teacher salary sync");
-    spawnMinSalarySync();
-  },
-  { timezone: "America/Chicago" },
-);
-logger.info("Cron registered: IL minimum teacher salary sync at 06:00 America/Chicago on July 25");
+// Data refresh is fully manual / on-demand (no scheduled automation).
+// The four pipeline jobs — ISBE directory refresh, extraction, IL CBA crawl,
+// and the annual minimum-teacher-salary sync — are triggered from the admin
+// panel's "Data Refresh" controls (their spawn* helpers + POST endpoints live
+// in routes/admin.ts). Keeping the server free of long-lived cron schedulers
+// lets it run as a stateless HTTP reader on Autoscale (scales to zero when idle)
+// instead of requiring an always-on Reserved VM.

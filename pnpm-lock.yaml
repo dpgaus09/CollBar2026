@@ -217,9 +217,6 @@ importers:
       express-session:
         specifier: ^1.19.0
         version: 1.19.0
-      node-cron:
-        specifier: ^4.2.1
-        version: 4.2.1
       pino:
         specifier: ^9.14.0
         version: 9.14.0
@@ -242,9 +239,6 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 25.6.2
-      '@types/node-cron':
-        specifier: ^3.0.11
-        version: 3.0.11
       '@types/react':
         specifier: 'catalog:'
         version: 19.2.14
@@ -1874,9 +1868,6 @@ packages:
   '@types/methods@1.1.4':
     resolution: {integrity: sha512-ymXWVrDiCxTBE3+RIrrP533E70eA+9qu7zdWoHuOmGujkYtzf4HQF96b8nwHLqhuf4ykX61IGRIB38CC6/sImQ==}
 
-  '@types/node-cron@3.0.11':
-    resolution: {integrity: sha512-0ikrnug3/IyneSHqCBeslAhlK2aBfYek1fGo4bP4QnZPmiqSGRK+Oy7ZMisLWkesffJvQ1cqAcBnJC+8+nxIAg==}
-
   '@types/node@25.6.2':
     resolution: {integrity: sha512-sokuT28dxf9JT5Kady1fsXOvI4HVpjZa95NKT5y9PNTIrs2AsobR4GFAA90ZG8M+nxVRLysCXsVj6eGC7Vbrlw==}
 
@@ -3043,10 +3034,6 @@ packages:
   node-addon-api@8.8.0:
     resolution: {integrity: sha512-c5Ko1fZJIJmzhFIkhRN76WTq+fC6tWnGy9CXA0fA+XygsWZmEwG8vmbkNqxMyoaa0Tin4djul49NzdVcJJcjeA==}
     engines: {node: ^18 || ^20 || >= 21}
-
-  node-cron@4.2.1:
-    resolution: {integrity: sha512-lgimEHPE/QDgFlywTd8yTR61ptugX3Qer29efeyWw2rv259HtGBNn1vZVmp8lB9uo9wC0t/AT4iGqXxia+CJFg==}
-    engines: {node: '>=6.0.0'}
 
   node-fetch@2.7.0:
     resolution: {integrity: sha512-c4FRfUm/dbcWZ7U+1Wq0AwCyFL+3nt2bEw05wfxSz+DWpWsitgmSgYmy2dQdWyKC1694ELPqMs/YzUSNozLt8A==}
@@ -5309,8 +5296,6 @@ snapshots:
 
   '@types/methods@1.1.4': {}
 
-  '@types/node-cron@3.0.11': {}
-
   '@types/node@25.6.2':
     dependencies:
       undici-types: 7.19.2
@@ -6390,8 +6375,6 @@ snapshots:
       react-dom: 19.1.0(react@19.1.0)
 
   node-addon-api@8.8.0: {}
-
-  node-cron@4.2.1: {}
 
   node-fetch@2.7.0:
     dependencies:

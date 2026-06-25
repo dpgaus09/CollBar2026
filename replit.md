@@ -13,7 +13,7 @@ K-12 collective bargaining settlement database and district dashboard — Ohio s
 - `pnpm --filter @workspace/db run check-drift` — verify the Drizzle schema matches the dev database (read-only; issues no DDL)
 - `python3 pipeline/seed_test.py` — insert and delete 3 TEST_ districts, print acceptance row-count table
 - `python3 -m unittest discover -s pipeline/tests -p "test_*.py" -v` — run Python test suite (58 tests)
-- `python3 pipeline/08_cron_incremental.py` — run nightly incremental SERB scraper manually
+- `python3 pipeline/08_cron_incremental.py` — run the incremental SERB scraper on demand
 - Required env secret: `DATABASE_URL` — already provisioned via Replit managed PostgreSQL
 
 ## Stack
@@ -40,7 +40,7 @@ K-12 collective bargaining settlement database and district dashboard — Ohio s
 - `artifacts/collbar-web/src/` — React frontend (pages, components)
   - `src/pages/admin.tsx` — Admin panel (Crawl, Extraction, Review Queue, DB Stats, Alerts tabs)
 - `pipeline/` — Python data acquisition and extraction scripts
-  - `pipeline/08_cron_incremental.py` — nightly incremental SERB scraper (Phase 5)
+  - `pipeline/08_cron_incremental.py` — incremental SERB scraper, run on demand (Phase 5)
   - `pipeline/tests/` — Python unit + integration tests (58 tests across 4 files)
 - `pipeline/seed_test.py` — Phase 1 acceptance test seed script
 
@@ -53,6 +53,7 @@ K-12 collective bargaining settlement database and district dashboard — Ohio s
 - Secrets in Replit only: `DATABASE_URL`, `ANTHROPIC_API_KEY` etc. are never in code or logs.
 - HTTP security headers: CSP, HSTS (prod only), X-Frame-Options, nosniff, Referrer-Policy, Permissions-Policy applied in `artifacts/api-server/src/app.ts` (Phase 5).
 - Admin session guard: `requireSession` middleware on all `/admin/*` routes; session established via magic-link + `ADMIN_TOKEN` (Phase 5).
+- On-demand data refresh (no scheduled automation): the API server runs no cron/schedulers, so it deploys on **Autoscale** (not a Reserved VM). All data refresh — IL CBA crawl, contract extraction, ISBE directory sync, min-teacher-salary sync, stored-CBA audit — is triggered manually from the admin "Data Refresh" panel (POST endpoints in `routes/admin.ts`, which spawn the pipeline scripts) or by running the run-once pipeline workflows (`pipeline: IL Extraction`, `pipeline: IL CBA Crawl`, `pipeline: Stored CBA Audit`) from the Workflows pane. These pipeline workflows run to completion and exit (no `sleep infinity`). The default Run brings up the web + API for previewing; it does not run data jobs.
 
 ## Product
 
