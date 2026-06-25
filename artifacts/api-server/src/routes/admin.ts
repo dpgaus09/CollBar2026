@@ -10,6 +10,13 @@ import { sql } from "drizzle-orm";
 import { VALID_BARGAINING_UNITS, BARGAINING_UNIT_LABELS } from "./bargaining-units.js";
 import { runPromotion } from "../lib/promote.js";
 import { uploadBuffer, uploadedCbaKey } from "../lib/objectStorage.js";
+import { enqueueJob, listJobs, getQueueStats } from "../extraction/jobs/queue.js";
+import {
+  getVersionsForDoc,
+  getPromotions,
+  diffAgainstPromoted,
+  promoteVersion,
+} from "../extraction/jobs/versions.js";
 
 declare module "express-session" {
   interface SessionData {
@@ -1418,23 +1425,45 @@ export function spawnExtractionRetry(
 }
 
 router.post("/admin/retry-extraction", requireAdminToken, (req, res) => {
-  try {
-    const body = (req.body ?? {}) as { docId?: number | string };
-    let docId: number | undefined;
-    if (body.docId !== undefined && body.docId !== null && body.docId !== "") {
-      const parsed = parseInt(String(body.docId), 10);
-      if (isNaN(parsed) || parsed < 1) {
-        res.status(400).json({ error: "docId must be a positive integer" });
+  void (async () => {
+    try {
+      const body = (req.body ?? {}) as { docId?: number | string };
+      const requestedBy = requestedByFromReq(req);
+      if (body.docId !== undefined && body.docId !== null && body.docId !== "") {
+        const parsed = parseInt(String(body.docId), 10);
+        if (isNaN(parsed) || parsed < 1) {
+          res.status(400).json({ error: "docId must be a positive integer" });
+          return;
+        }
+        const { job, deduped } = await enqueueJob({
+          sourceDocId: parsed,
+          domain: "cba",
+          requestedBy,
+          requestReason: "retry-extraction",
+        });
+        res.json({ status: "queued", jobId: job.id, deduped, docId: parsed });
         return;
       }
-      docId = parsed;
+      // No docId: re-enqueue every doc that has a currently-failed job.
+      const failed = await db.execute(sql`
+        SELECT DISTINCT source_doc_id::int AS id FROM extraction_jobs WHERE status = 'failed'
+      `);
+      let enqueued = 0;
+      for (const r of failed.rows as Array<{ id: number }>) {
+        const { deduped } = await enqueueJob({
+          sourceDocId: r.id,
+          domain: "cba",
+          requestedBy,
+          requestReason: "retry-failed",
+        });
+        if (!deduped) enqueued++;
+      }
+      res.json({ status: "queued", enqueued, docId: null });
+    } catch (err) {
+      console.error(err);
+      if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
     }
-    const result = spawnExtractionRetry(docId);
-    res.json({ ...result, log: EXTRACTION_RETRY_LOG, docId: docId ?? null });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Internal server error" });
-  }
+  })();
 });
 
 router.get("/admin/retry-extraction-status", requireAdminToken, (_req, res) => {
@@ -1486,6 +1515,58 @@ function normalizeSchoolYear(
 function sanitizeFilename(rawValue: unknown): string {
   const base = String(rawValue ?? "upload.pdf").split(/[\\/]/).pop() || "upload.pdf";
   return base.replace(/[^\w.\- ]+/g, "_").slice(0, 200) || "upload.pdf";
+}
+
+/** Best-effort admin identity for job attribution (session user id or "admin"). */
+function requestedByFromReq(req: Request): string {
+  const uid = req.session?.userId;
+  return uid != null ? `user:${uid}` : "admin";
+}
+
+/**
+ * Ensure a minimal contracts row exists for an uploaded document so a later
+ * promotion can ATTACH extracted salary/provisions to it (the store functions
+ * match on contracts.source_doc_id). Python used to create this row; the
+ * in-process upload path must do it explicitly. unit_scope is left NULL so the
+ * (district, unit, scope, start) unique key never collides with a crawled
+ * contract — each distinct upload gets its own attachable row. effective_start
+ * is derived from the school year when available (better display/sorting; v1
+ * extraction does not parse contract dates).
+ */
+async function ensureContractForUpload(
+  sourceDocId: number,
+  districtId: number,
+  unit: string,
+  schoolYear: string | null,
+): Promise<{ contractId: string | null }> {
+  const existing = await db.execute(sql`
+    SELECT id::text AS id FROM contracts WHERE source_doc_id = ${sourceDocId} LIMIT 1
+  `);
+  if (existing.rows.length) {
+    return { contractId: (existing.rows[0] as { id: string }).id };
+  }
+  let effectiveStart: string | null = null;
+  if (schoolYear) {
+    const m = /^(\d{4})-\d{2}$/.exec(schoolYear);
+    if (m) effectiveStart = `${m[1]}-07-01`;
+  }
+  const inserted = await db.execute(sql`
+    INSERT INTO contracts (district_id, bargaining_unit, effective_start, source_doc_id)
+    VALUES (${districtId}, ${unit}, ${effectiveStart}, ${sourceDocId})
+    ON CONFLICT (district_id, bargaining_unit, unit_scope, effective_start) DO NOTHING
+    RETURNING id::text AS id
+  `);
+  if (inserted.rows.length) {
+    return { contractId: (inserted.rows[0] as { id: string }).id };
+  }
+  // Conflict: a contract for the same (district, unit, scope, start) already
+  // exists pointing at another doc. The version is still recorded for audit, but
+  // promotion will find zero targets and surface needs_review.
+  console.warn(
+    `[admin] ensureContractForUpload: could not attach a contract for doc ${sourceDocId} ` +
+      `(district ${districtId}, unit ${unit}); promotion will report needs_review.`,
+  );
+  return { contractId: null };
 }
 
 async function handleCbaUpload(req: Request, res: Response): Promise<void> {
@@ -1555,7 +1636,13 @@ async function handleCbaUpload(req: Request, res: Response): Promise<void> {
       LIMIT 1
     `);
     if (succeeded.rows.length === 0) {
-      const extraction = spawnExtractionRetry(existingId);
+      await ensureContractForUpload(existingId, districtId, unit, schoolYear);
+      const { job, deduped } = await enqueueJob({
+        sourceDocId: existingId,
+        domain: "cba",
+        requestedBy: requestedByFromReq(req),
+        requestReason: "upload-reextract",
+      });
       res.json({
         ok: true,
         alreadyExists: true,
@@ -1563,7 +1650,7 @@ async function handleCbaUpload(req: Request, res: Response): Promise<void> {
         sourceDocId: existingId,
         districtName: district.name,
         bargainingUnit: unit,
-        extraction,
+        extraction: { status: "queued", jobId: job.id, deduped },
       });
       return;
     }
@@ -1624,8 +1711,15 @@ async function handleCbaUpload(req: Request, res: Response): Promise<void> {
     throw err;
   }
 
-  // Kick off single-doc extraction, reusing the retry spawn + status surface.
-  const extraction = spawnExtractionRetry(sourceDocId);
+  // Ensure a contracts row exists so promotion can attach extracted data, then
+  // enqueue a single-doc extraction job for the in-process worker to run.
+  await ensureContractForUpload(sourceDocId, districtId, unit, schoolYear);
+  const { job, deduped } = await enqueueJob({
+    sourceDocId,
+    domain: "cba",
+    requestedBy: requestedByFromReq(req),
+    requestReason: "upload",
+  });
 
   res.json({
     ok: true,
@@ -1634,7 +1728,7 @@ async function handleCbaUpload(req: Request, res: Response): Promise<void> {
     bargainingUnit: unit,
     schoolYear,
     fileBytes: buf.length,
-    extraction,
+    extraction: { status: "queued", jobId: job.id, deduped },
   });
 }
 
@@ -1656,6 +1750,135 @@ router.post("/admin/upload-cba", requireAdminToken, (req, res) => {
       res.status(500).json({ error: "Internal server error" });
     });
   });
+});
+
+// ---------------------------------------------------------------------------
+// Extraction engine (Task #175): in-process queue + immutable versions +
+// diff/promote. The worker (worker.ts) runs jobs one at a time; these endpoints
+// give the admin panel visibility (queue + est. duration), the per-document
+// version history, a candidate-vs-promoted diff, a manual PROMOTE action, and a
+// bounded "re-run flagged" bulk enqueue.
+// ---------------------------------------------------------------------------
+
+// How many flagged docs a single "re-run flagged" press may enqueue. Each job is
+// a paid Claude Vision call, so the bulk action is capped and reports the cap.
+const RERUN_FLAGGED_CAP = 100;
+
+router.get("/admin/extraction/queue", requireAdminToken, async (req, res) => {
+  try {
+    const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : 50;
+    const [stats, jobs] = await Promise.all([
+      getQueueStats(),
+      listJobs({ limit: Number.isFinite(limit) ? limit : 50 }),
+    ]);
+    res.json({ stats, jobs });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+router.get("/admin/extraction/versions", requireAdminToken, async (req, res) => {
+  try {
+    const docId = parseInt(String(req.query.docId ?? req.query.doc_id ?? ""), 10);
+    if (isNaN(docId) || docId < 1) {
+      res.status(400).json({ error: "docId is required and must be a positive integer" });
+      return;
+    }
+    const [versions, promotions] = await Promise.all([
+      getVersionsForDoc(docId),
+      getPromotions(docId),
+    ]);
+    res.json({ docId, versions, promotions });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+router.get("/admin/extraction/diff", requireAdminToken, async (req, res) => {
+  try {
+    const versionId = parseInt(String(req.query.versionId ?? req.query.version_id ?? ""), 10);
+    if (isNaN(versionId) || versionId < 1) {
+      res.status(400).json({ error: "versionId is required and must be a positive integer" });
+      return;
+    }
+    const diff = await diffAgainstPromoted(versionId);
+    if (!diff) {
+      res.status(404).json({ error: `Version ${versionId} not found` });
+      return;
+    }
+    res.json(diff);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+router.post("/admin/extraction/promote", requireAdminToken, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { versionId?: number | string };
+    const versionId = parseInt(String(body.versionId ?? ""), 10);
+    if (isNaN(versionId) || versionId < 1) {
+      res.status(400).json({ error: "versionId is required and must be a positive integer" });
+      return;
+    }
+    const result = await promoteVersion(versionId, { promotedBy: requestedByFromReq(req) });
+    if (!result.ok) {
+      res.status(404).json({ error: result.reason ?? "Promotion failed", ...result });
+      return;
+    }
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+router.post("/admin/extraction/rerun-flagged", requireAdminToken, async (req, res) => {
+  try {
+    const requestedBy = requestedByFromReq(req);
+    // Docs whose live data is low-confidence (provisions < 0.8 & unverified) or
+    // salary needs review — the human-review backlog. Bounded by RERUN_FLAGGED_CAP.
+    const flagged = await db.execute(sql`
+      SELECT DISTINCT c.source_doc_id::int AS id
+      FROM contracts c
+      WHERE c.source_doc_id IS NOT NULL AND (
+        EXISTS (
+          SELECT 1 FROM contract_provisions cp
+          WHERE cp.contract_id = c.id AND cp.confidence < 0.8 AND NOT cp.human_verified
+        )
+        OR EXISTS (
+          SELECT 1 FROM contract_salary_schedules s
+          WHERE s.contract_id = c.id AND s.needs_review
+        )
+      )
+      ORDER BY c.source_doc_id
+      LIMIT ${RERUN_FLAGGED_CAP}
+    `);
+    const docIds = (flagged.rows as Array<{ id: number }>).map((r) => r.id);
+    let enqueued = 0;
+    for (const id of docIds) {
+      const { deduped } = await enqueueJob({
+        sourceDocId: id,
+        domain: "cba",
+        requestedBy,
+        requestReason: "rerun-flagged",
+      });
+      if (!deduped) enqueued++;
+    }
+    const stats = await getQueueStats();
+    res.json({
+      candidates: docIds.length,
+      enqueued,
+      cap: RERUN_FLAGGED_CAP,
+      capped: docIds.length >= RERUN_FLAGGED_CAP,
+      stats,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 // ---------------------------------------------------------------------------

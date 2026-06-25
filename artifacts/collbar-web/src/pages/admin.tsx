@@ -4711,10 +4711,453 @@ function EditContractUnitSection() {
 }
 
 // ---------------------------------------------------------------------------
+// Extraction Engine tab (Task #175): durable queue + immutable versions +
+// diff/promote. Lets an admin watch the in-process worker drain the queue,
+// inspect a document's extraction history, diff a candidate against what's live,
+// promote it, and bulk re-run the low-confidence backlog.
+// ---------------------------------------------------------------------------
+
+interface QueueStatsT {
+  queued: number;
+  running: number;
+  done: number;
+  failed: number;
+  canceled: number;
+  avgDurationSec: number | null;
+  estRemainingSec: number | null;
+}
+interface ExtractionJobT {
+  id: string;
+  sourceDocId: string;
+  domain: string;
+  status: string;
+  requestedBy: string | null;
+  requestReason: string | null;
+  error: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+}
+interface VersionRowT {
+  id: string;
+  sourceDocId: string;
+  domain: string;
+  resultHash: string;
+  summary: unknown;
+  status: string;
+  duplicateOfVersionId: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  model: string | null;
+  promptVersion: string | null;
+}
+interface PromotionRowT {
+  domain: string;
+  versionId: string;
+  previousVersionId: string | null;
+  promotedBy: string | null;
+  promotedAt: string;
+}
+interface VersionDiffT {
+  versionId: string;
+  comparedToVersionId: string | null;
+  identical: boolean;
+  domain: string;
+  candidateSummary: unknown;
+  promotedSummary: unknown;
+  candidateResultHash: string;
+  promotedResultHash: string | null;
+}
+
+function fmtDuration(sec: number | null | undefined): string {
+  if (sec == null) return "—";
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}m ${s}s`;
+}
+
+function jobStatusColor(status: string): string {
+  switch (status) {
+    case "running":
+      return "text-blue-400";
+    case "queued":
+      return "text-amber-400";
+    case "done":
+      return "text-emerald-400";
+    case "failed":
+      return "text-red-400";
+    default:
+      return "text-slate-400";
+  }
+}
+
+function ExtractionEngineTab() {
+  const { data: session } = useAdminSession();
+  const isAuthenticated = session?.authenticated === true;
+  const queryClient = useQueryClient();
+
+  const [docIdInput, setDocIdInput] = useState("");
+  const [activeDocId, setActiveDocId] = useState<number | null>(null);
+  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
+  const [actionMsg, setActionMsg] = useState<string>("");
+
+  const { data: queue } = useQuery<{ stats: QueueStatsT; jobs: ExtractionJobT[] }>({
+    queryKey: ["/api/admin/extraction/queue"],
+    queryFn: () =>
+      fetch(apiUrl("/api/admin/extraction/queue"), { credentials: "include" }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    enabled: isAuthenticated,
+    refetchInterval: 5000,
+    retry: false,
+  });
+
+  const { data: versionsData } = useQuery<{
+    docId: number;
+    versions: VersionRowT[];
+    promotions: PromotionRowT[];
+  }>({
+    queryKey: ["/api/admin/extraction/versions", activeDocId],
+    queryFn: () =>
+      fetch(apiUrl(`/api/admin/extraction/versions?docId=${activeDocId}`), {
+        credentials: "include",
+      }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    enabled: isAuthenticated && activeDocId != null,
+    retry: false,
+  });
+
+  const { data: diff } = useQuery<VersionDiffT>({
+    queryKey: ["/api/admin/extraction/diff", selectedVersionId],
+    queryFn: () =>
+      fetch(apiUrl(`/api/admin/extraction/diff?versionId=${selectedVersionId}`), {
+        credentials: "include",
+      }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    enabled: isAuthenticated && selectedVersionId != null,
+    retry: false,
+  });
+
+  const promote = useMutation({
+    mutationFn: (versionId: string) =>
+      fetch(apiUrl("/api/admin/extraction/promote"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ versionId }),
+      }).then(async (r) => {
+        const j = (await r.json()) as { ok?: boolean; targets?: number; error?: string };
+        if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
+        return j;
+      }),
+    onSuccess: (j) => {
+      setActionMsg(
+        j.targets === 0
+          ? "Promoted, but matched 0 contract rows (needs_review — no contract attached to this doc)."
+          : `Promoted into ${j.targets} contract row(s).`,
+      );
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/extraction/versions", activeDocId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/extraction/diff", selectedVersionId] });
+    },
+    onError: (e: Error) => setActionMsg(e.message),
+  });
+
+  const rerunFlagged = useMutation({
+    mutationFn: () =>
+      fetch(apiUrl("/api/admin/extraction/rerun-flagged"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+      }).then(async (r) => {
+        const j = (await r.json()) as {
+          candidates?: number;
+          enqueued?: number;
+          cap?: number;
+          capped?: boolean;
+          error?: string;
+        };
+        if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
+        return j;
+      }),
+    onSuccess: (j) => {
+      setActionMsg(
+        `Re-run flagged: ${j.enqueued} job(s) enqueued of ${j.candidates} flagged doc(s)` +
+          (j.capped ? ` (capped at ${j.cap}).` : "."),
+      );
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/extraction/queue"] });
+    },
+    onError: (e: Error) => setActionMsg(e.message),
+  });
+
+  if (!isAuthenticated) {
+    return <LoginRequiredCard onLogin={goToLogin} />;
+  }
+
+  const stats = queue?.stats;
+  const jobs = queue?.jobs ?? [];
+  const promotedIds = new Set((versionsData?.promotions ?? []).map((p) => p.versionId));
+
+  return (
+    <div className="space-y-8">
+      <section className="space-y-2">
+        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
+          Extraction Engine
+        </h2>
+        <p className="text-xs text-slate-500 leading-relaxed">
+          Uploads and re-runs are queued and processed in-process, one at a time. Every run is saved
+          as an immutable version; customer-facing data only changes when you promote a version.
+          First-time uploads auto-promote; re-runs require a manual promote after you review the diff.
+        </p>
+      </section>
+
+      {/* Queue stats */}
+      <section className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {[
+          { label: "Queued", value: stats?.queued ?? 0, color: "text-amber-400" },
+          { label: "Running", value: stats?.running ?? 0, color: "text-blue-400" },
+          { label: "Done", value: stats?.done ?? 0, color: "text-emerald-400" },
+          { label: "Failed", value: stats?.failed ?? 0, color: "text-red-400" },
+        ].map((c) => (
+          <div key={c.label} className="rounded border border-slate-800 bg-slate-900/40 p-3">
+            <div className={`text-2xl font-semibold ${c.color}`}>{c.value}</div>
+            <div className="text-[10px] uppercase tracking-widest text-slate-500">{c.label}</div>
+          </div>
+        ))}
+      </section>
+      <div className="flex items-center justify-between text-xs text-slate-400">
+        <span>
+          Avg job: <span className="text-slate-200">{fmtDuration(stats?.avgDurationSec)}</span> · Est.
+          time to drain:{" "}
+          <span className="text-slate-200">{fmtDuration(stats?.estRemainingSec)}</span>
+        </span>
+        <button
+          onClick={() => rerunFlagged.mutate()}
+          disabled={rerunFlagged.isPending}
+          className="text-xs px-3 py-1.5 rounded border border-slate-700 text-slate-300 hover:border-blue-600 hover:text-blue-300 transition-colors disabled:opacity-50"
+        >
+          {rerunFlagged.isPending ? "Enqueuing…" : "Re-run flagged docs"}
+        </button>
+      </div>
+
+      {actionMsg && (
+        <div className="rounded border border-slate-700 bg-slate-900/60 px-3 py-2 text-xs text-slate-300">
+          {actionMsg}
+        </div>
+      )}
+
+      {/* Jobs table */}
+      <section className="space-y-2">
+        <h3 className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest">
+          Recent jobs
+        </h3>
+        <div className="overflow-x-auto rounded border border-slate-800">
+          <table className="w-full text-xs">
+            <thead className="bg-slate-900/60 text-slate-500">
+              <tr>
+                <th className="text-left px-3 py-2 font-medium">Job</th>
+                <th className="text-left px-3 py-2 font-medium">Doc</th>
+                <th className="text-left px-3 py-2 font-medium">Domain</th>
+                <th className="text-left px-3 py-2 font-medium">Status</th>
+                <th className="text-left px-3 py-2 font-medium">By</th>
+                <th className="text-left px-3 py-2 font-medium">Reason</th>
+                <th className="text-left px-3 py-2 font-medium">Created</th>
+              </tr>
+            </thead>
+            <tbody>
+              {jobs.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-3 py-4 text-center text-slate-600">
+                    No jobs yet.
+                  </td>
+                </tr>
+              ) : (
+                jobs.map((j) => (
+                  <tr key={j.id} className="border-t border-slate-800/60">
+                    <td className="px-3 py-2 text-slate-400">{j.id}</td>
+                    <td className="px-3 py-2">
+                      <button
+                        onClick={() => {
+                          setDocIdInput(j.sourceDocId);
+                          setActiveDocId(parseInt(j.sourceDocId, 10));
+                          setSelectedVersionId(null);
+                        }}
+                        className="text-blue-400 hover:text-blue-300 underline underline-offset-2"
+                      >
+                        {j.sourceDocId}
+                      </button>
+                    </td>
+                    <td className="px-3 py-2 text-slate-300">{j.domain}</td>
+                    <td className={`px-3 py-2 ${jobStatusColor(j.status)}`}>
+                      {j.status}
+                      {j.status === "failed" && j.error ? (
+                        <span className="block text-[10px] text-red-500/80 truncate max-w-[180px]">
+                          {j.error}
+                        </span>
+                      ) : null}
+                    </td>
+                    <td className="px-3 py-2 text-slate-400">{j.requestedBy ?? "—"}</td>
+                    <td className="px-3 py-2 text-slate-500">{j.requestReason ?? "—"}</td>
+                    <td className="px-3 py-2 text-slate-500">
+                      {new Date(j.createdAt).toLocaleString()}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* Version history lookup */}
+      <section className="space-y-3">
+        <h3 className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest">
+          Version history & promote
+        </h3>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            const n = parseInt(docIdInput, 10);
+            setActiveDocId(Number.isFinite(n) && n > 0 ? n : null);
+            setSelectedVersionId(null);
+          }}
+          className="flex items-center gap-2"
+        >
+          <input
+            value={docIdInput}
+            onChange={(e) => setDocIdInput(e.target.value)}
+            placeholder="source document id"
+            className="bg-slate-900 border border-slate-700 rounded px-3 py-1.5 text-xs text-slate-200 w-48 focus:outline-none focus:border-blue-600"
+          />
+          <button
+            type="submit"
+            className="text-xs px-3 py-1.5 rounded border border-slate-700 text-slate-300 hover:border-blue-600 hover:text-blue-300 transition-colors"
+          >
+            Load versions
+          </button>
+        </form>
+
+        {activeDocId != null && (versionsData?.versions.length ?? 0) === 0 && (
+          <p className="text-xs text-slate-600">No versions recorded for doc {activeDocId}.</p>
+        )}
+
+        {(versionsData?.versions.length ?? 0) > 0 && (
+          <div className="overflow-x-auto rounded border border-slate-800">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-900/60 text-slate-500">
+                <tr>
+                  <th className="text-left px-3 py-2 font-medium">Version</th>
+                  <th className="text-left px-3 py-2 font-medium">Domain</th>
+                  <th className="text-left px-3 py-2 font-medium">Hash</th>
+                  <th className="text-left px-3 py-2 font-medium">Created</th>
+                  <th className="text-left px-3 py-2 font-medium">State</th>
+                  <th className="text-left px-3 py-2 font-medium">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {versionsData?.versions.map((v) => {
+                  const isPromoted = promotedIds.has(v.id);
+                  return (
+                    <tr key={v.id} className="border-t border-slate-800/60">
+                      <td className="px-3 py-2 text-slate-400">{v.id}</td>
+                      <td className="px-3 py-2 text-slate-300">{v.domain}</td>
+                      <td className="px-3 py-2 font-mono text-slate-500">
+                        {v.resultHash.slice(0, 10)}
+                        {v.duplicateOfVersionId ? (
+                          <span className="ml-1 text-[10px] text-slate-600">(dup)</span>
+                        ) : null}
+                      </td>
+                      <td className="px-3 py-2 text-slate-500">
+                        {new Date(v.createdAt).toLocaleString()}
+                      </td>
+                      <td className="px-3 py-2">
+                        {isPromoted ? (
+                          <span className="text-emerald-400">● promoted (live)</span>
+                        ) : (
+                          <span className="text-slate-500">candidate</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 space-x-2">
+                        <button
+                          onClick={() => setSelectedVersionId(v.id)}
+                          className="text-blue-400 hover:text-blue-300 underline underline-offset-2"
+                        >
+                          Diff
+                        </button>
+                        {!isPromoted && (
+                          <button
+                            onClick={() => promote.mutate(v.id)}
+                            disabled={promote.isPending}
+                            className="text-emerald-400 hover:text-emerald-300 underline underline-offset-2 disabled:opacity-50"
+                          >
+                            Promote
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Diff view */}
+        {selectedVersionId && diff && (
+          <div className="rounded border border-slate-800 bg-slate-900/40 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h4 className="text-xs font-semibold text-slate-300">
+                Version {diff.versionId} ({diff.domain}){" "}
+                {diff.comparedToVersionId
+                  ? `vs promoted ${diff.comparedToVersionId}`
+                  : "— nothing promoted yet"}
+              </h4>
+              <span
+                className={`text-[10px] px-2 py-0.5 rounded ${
+                  diff.identical
+                    ? "bg-slate-800 text-slate-400"
+                    : "bg-amber-900/40 text-amber-300"
+                }`}
+              >
+                {diff.identical ? "identical to live" : "differs from live"}
+              </span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">
+                  Candidate
+                </div>
+                <pre className="text-[11px] text-slate-300 bg-slate-950/60 rounded p-2 overflow-x-auto max-h-64">
+                  {JSON.stringify(diff.candidateSummary, null, 2)}
+                </pre>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">
+                  Promoted (live)
+                </div>
+                <pre className="text-[11px] text-slate-400 bg-slate-950/60 rounded p-2 overflow-x-auto max-h-64">
+                  {diff.promotedSummary
+                    ? JSON.stringify(diff.promotedSummary, null, 2)
+                    : "— none —"}
+                </pre>
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page shell with tab routing
 // ---------------------------------------------------------------------------
 
-type TabKey = "overview" | "crawl-report" | "extraction-report" | "review-queue" | "alerts" | "eis-crosscheck" | "customers" | "upload";
+type TabKey = "overview" | "crawl-report" | "extraction-report" | "extraction" | "review-queue" | "alerts" | "eis-crosscheck" | "customers" | "upload";
 
 function useAlertsPendingCount() {
   return useQuery<{ pendingCount: number }>({
@@ -4732,6 +5175,7 @@ const TABS: { key: TabKey; label: string; path: string }[] = [
   { key: "overview", label: "Overview", path: "/admin" },
   { key: "crawl-report", label: "Crawl Report", path: "/admin/crawl-report" },
   { key: "extraction-report", label: "Extraction", path: "/admin/extraction-report" },
+  { key: "extraction", label: "Extraction Engine", path: "/admin/extraction" },
   { key: "upload", label: "Upload CBA", path: "/admin/upload" },
   { key: "review-queue", label: "Review Queue", path: "/admin/review-queue" },
   { key: "alerts", label: "Alerts", path: "/admin/alerts" },
@@ -4744,6 +5188,7 @@ function activeTab(location: string): TabKey {
   if (location.includes("/admin/upload")) return "upload";
   if (location.includes("review-queue")) return "review-queue";
   if (location.includes("extraction-report")) return "extraction-report";
+  if (location.includes("/admin/extraction")) return "extraction";
   if (location.includes("crawl-report")) return "crawl-report";
   if (location.includes("eis-crosscheck")) return "eis-crosscheck";
   if (location.includes("customers")) return "customers";
@@ -4836,6 +5281,7 @@ export default function AdminPage() {
         {tab === "overview" && <OverviewTab />}
         {tab === "crawl-report" && <CrawlReportTab />}
         {tab === "extraction-report" && <ExtractionReportTab />}
+        {tab === "extraction" && <ExtractionEngineTab />}
         {tab === "upload" && (
           <div className="space-y-12">
             <UploadCbaTab />

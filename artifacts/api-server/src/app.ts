@@ -387,6 +387,106 @@ async function runMigrations(): Promise<void> {
     `);
 
     logger.info("Migration OK: vision_extraction_cache ensured");
+
+    // -----------------------------------------------------------------------
+    // In-process extraction job queue + immutable versions + promotion pointer
+    // (Task #175). Operational tables (managed here like vision_extraction_cache,
+    // not by Drizzle). The worker (src/extraction/jobs/worker.ts) runs Claude
+    // Vision extraction IN PROCESS — no Python shell-out, no detached process —
+    // and records every run as an immutable extraction_versions row. Live domain
+    // tables hold only the PROMOTED projection (written by the existing store
+    // functions on promote), so customer reads are unchanged. Additive +
+    // idempotent.
+    // -----------------------------------------------------------------------
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS extraction_jobs (
+        id             bigserial PRIMARY KEY,
+        source_doc_id  bigint NOT NULL REFERENCES source_documents(id) ON DELETE CASCADE,
+        domain         text NOT NULL,
+        status         text NOT NULL DEFAULT 'queued',
+        priority       integer NOT NULL DEFAULT 100,
+        attempts       integer NOT NULL DEFAULT 0,
+        max_attempts   integer NOT NULL DEFAULT 1,
+        model          text,
+        requested_by   text,
+        request_reason text,
+        error          text,
+        result         jsonb,
+        leased_at      timestamptz,
+        started_at     timestamptz,
+        finished_at    timestamptz,
+        created_at     timestamptz NOT NULL DEFAULT NOW(),
+        updated_at     timestamptz NOT NULL DEFAULT NOW(),
+        CONSTRAINT extraction_jobs_domain_check CHECK (domain IN ('salary','provisions','cba')),
+        CONSTRAINT extraction_jobs_status_check CHECK (status IN ('queued','running','done','failed','canceled'))
+      )
+    `);
+    // At most one ACTIVE (queued|running) job per source document — enforces the
+    // "one job per doc" enqueue dedupe at the DB level (a 'cba' job covers both
+    // domains, so we never run overlapping work for the same document).
+    await db.execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS extraction_jobs_active_doc_uniq
+        ON extraction_jobs (source_doc_id)
+        WHERE status IN ('queued','running')
+    `);
+    // Claim ordering: lowest priority value first, then oldest.
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS extraction_jobs_claim_idx
+        ON extraction_jobs (priority, id)
+        WHERE status = 'queued'
+    `);
+
+    // Immutable per-(doc,domain) extraction results. One row per successful job
+    // (audit trail). normalized = the domain payload ({schedules:[...]} or
+    // {contracts:[...]}); summary = counts/confidence/cost. duplicate_of_version_id
+    // links a re-run that produced byte-identical output to its predecessor.
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS extraction_versions (
+        id                      bigserial PRIMARY KEY,
+        source_doc_id           bigint NOT NULL REFERENCES source_documents(id) ON DELETE CASCADE,
+        domain                  text NOT NULL,
+        job_id                  bigint REFERENCES extraction_jobs(id) ON DELETE SET NULL,
+        file_hash               text,
+        model                   text,
+        model_version           text,
+        prompt_version          text,
+        render_version          text,
+        result_hash             text NOT NULL,
+        normalized              jsonb NOT NULL,
+        summary                 jsonb NOT NULL,
+        status                  text NOT NULL DEFAULT 'success',
+        duplicate_of_version_id bigint REFERENCES extraction_versions(id) ON DELETE SET NULL,
+        created_by              text,
+        created_at              timestamptz NOT NULL DEFAULT NOW(),
+        CONSTRAINT extraction_versions_domain_check CHECK (domain IN ('salary','provisions'))
+      )
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS extraction_versions_doc_idx
+        ON extraction_versions (source_doc_id, domain, created_at DESC)
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS extraction_versions_hash_idx
+        ON extraction_versions (source_doc_id, domain, result_hash)
+    `);
+
+    // The currently-promoted version per (doc, domain). The live domain tables
+    // mirror exactly these versions; promoting flips the pointer and re-projects
+    // via the existing store functions.
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS extraction_promotions (
+        source_doc_id       bigint NOT NULL REFERENCES source_documents(id) ON DELETE CASCADE,
+        domain              text NOT NULL,
+        version_id          bigint NOT NULL REFERENCES extraction_versions(id),
+        previous_version_id bigint REFERENCES extraction_versions(id),
+        promoted_by         text,
+        promoted_at         timestamptz NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (source_doc_id, domain),
+        CONSTRAINT extraction_promotions_domain_check CHECK (domain IN ('salary','provisions'))
+      )
+    `);
+
+    logger.info("Migration OK: extraction job queue + versions + promotions ensured");
   } catch (err) {
     logger.warn({ err }, "Migration failed — will retry on next restart");
     return;
