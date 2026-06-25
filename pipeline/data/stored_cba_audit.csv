@@ -308,3 +308,11 @@ doc_id,district_id,district_name,state,school_year,bargaining_unit,classificatio
 1086,22111,Test District tstrq-1782322196736-466023,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782322196736-466023/bulk-ids.pdf
 1087,22111,Test District tstrq-1782322196736-466023,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782322196736-466023/bulk-doc.pdf
 1088,10732,CUSD 200,IL,,teachers,not-CBA,title=1 body=1 agenda=0 policy=0/0 kw=11 -> not-CBA [recheck source=ocr text_chars=0 ocr_chars=3067 ocr_conf=85.8 ocr_reason=-],https://files-backend.assets.thrillshare.com/documents/asset/uploaded_file/3696/Cusd200/461fa813-c728-4cf6-bb95-355f4238a004/Appendix_B_-_Salary_Grades_-_Beginning_with_th.pdf?disposition=inline
+1098,10589,Mattoon CUSD 2,IL,,teachers,unreadable,file_not_found,upload://tstdoc-1782339923325-47816-ok
+1099,10589,Mattoon CUSD 2,IL,,teachers,unreadable,file_not_found,upload://tstdoc-1782339923325-47816-missing
+1100,22116,Test District tstrq-1782339936421-554733,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782339936421-554733/good-latest.pdf
+1101,22116,Test District tstrq-1782339936421-554733,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782339936421-554733/bad.pdf
+1102,22116,Test District tstrq-1782339936421-554733,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782339936421-554733/norun.pdf
+1103,22116,Test District tstrq-1782339936421-554733,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782339936421-554733/bulk-ids.pdf
+1104,22116,Test District tstrq-1782339936421-554733,IL,,teachers,unreadable,file_not_found,https://example.test/tstrq-1782339936421-554733/bulk-doc.pdf
+1105,22117,ZZ Unit Test tstunit-1782339949061-64330,IL,,teachers,unreadable,file_not_found,upload://tstunit-1782339949061-64330
