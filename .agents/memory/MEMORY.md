@@ -1,6 +1,6 @@
 - [ISBE Class Size Report loading](il-classsize-loader.md) — pandas MultiIndex header needs "Unnamed:" token filtering when flattening District Data sheet
 - [IL cost-impact estimate](il-cost-impact.md) — formula, joins, and NULL-safety rules for est_annual_cost_impact on IL settlements
-- [IL crawl workflow](il-crawl-workflow.md) — crawl runs as "pipeline: IL CBA Crawl" managed workflow; restart it to run again or add --search-fallback.
+- [Pipeline workflows on-demand](pipeline-workflows-on-demand.md) — IL crawl/extraction/audit REMOVED from workspace (auto-started→starved dev, crashed app); run via admin POST endpoints, never re-add as workflows.
 - [IL crawl discovery boosts](il-crawl-discovery-boosts.md) — sitemap + NixOS Playwright JS-render + on-page doc discovery; %PDF-verify before find; html_contract source_type plumbed crawler→DB→extractor.
 - [Replit background processes](replit-bg-processes.md) — Replit kills detached/nohup/fork child processes between tool calls; only managed workflows survive long-running tasks.
 - [ISBE directory XLS format](isbe-directory-format.md) — sheet "1 Public Dist & Sch"; RCDTS = 9-digit RCD col + 2-digit Type col = 11 digits; filter RecType=='Dist' AND School=='0000'.
