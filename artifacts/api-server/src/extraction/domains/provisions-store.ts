@@ -2,13 +2,16 @@
 // per-document provisions domain (resolve PDF -> vision extract -> Option B verify
 // -> route to unit contracts -> store). Mirrors salary-store.ts.
 //
-// Each target contract is rewritten as one delete-then-insert TRANSACTION — even
-// when it gets ZERO provisions — so stale/leaked rows clear. One bad contract is
-// recorded and skipped, never poisoning the rest of the document's batch.
+// Each target contract is rewritten as one TRANSACTION — even when it gets ZERO
+// provisions — so stale/leaked rows clear. One bad contract is recorded and
+// skipped, never poisoning the rest of the document's batch.
 //
-// NOTE: delete-then-insert replaces ALL of a contract's provision rows (mirroring
-// the salary domain). Live runs would therefore overwrite human_verified rows;
-// re-run/merge UX is Task #175. Validation in this task uses dryRun.
+// PRESERVE-VERIFIED, REPLACE-REST: human_verified provision rows survive a
+// re-run/promote. The store keeps every human_verified row, deletes only the
+// unverified rows, and re-inserts the new extraction EXCEPT any provision that
+// collides (same category + provision_key) with a verified row — the admin's
+// reviewed value is authoritative and wins. This means promoting a fresh
+// extraction never silently discards manual review work.
 
 import crypto from "node:crypto";
 import { db } from "@workspace/db";
@@ -33,7 +36,8 @@ export interface ContractProvisionResult {
   contractId: string;
   bargainingUnit: string;
   status: "ok" | "store_error";
-  provisions: number;
+  provisions: number; // rows newly inserted from this extraction
+  preserved: number; // human_verified rows kept from the prior promotion
   flagged: number; // confidence < 0.8 -> human review queue
 }
 
@@ -98,31 +102,91 @@ export function mapProvisionsToTargets(
   return { byContract, unattributed };
 }
 
+interface StoreOutcome {
+  inserted: number; // rows written from this extraction
+  preserved: number; // human_verified rows kept untouched
+}
+
+// Canonical identity of a provision WITHIN a contract: (category, provision_key).
+// Mirrors dedupeProvisions' key so a re-extracted provision matches the verified
+// row it would replace.
+function provKey(
+  category: string | null,
+  provisionKey: string | null,
+): string {
+  return `${category ?? "\u0000"}\u0001${provisionKey ?? "\u0000"}`;
+}
+
 async function storeProvisionsForContract(
   contractId: string,
   provisions: ProvisionItem[],
   dryRun: boolean,
-): Promise<number> {
-  if (dryRun) return provisions.length;
-  return db.transaction(async (tx) => {
-    await tx.execute(
-      sql`DELETE FROM contract_provisions WHERE contract_id = ${contractId}`,
-    );
-    if (!provisions.length) return 0;
-    const values = sql.join(
-      provisions.map(
-        (p) =>
-          sql`(${contractId}, ${p.category}, ${p.provisionKey}, ${p.valueNumeric}, ${p.valueText}, ${p.unit}, ${p.clauseExcerpt}, ${p.pageRef}, ${p.confidence})`,
-      ),
-      sql`, `,
-    );
-    await tx.execute(sql`
-      INSERT INTO contract_provisions
-        (contract_id, category, provision_key, value_numeric, value_text,
-         unit, clause_excerpt, page_ref, confidence)
-      VALUES ${values}
+): Promise<StoreOutcome> {
+  if (dryRun) {
+    // Project (read-only) what a real promote would do: keep human_verified rows,
+    // drop re-extracted provisions that collide with them.
+    const vres = await db.execute(sql`
+      SELECT category, provision_key AS "provisionKey"
+      FROM contract_provisions
+      WHERE contract_id = ${contractId} AND human_verified IS TRUE
     `);
-    return provisions.length;
+    const verifiedKeys = new Set(
+      vres.rows.map((r) =>
+        provKey(
+          (r as { category: string | null }).category,
+          (r as { provisionKey: string | null }).provisionKey,
+        ),
+      ),
+    );
+    const inserted = provisions.filter(
+      (p) => !verifiedKeys.has(provKey(p.category, p.provisionKey)),
+    ).length;
+    return { inserted, preserved: verifiedKeys.size };
+  }
+  return db.transaction(async (tx) => {
+    // 1) Snapshot the verified rows' identities so we can both keep them and
+    //    avoid re-inserting a duplicate of any of them.
+    const vres = await tx.execute(sql`
+      SELECT category, provision_key AS "provisionKey"
+      FROM contract_provisions
+      WHERE contract_id = ${contractId} AND human_verified IS TRUE
+    `);
+    const verifiedKeys = new Set(
+      vres.rows.map((r) =>
+        provKey(
+          (r as { category: string | null }).category,
+          (r as { provisionKey: string | null }).provisionKey,
+        ),
+      ),
+    );
+
+    // 2) Clear only the UNVERIFIED rows — the human_verified rows survive.
+    await tx.execute(sql`
+      DELETE FROM contract_provisions
+      WHERE contract_id = ${contractId} AND human_verified IS NOT TRUE
+    `);
+
+    // 3) Insert the new extraction, minus any provision whose identity collides
+    //    with a verified row (the reviewed value is authoritative).
+    const toInsert = provisions.filter(
+      (p) => !verifiedKeys.has(provKey(p.category, p.provisionKey)),
+    );
+    if (toInsert.length) {
+      const values = sql.join(
+        toInsert.map(
+          (p) =>
+            sql`(${contractId}, ${p.category}, ${p.provisionKey}, ${p.valueNumeric}, ${p.valueText}, ${p.unit}, ${p.clauseExcerpt}, ${p.pageRef}, ${p.confidence})`,
+        ),
+        sql`, `,
+      );
+      await tx.execute(sql`
+        INSERT INTO contract_provisions
+          (contract_id, category, provision_key, value_numeric, value_text,
+           unit, clause_excerpt, page_ref, confidence)
+        VALUES ${values}
+      `);
+    }
+    return { inserted: toInsert.length, preserved: verifiedKeys.size };
   });
 }
 
@@ -153,12 +217,13 @@ export async function storeProvisionsForDoc(
     const items = byContract.get(t.contractId) ?? [];
     const flagged = items.filter((p) => p.confidence < 0.8).length;
     try {
-      const n = await storeProvisionsForContract(t.contractId, items, dryRun);
+      const out = await storeProvisionsForContract(t.contractId, items, dryRun);
       results.push({
         contractId: t.contractId,
         bargainingUnit: t.bargainingUnit,
         status: "ok",
-        provisions: n,
+        provisions: out.inserted,
+        preserved: out.preserved,
         flagged,
       });
     } catch (err) {
@@ -171,9 +236,18 @@ export async function storeProvisionsForDoc(
         bargainingUnit: t.bargainingUnit,
         status: "store_error",
         provisions: 0,
+        preserved: 0,
         flagged: 0,
       });
     }
+  }
+
+  const preserved = results.reduce((s, r) => s + r.preserved, 0);
+  if (preserved) {
+    logger.info(
+      { sourceDocId, preserved },
+      "provisions: kept human_verified row(s) across re-run; not overwritten",
+    );
   }
   return { results, unattributed };
 }

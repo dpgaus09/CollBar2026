@@ -30,7 +30,26 @@ vi.mock("../pdf/renderer", () => ({
   openPdf: vi.fn(async () => ({ destroy: vi.fn() })),
 }));
 
-import { runProvisionsForDoc } from "./provisions-store";
+import { runProvisionsForDoc, storeProvisionsForDoc } from "./provisions-store";
+import type { ExtractedContract, ProvisionItem } from "../types";
+
+function prov(
+  category: ProvisionItem["category"],
+  provisionKey: string,
+  overrides: Partial<ProvisionItem> = {},
+): ProvisionItem {
+  return {
+    category,
+    provisionKey,
+    valueNumeric: null,
+    valueText: "x",
+    unit: null,
+    clauseExcerpt: null,
+    pageRef: 1,
+    confidence: 0.9,
+    ...overrides,
+  };
+}
 
 function extractionResult(status: ExtractionStatus, contracts: unknown[] = []) {
   return {
@@ -79,5 +98,86 @@ describe("runProvisionsForDoc — fail-closed (never wipe rows on failed extract
     expect(res.status).toBe("ok");
     expect(h.dbExecute).toHaveBeenCalled(); // fetched targets
     expect(h.dbTransaction).toHaveBeenCalledTimes(1); // delete-then-insert (clears stale)
+  });
+});
+
+// A re-run/promote must never throw away manual review work. The store keeps
+// human_verified rows, deletes only the unverified rows, and drops re-extracted
+// provisions that collide (category + provision_key) with a verified row.
+describe("storeProvisionsForDoc — preserves human_verified rows (Task #177)", () => {
+  // The store issues exactly three statements per contract, in order:
+  //   1) SELECT verified keys  2) DELETE unverified  3) INSERT new rows.
+  // An INSERT is only issued when there is at least one row to insert.
+  function fakeTx(verifiedRows: Array<{ category: string; provisionKey: string }>) {
+    const calls: string[] = [];
+    const tx = {
+      execute: vi.fn(async () => {
+        const step = calls.length;
+        if (step === 0) {
+          calls.push("select");
+          return { rows: verifiedRows };
+        }
+        calls.push(step === 1 ? "delete" : "insert");
+        return { rows: [] };
+      }),
+    };
+    return { tx, calls };
+  }
+
+  it("keeps verified rows and skips re-extracted provisions that collide with them", async () => {
+    h.dbExecute.mockResolvedValueOnce({
+      rows: [{ contractId: "7", bargainingUnit: "teachers" }],
+    });
+    const { tx, calls } = fakeTx([
+      { category: "compensation", provisionKey: "base_salary" },
+    ]);
+    h.dbTransaction.mockImplementation(
+      async (cb: (t: typeof tx) => unknown) => cb(tx),
+    );
+
+    const contracts: ExtractedContract[] = [
+      {
+        bargainingUnit: "teachers",
+        unitScope: null,
+        provisions: [
+          prov("compensation", "base_salary"), // collides with verified -> skipped
+          prov("leave", "sick_days"), // new -> inserted
+        ],
+      },
+    ];
+
+    const res = await storeProvisionsForDoc("42", contracts, { dryRun: false });
+    const r = res.results[0];
+    expect(r.status).toBe("ok");
+    expect(r.preserved).toBe(1); // base_salary kept
+    expect(r.provisions).toBe(1); // only sick_days inserted
+    // SELECT verified -> DELETE unverified -> INSERT new (collision dropped).
+    expect(calls).toEqual(["select", "delete", "insert"]);
+  });
+
+  it("dry-run projects preserved/inserted without opening a transaction", async () => {
+    h.dbExecute
+      .mockResolvedValueOnce({
+        rows: [{ contractId: "7", bargainingUnit: "teachers" }],
+      }) // fetchProvisionTargets
+      .mockResolvedValueOnce({
+        rows: [{ category: "compensation", provisionKey: "base_salary" }],
+      }); // verified-keys read
+
+    const contracts: ExtractedContract[] = [
+      {
+        bargainingUnit: "teachers",
+        unitScope: null,
+        provisions: [
+          prov("compensation", "base_salary"), // collides -> not counted as inserted
+          prov("leave", "sick_days"),
+        ],
+      },
+    ];
+
+    const res = await storeProvisionsForDoc("42", contracts, { dryRun: true });
+    expect(res.results[0].preserved).toBe(1);
+    expect(res.results[0].provisions).toBe(1);
+    expect(h.dbTransaction).not.toHaveBeenCalled();
   });
 });

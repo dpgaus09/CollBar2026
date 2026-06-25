@@ -4852,15 +4852,24 @@ function ExtractionEngineTab() {
         credentials: "include",
         body: JSON.stringify({ versionId }),
       }).then(async (r) => {
-        const j = (await r.json()) as { ok?: boolean; targets?: number; error?: string };
+        const j = (await r.json()) as {
+          ok?: boolean;
+          targets?: number;
+          preservedVerified?: number;
+          error?: string;
+        };
         if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
         return j;
       }),
     onSuccess: (j) => {
+      const kept =
+        j.preservedVerified && j.preservedVerified > 0
+          ? ` Kept ${j.preservedVerified} manually-verified provision row(s).`
+          : "";
       setActionMsg(
         j.targets === 0
           ? "Promoted, but matched 0 contract rows (needs_review — no contract attached to this doc)."
-          : `Promoted into ${j.targets} contract row(s).`,
+          : `Promoted into ${j.targets} contract row(s).${kept}`,
       );
       queryClient.invalidateQueries({ queryKey: ["/api/admin/extraction/versions", activeDocId] });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/extraction/diff", selectedVersionId] });

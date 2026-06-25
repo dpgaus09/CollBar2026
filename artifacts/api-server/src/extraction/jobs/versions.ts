@@ -210,6 +210,8 @@ export interface PromoteResult {
   domain: VersionDomain;
   previousVersionId: string | null;
   targets: number;
+  // provisions only: human_verified rows kept (not overwritten) by this promote.
+  preservedVerified?: number;
   store?: unknown;
   reason?: string;
 }
@@ -261,6 +263,7 @@ export async function promoteVersion(
 
     let store: unknown;
     let targets = 0;
+    let preservedVerified: number | undefined;
     if (domain === "salary") {
       const schedules =
         ((v.normalized as { schedules?: SalarySchedule[] })?.schedules) ?? [];
@@ -273,6 +276,9 @@ export async function promoteVersion(
       const r = await storeProvisionsForDoc(v.sourceDocId, contracts);
       store = r;
       targets = r.results.length;
+      // human_verified rows are kept (not overwritten) by the store — surface the
+      // total so the admin sees that prior manual review survived the promote.
+      preservedVerified = r.results.reduce((s, x) => s + x.preserved, 0);
     } else if (domain === "settlement") {
       const settlements =
         ((v.normalized as { settlements?: DerivedSettlement[] })?.settlements) ??
@@ -334,6 +340,7 @@ export async function promoteVersion(
       domain,
       previousVersionId,
       targets,
+      preservedVerified,
       store,
       reason: targets === 0 ? "no_contract_targets" : undefined,
     };
