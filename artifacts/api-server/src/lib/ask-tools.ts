@@ -22,7 +22,8 @@ export type AskResultType =
   | "clause"
   | "comparables"
   | "factfinding"
-  | "final_offer";
+  | "final_offer"
+  | "salary";
 
 export interface AskResult {
   type: AskResultType;
@@ -208,6 +209,23 @@ export const ASK_TOOL_DEFS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "get_salary_schedule",
+    description:
+      "Retrieve the extracted salary-schedule grid (actual compensation DOLLAR amounts by education lane and experience step) for Illinois districts. Returns the most recent contract's schedule for the bargaining unit (default teachers), with the starting/base salary, the MA-lane base, the schedule maximum, plus the lane labels and step count. Optionally look up a specific cell by step and/or education lane. Use for compensation-amount questions like 'what is MA step 1 in Naperville?', 'what's the starting teacher salary?', or 'what does the BA lane top out at?'. (For base-increase PERCENTAGES use search_settlements instead.)",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        district_name: { type: "string", description: "Substring match on district name. Salary grids are district-specific, so name a district (or county) to scope the lookup." },
+        county: { type: "string", description: "Exact county name (to disambiguate districts)." },
+        bargaining_unit: { type: "string", description: "e.g. 'teachers' (default), 'support_staff'. CBAs never mix units." },
+        step: { type: "integer", description: "Experience step to look up (e.g. 1 for the first step). Combine with lane for a single cell." },
+        lane: { type: "string", description: "Education lane to look up, e.g. 'BA', 'MA', 'MA+30'. Matched against the grid's lane labels." },
+        limit: { type: "integer", description: "Max districts (1-10, default 3)." },
+      },
+      additionalProperties: false,
+    },
+  },
 ];
 
 export const ASK_TOOL_NAMES = new Set(ASK_TOOL_DEFS.map((t) => t.name));
@@ -222,6 +240,7 @@ export const ASK_TOOL_LABELS: Record<string, string> = {
   get_comparables: "Comparing peer districts…",
   search_factfinding: "Reviewing fact-finding reports…",
   search_final_offers: "Comparing board vs union final offers…",
+  get_salary_schedule: "Looking up salary schedules…",
 };
 
 // ---------------------------------------------------------------------------
@@ -266,6 +285,18 @@ function factfindingPath(id: number): string {
 }
 function finalOffersPath(id: number): string {
   return `/dashboard/${id}/final-offers`;
+}
+// The salary grid lives on the district overview page; the selected bargaining
+// unit is carried in `?unit=` (teachers is the default and needs no param, so
+// the URL stays clean and matches the dashboard's own unit-switcher behaviour).
+function salaryPath(id: number, unit: string): string {
+  return `/dashboard/${id}${unit && unit !== "teachers" ? qs({ unit }) : ""}`;
+}
+
+// Format a dollar amount for the human-readable result-card snippet.
+function asSalary(val: number | null): string | null {
+  if (val == null || !Number.isFinite(val)) return null;
+  return `$${Math.round(val).toLocaleString("en-US")}`;
 }
 
 // Status labels used in the data handed to the model so it can describe the
@@ -717,6 +748,233 @@ async function searchFinalOffers(input: Input): Promise<ToolOutput> {
   return { data, results };
 }
 
+// Marker some extraction passes left on schedules that were mis-parsed (e.g. a
+// stipend/differential table read as a base grid). The customer dashboard hides
+// these, so the assistant must too — they would surface implausible figures.
+const IMPLAUSIBLE_MAGNITUDE = "%implausible_salary_magnitude%";
+
+interface SalaryCell {
+  stepLabel: string;
+  stepOrder: number;
+  laneLabel: string | null;
+  laneOrder: number;
+  salary: number;
+}
+
+async function getSalarySchedule(input: Input): Promise<ToolOutput> {
+  const limit = clampLimit(input.limit, 3);
+  const unit = parseUnit(input.bargaining_unit);
+  const districtName = likePattern(input.district_name);
+  const county = asTrimmedString(input.county);
+
+  // Optional single-cell lookup: a step number (digits only) and/or an
+  // education lane token (e.g. "MA", "BA+15"), normalised for matching.
+  const stepRaw = asTrimmedString(input.step, 12);
+  const stepNum = stepRaw != null ? parseInt(stepRaw.replace(/\D/g, ""), 10) : NaN;
+  const laneRaw = asTrimmedString(input.lane, 20);
+  const laneNorm = laneRaw ? laneRaw.toUpperCase().replace(/\s+/g, "") : null;
+
+  // Phase 1: the matching IL districts and their MOST RECENT contract that has
+  // display-quality schedules for this unit. DISTINCT ON keeps one (latest)
+  // contract per district; the implausible-magnitude exclusion mirrors the
+  // dashboard salary view exactly so the assistant never cites withheld grids.
+  const conds: Array<SQL | null> = [
+    sql`d.state = ${CUSTOMER_STATE}`,
+    sql`c.bargaining_unit = ${unit}`,
+    sql`(s.review_reason IS NULL OR s.review_reason NOT LIKE ${IMPLAUSIBLE_MAGNITUDE})`,
+    districtName ? sql`d.name ILIKE ${districtName}` : null,
+    county ? sql`d.county = ${county}` : null,
+  ];
+  const where = buildWhere(conds);
+
+  const targetRows = await db.execute(sql`
+    SELECT DISTINCT ON (d.id)
+      d.id AS district_id, d.name AS district_name, d.county, c.id AS contract_id
+    FROM districts d
+    JOIN contracts c ON c.district_id = d.id
+    JOIN contract_salary_schedules s ON s.contract_id = c.id
+    WHERE ${where}
+    ORDER BY d.id, c.effective_start DESC NULLS LAST, c.id DESC
+    LIMIT ${limit}
+  `);
+
+  const targets = (targetRows.rows as Record<string, unknown>[]).map((r) => ({
+    districtId: Number(r.district_id),
+    districtName: String(r.district_name),
+    county: (r.county as string) ?? null,
+    contractId: Number(r.contract_id),
+  }));
+  if (!targets.length) return { data: [], results: [] };
+
+  const idList = sql.join(targets.map((t) => sql`${t.contractId}`), sql`, `);
+
+  // Phase 2: the display-quality schedules and their cells for those contracts.
+  // Both queries re-join districts and re-assert the IL state filter so each
+  // query is independently scoped (no cross-state leak even if Phase 1 changes).
+  const schedRows = await db.execute(sql`
+    SELECT s.id, s.contract_id, s.schedule_name, s.school_year, s.start_year,
+           s.lane_labels, s.step_count, s.lane_count, s.min_salary, s.max_salary
+    FROM contract_salary_schedules s
+    JOIN contracts c ON c.id = s.contract_id
+    JOIN districts d ON d.id = c.district_id
+    WHERE s.contract_id IN (${idList})
+      AND d.state = ${CUSTOMER_STATE}
+      AND c.bargaining_unit = ${unit}
+      AND (s.review_reason IS NULL OR s.review_reason NOT LIKE ${IMPLAUSIBLE_MAGNITUDE})
+    ORDER BY s.contract_id, s.start_year DESC NULLS LAST, s.school_year DESC
+  `);
+
+  const cellRows = await db.execute(sql`
+    SELECT cell.schedule_id, cell.step_label, cell.step_order,
+           cell.lane_label, cell.lane_order, cell.salary_amount
+    FROM contract_salary_schedule_cells cell
+    JOIN contract_salary_schedules s ON s.id = cell.schedule_id
+    JOIN contracts c ON c.id = s.contract_id
+    JOIN districts d ON d.id = c.district_id
+    WHERE s.contract_id IN (${idList})
+      AND d.state = ${CUSTOMER_STATE}
+      AND c.bargaining_unit = ${unit}
+      AND (s.review_reason IS NULL OR s.review_reason NOT LIKE ${IMPLAUSIBLE_MAGNITUDE})
+    ORDER BY cell.step_order, cell.lane_order
+  `);
+
+  const cellsBySched = new Map<number, SalaryCell[]>();
+  for (const r of cellRows.rows as Record<string, unknown>[]) {
+    const sid = Number(r.schedule_id);
+    const arr = cellsBySched.get(sid) ?? [];
+    arr.push({
+      stepLabel: String(r.step_label),
+      stepOrder: Number(r.step_order),
+      laneLabel: r.lane_label == null ? null : String(r.lane_label),
+      laneOrder: Number(r.lane_order),
+      salary: Number(r.salary_amount),
+    });
+    cellsBySched.set(sid, arr);
+  }
+
+  interface Sched {
+    id: number;
+    contractId: number;
+    scheduleName: string;
+    schoolYear: string;
+    startYear: number | null;
+    laneLabels: string[] | null;
+    stepCount: number | null;
+    laneCount: number | null;
+    minSalary: number | null;
+    maxSalary: number | null;
+    cells: SalaryCell[];
+  }
+  const schedsByContract = new Map<number, Sched[]>();
+  for (const r of schedRows.rows as Record<string, unknown>[]) {
+    const cid = Number(r.contract_id);
+    const id = Number(r.id);
+    const arr = schedsByContract.get(cid) ?? [];
+    arr.push({
+      id,
+      contractId: cid,
+      scheduleName: String(r.schedule_name),
+      schoolYear: String(r.school_year),
+      startYear: r.start_year == null ? null : Number(r.start_year),
+      laneLabels: (r.lane_labels as string[] | null) ?? null,
+      stepCount: r.step_count == null ? null : Number(r.step_count),
+      laneCount: r.lane_count == null ? null : Number(r.lane_count),
+      minSalary: r.min_salary == null ? null : Number(r.min_salary),
+      maxSalary: r.max_salary == null ? null : Number(r.max_salary),
+      cells: cellsBySched.get(id) ?? [],
+    });
+    schedsByContract.set(cid, arr);
+  }
+
+  const data: unknown[] = [];
+  const results: AskResult[] = [];
+  for (const t of targets) {
+    const scheds = schedsByContract.get(t.contractId) ?? [];
+    if (!scheds.length) continue;
+
+    // Default job family + latest school year, mirroring the dashboard summary.
+    const families = [...new Set(scheds.map((s) => s.scheduleName))];
+    const defaultFamily = families.includes("Teachers") ? "Teachers" : families[0];
+    const latest = scheds
+      .filter((s) => s.scheduleName === defaultFamily)
+      .sort((a, b) => (b.startYear ?? 0) - (a.startYear ?? 0))[0];
+    if (!latest) continue;
+
+    // Anchor figures: base = first step's BA (or first) lane; MA base = first
+    // step's MA lane; max = schedule maximum (same derivation as the UI).
+    let baseSalary: number | null = null;
+    let maBaseSalary: number | null = null;
+    if (latest.cells.length) {
+      const step0 = Math.min(...latest.cells.map((c) => c.stepOrder));
+      const baCell =
+        latest.cells.find((c) => c.stepOrder === step0 && /^BA\b/i.test(c.laneLabel ?? "")) ??
+        latest.cells.find((c) => c.stepOrder === step0 && c.laneOrder === 0);
+      const maCell = latest.cells.find(
+        (c) => c.stepOrder === step0 && /^MA\b/i.test(c.laneLabel ?? ""),
+      );
+      baseSalary = baCell ? baCell.salary : null;
+      maBaseSalary = maCell ? maCell.salary : null;
+    }
+    const maxSalary = latest.maxSalary;
+
+    // Optional specific-cell lookup against the latest schedule. Step matches on
+    // the numeric part of the step label; lane matches a case-insensitive prefix
+    // of the lane label (so "MA" finds "MA", "MA+15", …). Capped to keep the
+    // payload small.
+    let matchedCells:
+      | Array<{ step: string; lane: string | null; salary: number }>
+      | undefined;
+    if (!Number.isNaN(stepNum) || laneNorm) {
+      matchedCells = latest.cells
+        .filter((c) => {
+          const stepOk = Number.isNaN(stepNum)
+            ? true
+            : parseInt(String(c.stepLabel).replace(/\D/g, ""), 10) === stepNum;
+          const laneOk = !laneNorm
+            ? true
+            : (c.laneLabel ?? "").toUpperCase().replace(/\s+/g, "").startsWith(laneNorm);
+          return stepOk && laneOk;
+        })
+        .slice(0, 12)
+        .map((c) => ({ step: c.stepLabel, lane: c.laneLabel, salary: c.salary }));
+    }
+
+    data.push({
+      district_id: t.districtId,
+      district_name: t.districtName,
+      county: t.county,
+      bargaining_unit: unit,
+      job_family: defaultFamily,
+      school_year: latest.schoolYear,
+      step_count: latest.stepCount,
+      lane_labels: latest.laneLabels,
+      base_salary: baseSalary,
+      ma_base_salary: maBaseSalary,
+      max_salary: maxSalary,
+      ...(matchedCells ? { matched_cells: matchedCells } : {}),
+    });
+
+    const snippet =
+      [
+        latest.schoolYear,
+        baseSalary != null ? `base ${asSalary(baseSalary)}` : null,
+        maBaseSalary != null ? `MA base ${asSalary(maBaseSalary)}` : null,
+        maxSalary != null ? `max ${asSalary(maxSalary)}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ") || `${defaultFamily} salary schedule`;
+    results.push({
+      type: "salary",
+      id: t.districtId,
+      label: `${t.districtName} — ${defaultFamily} salary schedule`,
+      snippet,
+      path: salaryPath(t.districtId, unit),
+    });
+  }
+
+  return { data, results };
+}
+
 export async function executeAskTool(name: string, input: unknown): Promise<ToolOutput> {
   const safeInput = (input && typeof input === "object" ? input : {}) as Input;
   switch (name) {
@@ -732,6 +990,8 @@ export async function executeAskTool(name: string, input: unknown): Promise<Tool
       return searchFactfinding(safeInput);
     case "search_final_offers":
       return searchFinalOffers(safeInput);
+    case "get_salary_schedule":
+      return getSalarySchedule(safeInput);
     default:
       return { data: { error: `Unknown tool: ${name}` }, results: [] };
   }

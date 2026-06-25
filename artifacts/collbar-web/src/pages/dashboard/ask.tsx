@@ -15,7 +15,8 @@ type AskResultType =
   | "clause"
   | "comparables"
   | "factfinding"
-  | "final_offer";
+  | "final_offer"
+  | "salary";
 
 interface AskResult {
   type: AskResultType;
@@ -61,6 +62,7 @@ const EXAMPLE_QUESTIONS = [
   "Who has a teacher contract expiring in 2026?",
   "Show me districts with TRS pickup in their teacher contracts",
   "What's the median teacher base increase for large districts?",
+  "What is the MA step 1 teacher salary in my district?",
 ];
 
 const TYPE_META: Record<AskResultType, { label: string; badge: string }> = {
@@ -70,6 +72,7 @@ const TYPE_META: Record<AskResultType, { label: string; badge: string }> = {
   comparables: { label: "Comparables", badge: "bg-emerald-900/40 text-emerald-300 border-emerald-800" },
   factfinding: { label: "Fact-finding", badge: "bg-amber-900/40 text-amber-300 border-amber-800" },
   final_offer: { label: "Final Offers", badge: "bg-rose-900/40 text-rose-300 border-rose-800" },
+  salary: { label: "Salary Schedule", badge: "bg-teal-900/40 text-teal-300 border-teal-800" },
 };
 
 // Build an internal SPA link the same way the rest of the app does: BASE_URL
