@@ -25,6 +25,12 @@ is anchored to IL; add the analogous unit-predicate assertion for unit-specific 
 
 ## Other conventions
 - Parameterize all user input via Drizzle `sql` (no string interpolation); clamp `limit` and any text.
+- Some ISBE baseline tables have NO `state` column (il_eis_district, il_eis_position_summary); anchor them
+  by JOINing `districts d ON d.state_district_id` and asserting `d.state = CUSTOMER_STATE` in every query
+  (incl. optional secondary queries and each phase of compare_to_peers). tss_annual DOES have `state` — assert both.
+- A tool that needs a dynamic column (e.g. compare metric) must resolve it from a server-side WHITELIST
+  registry and pass only that to `sql.raw`; never let user text reach `sql.raw`. Also store/return the
+  RESOLVED key, not the raw user text, so a fallback never advertises an unsupported metric.
 - Deep links use the SPA's URL state: district overview is `/dashboard/:id`, plus `?unit=<unit>` only
   for non-teacher units (teachers is the default and takes no param) — matches `useDistrictUnit()`.
 - Keep the model payload compact (summaries + a small cap of matched cells), since the ask route also

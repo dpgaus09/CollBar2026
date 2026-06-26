@@ -337,3 +337,179 @@ describe("get_salary_schedule (salary grids, IL rows only)", () => {
     expect(out.data).toEqual([]);
   });
 });
+
+describe("get_baseline_benefits (ISBE TSS baseline, IL rows only)", () => {
+  it("anchors its query to IL", async () => {
+    await executeAskTool("get_baseline_benefits", { district_name: "Naperville", school_year: "2024-25" });
+    expectEveryQueryAnchoredToIL();
+  });
+
+  it("builds a grounded district card with baseline figures grouped", async () => {
+    execute.mockResolvedValueOnce({
+      rows: [
+        {
+          district_id: 42,
+          district_name: "Naperville CUSD 203",
+          county: "DuPage",
+          district_type: "Unit",
+          enrollment: 16000,
+          school_year: "2024-25",
+          affiliation: "IEA",
+          enrollment_range: "10000+",
+          contract_expires: "2026-08-15",
+          ba_begin: 48000,
+          ba_max: 70000,
+          ba_years_to_max: 12,
+          trs_board_paid_pct: 9.0,
+          health_premium_employee: 750,
+          health_pct_employer_employee: 80,
+          sick_days: 13,
+          personal_days: 3,
+          sick_leave_bank: "Yes",
+        },
+      ],
+    });
+    const out = await executeAskTool("get_baseline_benefits", { district_name: "Naperville" });
+    expect(out.results).toHaveLength(1);
+    expect(out.results[0]).toMatchObject({ type: "district", id: 42, path: "/dashboard/42" });
+    const row = (out.data as Record<string, unknown>[])[0];
+    expect(row).toMatchObject({ district_id: 42, school_year: "2024-25" });
+    expect((row.salary_schedule as Record<string, unknown>).ba_begin).toBe(48000);
+    expect((row.retirement as Record<string, unknown>).trs_board_paid_pct).toBe(9);
+    expect(((row.insurance as Record<string, Record<string, unknown>>).health).premium_employee).toBe(750);
+  });
+
+  it("returns no cards for an out-of-state target (IL-scoped)", async () => {
+    execute.mockResolvedValue({ rows: [] });
+    const out = await executeAskTool("get_baseline_benefits", { district_name: "Columbus City Ohio" });
+    expect(out.results).toEqual([]);
+  });
+});
+
+describe("get_eis_salary_stats (ISBE EIS actual pay, aggregate only)", () => {
+  it("anchors its district-level query to IL (no position breakdown)", async () => {
+    await executeAskTool("get_eis_salary_stats", { district_name: "Springfield" });
+    // Only the district-level query runs when no position filter is given.
+    expect(execute.mock.calls.length).toBe(1);
+    expectEveryQueryAnchoredToIL();
+  });
+
+  it("builds a grounded district card from EIS stats", async () => {
+    execute.mockResolvedValueOnce({
+      rows: [
+        {
+          district_id: 7,
+          district_name: "Springfield SD 186",
+          county: "Sangamon",
+          district_type: "Unit",
+          enrollment: 14000,
+          school_year: "2023-24",
+          teacher_headcount: 900,
+          teacher_fte: 880.5,
+          avg_teacher_salary: 62000,
+          median_teacher_salary: 60000,
+          p25_salary: 48000,
+          p75_salary: 75000,
+          total_teacher_base_payroll: 54000000,
+          avg_sick_days: 12,
+        },
+      ],
+    });
+    const out = await executeAskTool("get_eis_salary_stats", { district_name: "Springfield" });
+    expect(out.results[0]).toMatchObject({ type: "district", id: 7, path: "/dashboard/7" });
+    const districts = (out.data as { districts: Record<string, unknown>[] }).districts;
+    expect(districts[0]).toMatchObject({ district_id: 7, avg_teacher_salary: 62000, median_teacher_salary: 60000 });
+  });
+
+  it("runs a per-position breakdown (2 queries) and anchors both to IL", async () => {
+    execute
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            district_id: 7,
+            district_name: "Springfield SD 186",
+            county: "Sangamon",
+            district_type: "Unit",
+            enrollment: 14000,
+            school_year: "2023-24",
+            teacher_headcount: 900,
+            avg_teacher_salary: 62000,
+            median_teacher_salary: 60000,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          { district_id: 7, district_name: "Springfield SD 186", county: "Sangamon", school_year: "2023-24", position_description: "Principal", position_group: "administrator", headcount: 12, avg_salary: 110000, median_salary: 108000 },
+          { district_id: 7, district_name: "Springfield SD 186", county: "Sangamon", school_year: "2023-24", position_description: "Assistant Principal", position_group: "administrator", headcount: 20, avg_salary: 95000, median_salary: 94000 },
+        ],
+      });
+    const out = await executeAskTool("get_eis_salary_stats", { district_name: "Springfield", position_group: "administrator" });
+    expect(execute.mock.calls.length).toBe(2);
+    expectEveryQueryAnchoredToIL();
+    const positions = (out.data as { positions: Record<string, unknown>[] }).positions;
+    // Sorted by headcount desc.
+    expect(positions.map((p) => p.position_description)).toEqual(["Assistant Principal", "Principal"]);
+  });
+});
+
+describe("compare_to_peers (focal vs peer group, IL-scoped)", () => {
+  function mockCompareQueries(): void {
+    execute
+      .mockResolvedValueOnce({
+        rows: [
+          { district_id: 42, district_name: "Naperville CUSD 203", county: "DuPage", district_type: "Unit", enrollment: 16000, focal_value: 68000 },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ median: 60000, avg: 61000, min: 50000, max: 72000, n: 9 }],
+      });
+  }
+
+  it("anchors BOTH queries (focal + peer aggregate) to IL", async () => {
+    mockCompareQueries();
+    await executeAskTool("compare_to_peers", { district_name: "Naperville", metric: "avg_teacher_salary" });
+    expect(execute.mock.calls.length).toBe(2);
+    expectEveryQueryAnchoredToIL();
+  });
+
+  it("returns focal value alongside peer median/avg and a comparables card", async () => {
+    mockCompareQueries();
+    const out = await executeAskTool("compare_to_peers", { district_name: "Naperville", metric: "avg_teacher_salary" });
+    expect(out.data).toMatchObject({
+      district_id: 42,
+      metric: "avg_teacher_salary",
+      district_value: 68000,
+      peer_median: 60000,
+      peer_avg: 61000,
+      peer_count: 9,
+    });
+    expect(out.results[0]).toMatchObject({ type: "comparables", id: 42 });
+    expect(out.results[0].path.startsWith("/dashboard/42/comparables")).toBe(true);
+  });
+
+  it("defaults the peer county to the focal district's county when none given", async () => {
+    mockCompareQueries();
+    const out = await executeAskTool("compare_to_peers", { district_name: "Naperville", metric: "trs_board_paid_pct" });
+    const data = out.data as { peer_filters: { county: string | null } };
+    expect(data.peer_filters.county).toBe("DuPage");
+  });
+
+  it("falls back to the default metric for an unknown metric and stays IL-anchored", async () => {
+    mockCompareQueries();
+    const out = await executeAskTool("compare_to_peers", { district_name: "Naperville", metric: "not_a_metric" });
+    // The unknown key resolves to avg_teacher_salary and the returned data
+    // advertises the RESOLVED metric, never the unsupported user text.
+    expect((out.data as { metric: string }).metric).toBe("avg_teacher_salary");
+    expectEveryQueryAnchoredToIL();
+  });
+
+  it("returns no card when the focal district is not found", async () => {
+    execute.mockResolvedValue({ rows: [] });
+    const out = await executeAskTool("compare_to_peers", { district_name: "Columbus City Ohio" });
+    expect(out.results).toEqual([]);
+    // Only the focal lookup ran; it is IL-anchored.
+    expect(execute.mock.calls.length).toBe(1);
+    expectEveryQueryAnchoredToIL();
+  });
+});

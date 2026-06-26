@@ -89,6 +89,22 @@ function likePattern(raw: unknown): string | null {
   return `%${s}%`;
 }
 
+// School year as the ISBE stores it: 'YYYY-YY' (e.g. '2024-25'). Returns the
+// validated string or null so it can be bound as a parameter (never raw text).
+function asSchoolYear(raw: unknown): string | null {
+  const s = asTrimmedString(raw, 7);
+  if (!s) return null;
+  return /^\d{4}-\d{2}$/.test(s) ? s : null;
+}
+
+// Coerce a possibly-string numeric DB value (drizzle returns NUMERIC as string)
+// to a finite number, or null.
+function asNum(raw: unknown): number | null {
+  if (raw == null) return null;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
 // ---------------------------------------------------------------------------
 // Tool definitions handed to the Anthropic API (input_schema is JSON Schema).
 // ---------------------------------------------------------------------------
@@ -226,6 +242,71 @@ export const ASK_TOOL_DEFS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "get_baseline_benefits",
+    description:
+      "Retrieve the ISBE BASELINE teacher salary-schedule and benefits profile (from the state Teacher Salary Study) for Illinois districts — the official annual baseline, distinct from negotiated CBA figures. For each matched district's most recent reported year it returns: salary-schedule lanes (BA/MA/MA+30 beginning, maximum and years-to-max; highest scheduled salary; masters-10th-year), board-paid TRS percentage, insurance premiums and the employer-paid share % for health, dental, vision, life, prescription and disability (employee-only and family tiers), severance, early-retirement, sick-leave bank, fair-share, longevity pay (and longevity maxes by lane), leave days (sick/personal), union affiliation, enrollment range, and contract expiration. Use for baseline questions like 'what is the board-paid TRS percentage in district X', 'what is the employee health-insurance premium in Naperville', 'which districts offer a sick-leave bank', or 'what does the BA lane start at per the state salary study'. (For the NEGOTIATED salary GRID from the CBA use get_salary_schedule; for base-increase PERCENTAGES use search_settlements.)",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        district_name: { type: "string", description: "Substring match on district name. Name a district (or county) to scope the lookup." },
+        county: { type: "string", description: "Exact county name (to disambiguate or scope)." },
+        school_year: { type: "string", description: "Specific year as 'YYYY-YY' (e.g. '2024-25'). Defaults to each district's most recent reported year." },
+        limit: { type: "integer", description: "Max districts (1-10, default 5)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_eis_salary_stats",
+    description:
+      "Retrieve ACTUAL teacher/staff salary statistics from the state EIS employment records (what districts actually paid, aggregated — never individual names) for Illinois districts. For each matched district's most recent year it returns: average and median teacher salary, 25th/75th-percentile salary, teacher headcount and FTE, total teacher base payroll, and average sick days. Optionally break down BY POSITION (e.g. principals, superintendents, deans): supply a position keyword or a position group ('teacher'/'administrator'/'other') to also get per-position average/median salary, headcount, FTE and benefit totals (bonuses, annuities, retirement enhancements, other). Use for 'what is the average teacher salary in district X', 'median principal salary', 'how many administrators does X employ', or 'what did X actually pay teachers last year'. (These are ACTUAL paid figures; for the negotiated salary GRID use get_salary_schedule, for the state salary-study baseline use get_baseline_benefits.)",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        district_name: { type: "string", description: "Substring match on district name." },
+        county: { type: "string", description: "Exact county name." },
+        school_year: { type: "string", description: "Specific year as 'YYYY-YY' (e.g. '2020-21'). Defaults to each district's most recent reported year." },
+        position: { type: "string", description: "Substring match on a position description (e.g. 'principal', 'superintendent'). Triggers a per-position breakdown." },
+        position_group: {
+          type: "string",
+          enum: ["teacher", "administrator", "other"],
+          description: "Coarse position group to break down by. Triggers a per-position breakdown.",
+        },
+        limit: { type: "integer", description: "Max districts (1-10, default 5)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "compare_to_peers",
+    description:
+      "Compare ONE Illinois district's baseline salary or benefits figure against a peer group, returning the district's own value alongside the peer median, average, minimum and maximum. Peers default to the same county; narrow further with an enrollment band and/or district type. Metrics span the state salary-study baseline (BA/MA beginning & maximum salary, highest scheduled salary, board-paid TRS %, employee/family health/dental/vision/life/prescription insurance premiums, sick & personal days) and the EIS actual-pay figures (average & median teacher salary, teacher headcount, teacher FTE). Use for 'how does Naperville's employee health premium compare to peers', 'is this district's average teacher salary above or below the county', or 'how does the board-paid TRS percentage stack up against similar-size districts'.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        district_name: { type: "string", description: "Substring match on the focal district's name (required to identify the district)." },
+        metric: {
+          type: "string",
+          enum: [
+            "ba_begin", "ba_max", "ma_begin", "ma_max", "highest_scheduled_salary",
+            "trs_board_paid_pct",
+            "health_premium_employee", "health_premium_family",
+            "dental_premium_employee", "vision_premium_employee",
+            "life_premium_employee", "prescription_premium_employee",
+            "sick_days", "personal_days",
+            "avg_teacher_salary", "median_teacher_salary",
+            "teacher_headcount", "teacher_fte",
+          ],
+          description: "Which figure to compare. Defaults to average teacher salary.",
+        },
+        county: { type: "string", description: "Peer-group county. Defaults to the focal district's own county." },
+        band: { type: "string", enum: ["tiny", "small", "medium", "large", "xlarge"], description: "Restrict peers to an enrollment size band." },
+        district_type: { type: "string", description: "Restrict peers to an exact district type (e.g. 'Unit')." },
+      },
+      additionalProperties: false,
+    },
+  },
 ];
 
 export const ASK_TOOL_NAMES = new Set(ASK_TOOL_DEFS.map((t) => t.name));
@@ -241,6 +322,9 @@ export const ASK_TOOL_LABELS: Record<string, string> = {
   search_factfinding: "Reviewing fact-finding reports…",
   search_final_offers: "Comparing board vs union final offers…",
   get_salary_schedule: "Looking up salary schedules…",
+  get_baseline_benefits: "Reading state salary-study benefits…",
+  get_eis_salary_stats: "Reading state salary statistics…",
+  compare_to_peers: "Comparing against peer districts…",
 };
 
 // ---------------------------------------------------------------------------
@@ -975,6 +1059,498 @@ async function getSalarySchedule(input: Input): Promise<ToolOutput> {
   return { data, results };
 }
 
+// ---------------------------------------------------------------------------
+// get_baseline_benefits — ISBE Teacher Salary Study baseline (tss_annual).
+//
+// One snapshot per matched IL district, its MOST RECENT reported year. These
+// are the state's official baseline figures (distinct from negotiated CBA
+// grids). tss_annual is keyed by (state, state_district_id, school_year), so we
+// join `districts` on state_district_id and re-assert d.state = CUSTOMER_STATE
+// (and tss.state) to keep the query independently IL-scoped.
+// ---------------------------------------------------------------------------
+async function getBaselineBenefits(input: Input): Promise<ToolOutput> {
+  const limit = clampLimit(input.limit, 5);
+  const districtName = likePattern(input.district_name);
+  const county = asTrimmedString(input.county);
+  const schoolYear = asSchoolYear(input.school_year);
+
+  const conds: Array<SQL | null> = [
+    sql`d.state = ${CUSTOMER_STATE}`,
+    sql`tss.state = ${CUSTOMER_STATE}`,
+    districtName ? sql`d.name ILIKE ${districtName}` : null,
+    county ? sql`d.county = ${county}` : null,
+    schoolYear ? sql`tss.school_year = ${schoolYear}` : null,
+  ];
+  const where = buildWhere(conds);
+
+  const rows = await db.execute(sql`
+    SELECT DISTINCT ON (d.id)
+      d.id AS district_id, d.name AS district_name, d.county, d.district_type,
+      d.enrollment, tss.school_year, tss.affiliation, tss.enrollment_range,
+      tss.contract_expires, tss.salary_program, tss.education_level_required,
+      tss.ba_begin, tss.ba_max, tss.ba_years_to_max,
+      tss.ma_begin, tss.ma_max, tss.ma_years_to_max,
+      tss.ma30_begin, tss.ma30_max, tss.ma30_years_to_max,
+      tss.highest_scheduled_salary, tss.hss_years_to_max, tss.masters_10th_year_salary,
+      tss.trs_board_paid_pct, tss.trs_included_in_salary,
+      tss.personal_days, tss.sick_days, tss.sick_leave_bank,
+      tss.severance_pay, tss.early_retirement_program, tss.fair_share_provision,
+      tss.longevity_pay_provided, tss.longevity_ba_max, tss.longevity_ma_max,
+      tss.longevity_ma30_max, tss.longevity_hss_max,
+      tss.health_premium_employee, tss.health_pct_employer_employee,
+      tss.health_premium_family, tss.health_pct_employer_family,
+      tss.dental_premium_employee, tss.dental_pct_employer_employee,
+      tss.dental_premium_family, tss.dental_pct_employer_family,
+      tss.vision_premium_employee, tss.vision_pct_employer_employee,
+      tss.vision_premium_family, tss.vision_pct_employer_family,
+      tss.life_premium_employee, tss.life_pct_employer_employee,
+      tss.life_premium_family, tss.life_pct_employer_family,
+      tss.prescription_premium_employee, tss.prescription_pct_employer_employee,
+      tss.prescription_premium_family, tss.prescription_pct_employer_family,
+      tss.disability_premium_employee, tss.disability_pct_employer_employee,
+      tss.disability_premium_family, tss.disability_pct_employer_family
+    FROM districts d
+    JOIN tss_annual tss ON tss.state_district_id = d.state_district_id
+    WHERE ${where}
+    ORDER BY d.id, tss.school_year DESC
+    LIMIT ${limit}
+  `);
+
+  const data = (rows.rows as Record<string, unknown>[]).map((r) => ({
+    district_id: Number(r.district_id),
+    district_name: r.district_name,
+    county: r.county,
+    district_type: r.district_type,
+    school_year: r.school_year,
+    affiliation: r.affiliation,
+    enrollment_range: r.enrollment_range,
+    contract_expires: r.contract_expires,
+    salary_program: r.salary_program,
+    education_level_required: r.education_level_required,
+    salary_schedule: {
+      ba_begin: asNum(r.ba_begin), ba_max: asNum(r.ba_max), ba_years_to_max: asNum(r.ba_years_to_max),
+      ma_begin: asNum(r.ma_begin), ma_max: asNum(r.ma_max), ma_years_to_max: asNum(r.ma_years_to_max),
+      ma30_begin: asNum(r.ma30_begin), ma30_max: asNum(r.ma30_max), ma30_years_to_max: asNum(r.ma30_years_to_max),
+      highest_scheduled_salary: asNum(r.highest_scheduled_salary),
+      hss_years_to_max: asNum(r.hss_years_to_max),
+      masters_10th_year_salary: asNum(r.masters_10th_year_salary),
+    },
+    retirement: {
+      trs_board_paid_pct: asNum(r.trs_board_paid_pct),
+      trs_included_in_salary: r.trs_included_in_salary,
+      severance_pay: r.severance_pay,
+      early_retirement_program: r.early_retirement_program,
+    },
+    leave: {
+      sick_days: asNum(r.sick_days),
+      personal_days: asNum(r.personal_days),
+      sick_leave_bank: r.sick_leave_bank,
+    },
+    longevity: {
+      longevity_pay_provided: r.longevity_pay_provided,
+      longevity_ba_max: asNum(r.longevity_ba_max),
+      longevity_ma_max: asNum(r.longevity_ma_max),
+      longevity_ma30_max: asNum(r.longevity_ma30_max),
+      longevity_hss_max: asNum(r.longevity_hss_max),
+    },
+    fair_share_provision: r.fair_share_provision,
+    insurance: {
+      health: {
+        premium_employee: asNum(r.health_premium_employee), pct_employer_employee: asNum(r.health_pct_employer_employee),
+        premium_family: asNum(r.health_premium_family), pct_employer_family: asNum(r.health_pct_employer_family),
+      },
+      dental: {
+        premium_employee: asNum(r.dental_premium_employee), pct_employer_employee: asNum(r.dental_pct_employer_employee),
+        premium_family: asNum(r.dental_premium_family), pct_employer_family: asNum(r.dental_pct_employer_family),
+      },
+      vision: {
+        premium_employee: asNum(r.vision_premium_employee), pct_employer_employee: asNum(r.vision_pct_employer_employee),
+        premium_family: asNum(r.vision_premium_family), pct_employer_family: asNum(r.vision_pct_employer_family),
+      },
+      life: {
+        premium_employee: asNum(r.life_premium_employee), pct_employer_employee: asNum(r.life_pct_employer_employee),
+        premium_family: asNum(r.life_premium_family), pct_employer_family: asNum(r.life_pct_employer_family),
+      },
+      prescription: {
+        premium_employee: asNum(r.prescription_premium_employee), pct_employer_employee: asNum(r.prescription_pct_employer_employee),
+        premium_family: asNum(r.prescription_premium_family), pct_employer_family: asNum(r.prescription_pct_employer_family),
+      },
+      disability: {
+        premium_employee: asNum(r.disability_premium_employee), pct_employer_employee: asNum(r.disability_pct_employer_employee),
+        premium_family: asNum(r.disability_premium_family), pct_employer_family: asNum(r.disability_pct_employer_family),
+      },
+    },
+  }));
+
+  const results: AskResult[] = data.map((d) => {
+    const trs = d.retirement.trs_board_paid_pct;
+    const health = d.insurance.health.premium_employee;
+    const snippet =
+      [
+        d.county ? `${d.county} County` : null,
+        d.salary_schedule.ba_begin != null ? `BA start ${asSalary(d.salary_schedule.ba_begin)}` : null,
+        trs != null ? `TRS board-paid ${trs}%` : null,
+        health != null ? `health EE ${asSalary(health)}` : null,
+        d.school_year,
+      ]
+        .filter(Boolean)
+        .join(" · ") || "State salary-study baseline";
+    return {
+      type: "district" as const,
+      id: d.district_id,
+      label: `${d.district_name} — salary-study baseline`,
+      snippet,
+      path: districtPath(d.district_id),
+    };
+  });
+
+  return { data, results };
+}
+
+// ---------------------------------------------------------------------------
+// get_eis_salary_stats — ISBE EIS actual-pay statistics (il_eis_district plus,
+// when a position is requested, il_eis_position_summary). Aggregates only —
+// never individual educator names. Both tables are keyed by state_district_id
+// (no state column), so every query joins `districts` and asserts d.state.
+// ---------------------------------------------------------------------------
+async function getEisSalaryStats(input: Input): Promise<ToolOutput> {
+  const limit = clampLimit(input.limit, 5);
+  const districtName = likePattern(input.district_name);
+  const county = asTrimmedString(input.county);
+  const schoolYear = asSchoolYear(input.school_year);
+  const positionPattern = likePattern(input.position);
+  const groupRaw = asTrimmedString(input.position_group, 20);
+  const positionGroup =
+    groupRaw && ["teacher", "administrator", "other"].includes(groupRaw.toLowerCase())
+      ? groupRaw.toLowerCase()
+      : null;
+
+  const distConds: Array<SQL | null> = [
+    sql`d.state = ${CUSTOMER_STATE}`,
+    districtName ? sql`d.name ILIKE ${districtName}` : null,
+    county ? sql`d.county = ${county}` : null,
+    schoolYear ? sql`eis.school_year = ${schoolYear}` : null,
+  ];
+  const distWhere = buildWhere(distConds);
+
+  const distRows = await db.execute(sql`
+    SELECT DISTINCT ON (d.id)
+      d.id AS district_id, d.name AS district_name, d.county, d.district_type,
+      d.enrollment, eis.school_year, eis.teacher_headcount, eis.teacher_fte,
+      eis.avg_teacher_salary, eis.median_teacher_salary, eis.p25_salary, eis.p75_salary,
+      eis.total_teacher_base_payroll, eis.avg_sick_days,
+      eis.all_staff_headcount, eis.all_staff_fte
+    FROM districts d
+    JOIN il_eis_district eis ON eis.state_district_id = d.state_district_id
+    WHERE ${distWhere}
+    ORDER BY d.id, eis.school_year DESC
+    LIMIT ${limit}
+  `);
+
+  const districts = (distRows.rows as Record<string, unknown>[]).map((r) => ({
+    district_id: Number(r.district_id),
+    district_name: r.district_name,
+    county: r.county,
+    district_type: r.district_type,
+    school_year: r.school_year,
+    teacher_headcount: asNum(r.teacher_headcount),
+    teacher_fte: asNum(r.teacher_fte),
+    avg_teacher_salary: asNum(r.avg_teacher_salary),
+    median_teacher_salary: asNum(r.median_teacher_salary),
+    p25_salary: asNum(r.p25_salary),
+    p75_salary: asNum(r.p75_salary),
+    total_teacher_base_payroll: asNum(r.total_teacher_base_payroll),
+    avg_sick_days: asNum(r.avg_sick_days),
+    all_staff_headcount: asNum(r.all_staff_headcount),
+    all_staff_fte: asNum(r.all_staff_fte),
+  }));
+
+  // Optional per-position breakdown. Latest year per (district, position); the
+  // query re-joins districts and re-asserts d.state for independent IL-scoping.
+  let positions:
+    | Array<{
+        district_id: number;
+        district_name: unknown;
+        county: unknown;
+        school_year: unknown;
+        position_description: unknown;
+        position_group: unknown;
+        headcount: number | null;
+        total_fte: number | null;
+        avg_salary: number | null;
+        median_salary: number | null;
+        p25_salary: number | null;
+        p75_salary: number | null;
+        avg_sick_days: number | null;
+        avg_vacation_days: number | null;
+        total_base_salary: number | null;
+        total_bonus: number | null;
+        total_annuities: number | null;
+        total_retirement_enhancements: number | null;
+        total_other_benefits: number | null;
+      }>
+    | undefined;
+  if (positionPattern || positionGroup) {
+    const posConds: Array<SQL | null> = [
+      sql`d.state = ${CUSTOMER_STATE}`,
+      districtName ? sql`d.name ILIKE ${districtName}` : null,
+      county ? sql`d.county = ${county}` : null,
+      schoolYear ? sql`ps.school_year = ${schoolYear}` : null,
+      positionPattern ? sql`ps.position_description ILIKE ${positionPattern}` : null,
+      positionGroup ? sql`ps.position_group = ${positionGroup}` : null,
+    ];
+    const posWhere = buildWhere(posConds);
+
+    const posRows = await db.execute(sql`
+      SELECT DISTINCT ON (d.id, ps.position_description)
+        d.id AS district_id, d.name AS district_name, d.county,
+        ps.school_year, ps.position_description, ps.position_group,
+        ps.headcount, ps.total_fte, ps.avg_salary, ps.median_salary,
+        ps.p25_salary, ps.p75_salary, ps.avg_sick_days, ps.avg_vacation_days,
+        ps.total_base_salary, ps.total_bonus, ps.total_annuities,
+        ps.total_retirement_enhancements, ps.total_other_benefits
+      FROM districts d
+      JOIN il_eis_position_summary ps ON ps.state_district_id = d.state_district_id
+      WHERE ${posWhere}
+      ORDER BY d.id, ps.position_description, ps.school_year DESC
+    `);
+
+    positions = (posRows.rows as Record<string, unknown>[])
+      .map((r) => ({
+        district_id: Number(r.district_id),
+        district_name: r.district_name,
+        county: r.county,
+        school_year: r.school_year,
+        position_description: r.position_description,
+        position_group: r.position_group,
+        headcount: asNum(r.headcount),
+        total_fte: asNum(r.total_fte),
+        avg_salary: asNum(r.avg_salary),
+        median_salary: asNum(r.median_salary),
+        p25_salary: asNum(r.p25_salary),
+        p75_salary: asNum(r.p75_salary),
+        avg_sick_days: asNum(r.avg_sick_days),
+        avg_vacation_days: asNum(r.avg_vacation_days),
+        total_base_salary: asNum(r.total_base_salary),
+        total_bonus: asNum(r.total_bonus),
+        total_annuities: asNum(r.total_annuities),
+        total_retirement_enhancements: asNum(r.total_retirement_enhancements),
+        total_other_benefits: asNum(r.total_other_benefits),
+      }))
+      .sort((a, b) => (b.headcount ?? 0) - (a.headcount ?? 0))
+      .slice(0, MAX_TOOL_LIMIT);
+  }
+
+  // One card per matched district (deep-linking to its overview). When the
+  // caller asked only for positions of a district we didn't surface at the
+  // district level, still build cards from the position rows' districts.
+  const cardSource = districts.length
+    ? districts.map((d) => ({ id: d.district_id, name: d.district_name, county: d.county, school_year: d.school_year, avg: d.avg_teacher_salary, median: d.median_teacher_salary, headcount: d.teacher_headcount }))
+    : [];
+  const results: AskResult[] = cardSource.map((d) => {
+    const snippet =
+      [
+        d.county ? `${d.county} County` : null,
+        d.avg != null ? `avg teacher ${asSalary(d.avg)}` : null,
+        d.median != null ? `median ${asSalary(d.median)}` : null,
+        d.headcount != null ? `${d.headcount} teachers` : null,
+        d.school_year,
+      ]
+        .filter(Boolean)
+        .join(" · ") || "State salary statistics";
+    return {
+      type: "district" as const,
+      id: d.id,
+      label: `${d.name} — salary statistics`,
+      snippet,
+      path: districtPath(d.id),
+    };
+  });
+
+  const data: Record<string, unknown> = { districts };
+  if (positions) data.positions = positions;
+  return { data, results };
+}
+
+// ---------------------------------------------------------------------------
+// compare_to_peers — focal district's baseline figure vs a peer-group
+// median/avg/min/max for a WHITELISTED metric. The metric maps to a fixed
+// column on either tss_annual or il_eis_district; the column name is taken from
+// this registry only (never from user text) so sql.raw is safe to interpolate.
+// ---------------------------------------------------------------------------
+type MetricKind = "money" | "pct" | "days" | "count" | "fte";
+const COMPARE_METRICS: Record<
+  string,
+  { table: "tss" | "eis"; column: string; label: string; kind: MetricKind }
+> = {
+  ba_begin: { table: "tss", column: "ba_begin", label: "BA beginning salary", kind: "money" },
+  ba_max: { table: "tss", column: "ba_max", label: "BA maximum salary", kind: "money" },
+  ma_begin: { table: "tss", column: "ma_begin", label: "MA beginning salary", kind: "money" },
+  ma_max: { table: "tss", column: "ma_max", label: "MA maximum salary", kind: "money" },
+  highest_scheduled_salary: { table: "tss", column: "highest_scheduled_salary", label: "highest scheduled salary", kind: "money" },
+  trs_board_paid_pct: { table: "tss", column: "trs_board_paid_pct", label: "board-paid TRS percentage", kind: "pct" },
+  health_premium_employee: { table: "tss", column: "health_premium_employee", label: "employee health premium", kind: "money" },
+  health_premium_family: { table: "tss", column: "health_premium_family", label: "family health premium", kind: "money" },
+  dental_premium_employee: { table: "tss", column: "dental_premium_employee", label: "employee dental premium", kind: "money" },
+  vision_premium_employee: { table: "tss", column: "vision_premium_employee", label: "employee vision premium", kind: "money" },
+  life_premium_employee: { table: "tss", column: "life_premium_employee", label: "employee life premium", kind: "money" },
+  prescription_premium_employee: { table: "tss", column: "prescription_premium_employee", label: "employee prescription premium", kind: "money" },
+  sick_days: { table: "tss", column: "sick_days", label: "sick days", kind: "days" },
+  personal_days: { table: "tss", column: "personal_days", label: "personal days", kind: "days" },
+  avg_teacher_salary: { table: "eis", column: "avg_teacher_salary", label: "average teacher salary", kind: "money" },
+  median_teacher_salary: { table: "eis", column: "median_teacher_salary", label: "median teacher salary", kind: "money" },
+  teacher_headcount: { table: "eis", column: "teacher_headcount", label: "teacher headcount", kind: "count" },
+  teacher_fte: { table: "eis", column: "teacher_fte", label: "teacher FTE", kind: "fte" },
+};
+
+function formatMetric(kind: MetricKind, value: number | null): string | null {
+  if (value == null) return null;
+  switch (kind) {
+    case "money":
+      return asSalary(value);
+    case "pct":
+      return `${value}%`;
+    case "days":
+      return `${value} days`;
+    case "fte":
+      return `${value} FTE`;
+    case "count":
+    default:
+      return String(Math.round(value));
+  }
+}
+
+async function compareToPeers(input: Input): Promise<ToolOutput> {
+  const districtName = likePattern(input.district_name);
+  const county = asTrimmedString(input.county);
+  const bandRaw = asTrimmedString(input.band);
+  const bandValid = bandRaw && BANDS.has(bandRaw) ? bandRaw : null;
+  const districtType = asTrimmedString(input.district_type);
+  // Resolve to a known metric. An unknown/absent key falls back to
+  // avg_teacher_salary; metricKey is then set to the RESOLVED key (never the raw
+  // user text) so the returned data never advertises an unsupported metric.
+  const requestedMetric = asTrimmedString(input.metric, 40);
+  const metricKey =
+    requestedMetric && COMPARE_METRICS[requestedMetric]
+      ? requestedMetric
+      : "avg_teacher_salary";
+  const metric = COMPARE_METRICS[metricKey];
+  const col = sql.raw(metric.column);
+
+  // Phase 1: identify the focal district and read its latest value for the
+  // metric. The value subselect targets the metric's own table; the outer query
+  // is IL-scoped (d.state) so the whole statement is anchored to Illinois.
+  const focalValExpr =
+    metric.table === "tss"
+      ? sql`(SELECT t.${col} FROM tss_annual t
+             WHERE t.state_district_id = d.state_district_id AND t.state = ${CUSTOMER_STATE}
+               AND t.${col} IS NOT NULL ORDER BY t.school_year DESC LIMIT 1)`
+      : sql`(SELECT e.${col} FROM il_eis_district e
+             WHERE e.state_district_id = d.state_district_id
+               AND e.${col} IS NOT NULL ORDER BY e.school_year DESC LIMIT 1)`;
+
+  const focalConds: Array<SQL | null> = [
+    sql`d.state = ${CUSTOMER_STATE}`,
+    districtName ? sql`d.name ILIKE ${districtName}` : null,
+    county ? sql`d.county = ${county}` : null,
+  ];
+  const focalWhere = buildWhere(focalConds);
+
+  const focalRows = await db.execute(sql`
+    SELECT d.id AS district_id, d.name AS district_name, d.county,
+           d.district_type, d.enrollment, ${focalValExpr} AS focal_value
+    FROM districts d
+    WHERE ${focalWhere}
+    ORDER BY d.name
+    LIMIT 1
+  `);
+  const focal = focalRows.rows[0] as Record<string, unknown> | undefined;
+  if (!focal) {
+    return {
+      data: { error: "No matching Illinois district found.", metric: metricKey },
+      results: [],
+    };
+  }
+
+  const focalId = Number(focal.district_id);
+  // Peers default to the focal district's own county when no filters are given.
+  const peerCounty = county ?? (asTrimmedString(focal.county) || null);
+
+  const peerConds: Array<SQL | null> = [
+    sql`d.state = ${CUSTOMER_STATE}`,
+    sql`d.id <> ${focalId}`,
+    peerCounty ? sql`d.county = ${peerCounty}` : null,
+    bandValid ? bandSql(bandValid) : null,
+    districtType ? sql`d.district_type = ${districtType}` : null,
+  ];
+  const peerWhere = buildWhere(peerConds);
+
+  // Phase 2: peer aggregate. `latest` keeps one (most recent) value per peer
+  // district; `peers` carries the IL state filter so this statement is anchored.
+  const tableExpr = metric.table === "tss" ? sql`tss_annual x` : sql`il_eis_district x`;
+  const latestWhere =
+    metric.table === "tss"
+      ? sql`x.${col} IS NOT NULL AND x.state = ${CUSTOMER_STATE}`
+      : sql`x.${col} IS NOT NULL`;
+
+  const aggRows = await db.execute(sql`
+    WITH peers AS (
+      SELECT d.state_district_id FROM districts d WHERE ${peerWhere}
+    ),
+    latest AS (
+      SELECT DISTINCT ON (x.state_district_id) x.${col} AS v
+      FROM ${tableExpr}
+      JOIN peers p ON p.state_district_id = x.state_district_id
+      WHERE ${latestWhere}
+      ORDER BY x.state_district_id, x.school_year DESC
+    )
+    SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY v) AS median,
+           AVG(v)::numeric(14,2) AS avg, MIN(v) AS min, MAX(v) AS max,
+           COUNT(*)::int AS n
+    FROM latest
+  `);
+  const agg = (aggRows.rows[0] ?? {}) as Record<string, unknown>;
+
+  const focalValue = asNum(focal.focal_value);
+  const peerMedian = asNum(agg.median);
+  const peerAvg = asNum(agg.avg);
+  const data = {
+    district_id: focalId,
+    district_name: focal.district_name,
+    county: focal.county,
+    metric: metricKey,
+    metric_label: metric.label,
+    district_value: focalValue,
+    peer_median: peerMedian,
+    peer_avg: peerAvg,
+    peer_min: asNum(agg.min),
+    peer_max: asNum(agg.max),
+    peer_count: Number(agg.n ?? 0),
+    peer_filters: { county: peerCounty, band: bandValid, district_type: districtType },
+  };
+
+  const snippet =
+    [
+      `${metric.label}: ${formatMetric(metric.kind, focalValue) ?? "n/a"}`,
+      peerMedian != null ? `peer median ${formatMetric(metric.kind, peerMedian)}` : null,
+      `${data.peer_count} peer${data.peer_count !== 1 ? "s" : ""}${peerCounty ? " in " + peerCounty : ""}`,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
+  const results: AskResult[] = [
+    {
+      type: "comparables" as const,
+      id: focalId,
+      label: `${focal.district_name} — vs peers`,
+      snippet,
+      path: comparablesPath(focalId, { county: peerCounty, band: bandValid, districtType }),
+    },
+  ];
+
+  return { data, results };
+}
+
 export async function executeAskTool(name: string, input: unknown): Promise<ToolOutput> {
   const safeInput = (input && typeof input === "object" ? input : {}) as Input;
   switch (name) {
@@ -992,6 +1568,12 @@ export async function executeAskTool(name: string, input: unknown): Promise<Tool
       return searchFinalOffers(safeInput);
     case "get_salary_schedule":
       return getSalarySchedule(safeInput);
+    case "get_baseline_benefits":
+      return getBaselineBenefits(safeInput);
+    case "get_eis_salary_stats":
+      return getEisSalaryStats(safeInput);
+    case "compare_to_peers":
+      return compareToPeers(safeInput);
     default:
       return { data: { error: `Unknown tool: ${name}` }, results: [] };
   }
