@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { useAuth, useLogout } from "@/hooks/use-auth";
 import { apiUrl } from "@/lib/api";
 import { LockedPage } from "@/components/upgrade";
@@ -149,6 +151,51 @@ function ResultList({ results }: { results: AskResult[] }) {
   );
 }
 
+// Renders the assistant's answer text as markdown (it emits **bold**, bullet
+// lists, etc.). Styled to match the dark slate theme; safe by default since
+// react-markdown does not render raw HTML.
+const MARKDOWN_COMPONENTS: Components = {
+  p: ({ children }) => <p className="leading-relaxed">{children}</p>,
+  strong: ({ children }) => <strong className="font-semibold text-slate-100">{children}</strong>,
+  em: ({ children }) => <em className="italic">{children}</em>,
+  ul: ({ children }) => <ul className="list-disc pl-5 space-y-1">{children}</ul>,
+  ol: ({ children }) => <ol className="list-decimal pl-5 space-y-1">{children}</ol>,
+  li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+  a: ({ children, href }) => (
+    <a href={href} target="_blank" rel="noreferrer" className="text-blue-400 underline hover:text-blue-300">
+      {children}
+    </a>
+  ),
+  h1: ({ children }) => <h1 className="text-base font-semibold text-slate-100">{children}</h1>,
+  h2: ({ children }) => <h2 className="text-sm font-semibold text-slate-100">{children}</h2>,
+  h3: ({ children }) => <h3 className="text-sm font-semibold text-slate-100">{children}</h3>,
+  code: ({ children }) => (
+    <code className="rounded bg-slate-800 px-1 py-0.5 text-[0.85em] text-slate-100">{children}</code>
+  ),
+  blockquote: ({ children }) => (
+    <blockquote className="border-l-2 border-slate-700 pl-3 text-slate-400">{children}</blockquote>
+  ),
+  table: ({ children }) => (
+    <div className="overflow-x-auto">
+      <table className="w-full border-collapse text-xs">{children}</table>
+    </div>
+  ),
+  th: ({ children }) => (
+    <th className="border border-slate-700 px-2 py-1 text-left font-semibold text-slate-200">{children}</th>
+  ),
+  td: ({ children }) => <td className="border border-slate-800 px-2 py-1">{children}</td>,
+};
+
+function Markdown({ children }: { children: string }) {
+  return (
+    <div className="space-y-3 text-sm leading-relaxed text-slate-200">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
+        {children}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 function AnswerTurn({ turn }: { turn: Turn }) {
   const results = turn.results ?? [];
   return (
@@ -157,9 +204,7 @@ function AnswerTurn({ turn }: { turn: Turn }) {
         <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 mb-2">
           Answer
         </div>
-        <div className="text-sm text-slate-200 leading-relaxed whitespace-pre-wrap">
-          {turn.content}
-        </div>
+        <Markdown>{turn.content}</Markdown>
       </div>
 
       {results.length > 0 ? (
@@ -185,8 +230,8 @@ function StreamingAnswer({ turn }: { turn: StreamingTurn }) {
           <span className="inline-block h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />
         </div>
         {turn.content ? (
-          <div className="text-sm text-slate-200 leading-relaxed whitespace-pre-wrap">
-            {turn.content}
+          <div className="text-sm text-slate-200 leading-relaxed">
+            <Markdown>{turn.content}</Markdown>
             <span className="inline-block w-1.5 h-4 bg-blue-400/80 ml-0.5 align-text-bottom animate-pulse" />
           </div>
         ) : (
