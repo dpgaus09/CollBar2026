@@ -215,7 +215,7 @@ export default function AskPage() {
   // conversation; the server assigns an id on the first answered turn.
   const [conversationId, setConversationId] = useState<number | null>(null);
   const [resumeError, setResumeError] = useState<string | null>(null);
-  const threadEndRef = useRef<HTMLDivElement | null>(null);
+  const latestQuestionRef = useRef<HTMLDivElement | null>(null);
 
   // The user's saved conversations (sidebar). Refetched after each turn so a
   // newly created thread (and bumped activity) shows up.
@@ -398,10 +398,15 @@ export default function AskPage() {
     if (!isAuthenticated) setLocation("/login");
   }, [authLoading, isAuthenticated, setLocation]);
 
-  // Keep the latest turn / streaming answer in view as the conversation grows.
+  // When a new question is asked, bring it to the top of the viewport so the
+  // answer streams in below it and reads top-to-bottom. We intentionally do NOT
+  // scroll on every streamed token / result card — that dragged the user to the
+  // bottom of the page (past the answer) and forced a scroll back up to read it.
   useEffect(() => {
-    threadEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [turns.length, streaming?.content, streaming?.results.length]);
+    if (turns.length === 0) return;
+    if (turns[turns.length - 1].role !== "user") return;
+    latestQuestionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [turns]);
 
   if (authLoading || !isAuthenticated) return null;
   if (isFree)
@@ -523,7 +528,11 @@ export default function AskPage() {
           <div className="space-y-5">
             {turns.map((t, i) =>
               t.role === "user" ? (
-                <div key={`u-${i}`} className="flex justify-end">
+                <div
+                  key={`u-${i}`}
+                  ref={i === turns.length - 1 ? latestQuestionRef : undefined}
+                  className="flex justify-end scroll-mt-6"
+                >
                   <div className="max-w-[85%] rounded-lg border border-blue-900 bg-blue-950/30 px-4 py-2.5 text-sm text-slate-200 whitespace-pre-wrap">
                     {t.content}
                   </div>
@@ -604,7 +613,6 @@ export default function AskPage() {
           </div>
         </div>
 
-        <div ref={threadEndRef} />
         </main>
       </div>
     </div>
