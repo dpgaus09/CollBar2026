@@ -4,7 +4,7 @@ import {
   type Request,
   type Response,
 } from "express";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import type Anthropic from "@anthropic-ai/sdk";
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { db } from "@workspace/db";
@@ -47,7 +47,10 @@ const askLimiter = rateLimit({
   limit: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req: Request) => String(req.session?.userId ?? req.ip),
+  keyGenerator: (req: Request) =>
+    req.session?.userId != null
+      ? String(req.session.userId)
+      : ipKeyGenerator(req.ip ?? ""),
   handler: (_req: Request, res: Response) => {
     res.status(429).json({
       error: "Too many questions in a short time. Please wait a moment and try again.",
