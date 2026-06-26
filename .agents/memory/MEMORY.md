@@ -58,3 +58,4 @@
 - [Salary hourly/annual mixed tables](salary-hourly-mixed-tables.md) — support wage tables mix hourly+annual columns; classify/format/sanity PER-LANE (hourly only when isHourly&&!isAnnual; annual unbounded); scheduleType hourly only if no annual lane; keep salary.ts↔district.tsx in lockstep.
 - [Provisions per-page resilience](provisions-per-page-resilience.md) — a bad batch must fail at PAGE granularity (recurse-split to single page, skip irreducible page) not discard the whole doc; one-shot capped deep-retry when tier-1 yields zero.
 - [ISBE salary-dataset admin upload](salary-dataset-upload.md) — EIS/TSS spreadsheet upload reuses min-salary detached-spawn pattern; TSS needs explicit school_year (no year column), EIS auto-detects; reject concurrent uploads before writing.
+- [TSS field display semantics](tss-display-semantics.md) — tss_annual percents are 0–100; blank text flags ≠ "No"; fair_share/longevity_pay are opaque 1/2 codes; $0 premiums ambiguous.
