@@ -26,6 +26,14 @@ interface Provision {
 
 const CATEGORIES = ["", "compensation", "insurance", "retirement", "leave", "workday", "evaluation", "rif", "grievance", "other"];
 
+const PROVISION_LABELS: Record<string, string> = {
+  ba_min_salary: "min salary",
+};
+
+function provisionLabel(key: string): string {
+  return PROVISION_LABELS[key] ?? key.replace(/_/g, " ");
+}
+
 function ConfidenceBadge({ v }: { v: string | null }) {
   if (!v) return null;
   const n = parseFloat(v);
@@ -144,7 +152,7 @@ export default function ClausesPage() {
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-xs font-medium text-blue-400">
-                      {p.provision_key.replace(/_/g, " ")}
+                      {provisionLabel(p.provision_key)}
                     </span>
                     <span className="text-xs text-slate-500 capitalize px-1.5 py-0.5 rounded bg-slate-800">
                       {p.category}
