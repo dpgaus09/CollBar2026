@@ -53,6 +53,12 @@ _SICK_KEYS       = {"sickdays", "sickday"}
 _FTE_SALARY_KEYS = {"ftesalary", "positionftesalary"}
 # FTE: must match but NOT contain "salary"
 _FTE_KEYS        = {"fulltimeequivalent", "fte"}
+# Per-educator benefit / leave detail columns
+_VACATION_KEYS   = {"vacationday", "vacationdays"}
+_BONUS_KEYS      = {"bonus", "bonuses"}
+_ANNUITY_KEYS    = {"annuities", "annuity"}
+_RETIRE_ENH_KEYS = {"retirementenhancements", "retirementenhancement"}
+_OTHER_BEN_KEYS  = {"otherbenefits", "otherbenefit"}
 
 
 def _find_col(norm_to_orig: dict, candidates: set, exclude_substr: str | None = None) -> Optional[str]:
@@ -132,6 +138,164 @@ def _to_float(v) -> Optional[float]:
         return None
 
 
+def _n(v):
+    """Coerce a value to a psycopg2-safe Python native or None.
+
+    `.tolist()` already converts numpy scalars to Python natives, so this only
+    needs to map None and NaN floats to None.
+    """
+    if v is None:
+        return None
+    if isinstance(v, float) and v != v:  # NaN
+        return None
+    return v
+
+
+# ---------------------------------------------------------------------------
+# Position grouping (coarse buckets for per-position rollups)
+# ---------------------------------------------------------------------------
+_ADMIN_RE = re.compile(
+    r"superintendent|principal|administrat|\bdean\b|\bdirector\b|"
+    r"business\s*manager|business\s*official|coordinator",
+    re.IGNORECASE,
+)
+
+
+def _classify_position(pos: str) -> str:
+    """Coarse position group: teacher / administrator / other."""
+    p = (pos or "").lower()
+    if "teacher" in p:
+        return "teacher"
+    if _ADMIN_RE.search(p):
+        return "administrator"
+    return "other"
+
+
+# ---------------------------------------------------------------------------
+# Schema self-migration (additive, idempotent, prod-safe)
+# ---------------------------------------------------------------------------
+
+def _ensure_eis_schema(conn) -> None:
+    """Create the EIS tables/indexes if missing. Safe to run repeatedly and in
+    production (CREATE ... IF NOT EXISTS only; no drops, no type changes)."""
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS il_eis_district (
+            id BIGSERIAL PRIMARY KEY,
+            state_district_id TEXT NOT NULL,
+            school_year VARCHAR(7) NOT NULL,
+            teacher_headcount INTEGER,
+            teacher_fte NUMERIC(12,2),
+            avg_teacher_salary NUMERIC(12,2),
+            median_teacher_salary NUMERIC(12,2),
+            p25_salary NUMERIC(12,2),
+            p75_salary NUMERIC(12,2),
+            total_teacher_base_payroll NUMERIC(16,2),
+            avg_sick_days NUMERIC(6,1),
+            all_staff_headcount INTEGER,
+            all_staff_fte NUMERIC(12,2),
+            loaded_at TIMESTAMPTZ DEFAULT now(),
+            UNIQUE (state_district_id, school_year)
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS il_eis_educator (
+            id BIGSERIAL PRIMARY KEY,
+            state_district_id TEXT NOT NULL,
+            school_year VARCHAR(7) NOT NULL,
+            position_description TEXT,
+            is_teacher BOOLEAN,
+            base_salary NUMERIC(12,2),
+            fte NUMERIC(6,3),
+            fte_salary NUMERIC(12,2),
+            sick_days NUMERIC(6,1),
+            vacation_days NUMERIC(6,1),
+            bonus NUMERIC(12,2),
+            annuities NUMERIC(12,2),
+            retirement_enhancements NUMERIC(12,2),
+            other_benefits NUMERIC(12,2),
+            loaded_at TIMESTAMPTZ DEFAULT now()
+        );
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS il_eis_educator_district_year_idx
+            ON il_eis_educator (state_district_id, school_year);
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS il_eis_educator_year_pos_idx
+            ON il_eis_educator (school_year, position_description);
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS il_eis_position_summary (
+            id BIGSERIAL PRIMARY KEY,
+            state_district_id TEXT NOT NULL,
+            school_year VARCHAR(7) NOT NULL,
+            position_description TEXT NOT NULL,
+            position_group TEXT,
+            headcount INTEGER,
+            total_fte NUMERIC(12,3),
+            avg_salary NUMERIC(12,2),
+            median_salary NUMERIC(12,2),
+            p25_salary NUMERIC(12,2),
+            p75_salary NUMERIC(12,2),
+            avg_sick_days NUMERIC(6,1),
+            avg_vacation_days NUMERIC(6,1),
+            total_base_salary NUMERIC(16,2),
+            total_bonus NUMERIC(16,2),
+            total_annuities NUMERIC(16,2),
+            total_retirement_enhancements NUMERIC(16,2),
+            total_other_benefits NUMERIC(16,2),
+            loaded_at TIMESTAMPTZ DEFAULT now(),
+            UNIQUE (state_district_id, school_year, position_description)
+        );
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS il_eis_position_summary_district_year_idx
+            ON il_eis_position_summary (state_district_id, school_year);
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS il_eis_position_summary_group_idx
+            ON il_eis_position_summary (school_year, position_group);
+    """)
+
+    # Self-repair any partial drift: additively add every non-key column if a
+    # table already exists from an older version. CREATE TABLE IF NOT EXISTS
+    # alone would leave a pre-existing table missing newer columns.
+    _eis_alters = {
+        "il_eis_educator": [
+            ("position_description", "TEXT"), ("is_teacher", "BOOLEAN"),
+            ("base_salary", "NUMERIC(12,2)"), ("fte", "NUMERIC(6,3)"),
+            ("fte_salary", "NUMERIC(12,2)"), ("sick_days", "NUMERIC(6,1)"),
+            ("vacation_days", "NUMERIC(6,1)"), ("bonus", "NUMERIC(12,2)"),
+            ("annuities", "NUMERIC(12,2)"),
+            ("retirement_enhancements", "NUMERIC(12,2)"),
+            ("other_benefits", "NUMERIC(12,2)"),
+            ("loaded_at", "TIMESTAMPTZ DEFAULT now()"),
+        ],
+        "il_eis_position_summary": [
+            ("position_group", "TEXT"), ("headcount", "INTEGER"),
+            ("total_fte", "NUMERIC(12,3)"), ("avg_salary", "NUMERIC(12,2)"),
+            ("median_salary", "NUMERIC(12,2)"), ("p25_salary", "NUMERIC(12,2)"),
+            ("p75_salary", "NUMERIC(12,2)"), ("avg_sick_days", "NUMERIC(6,1)"),
+            ("avg_vacation_days", "NUMERIC(6,1)"),
+            ("total_base_salary", "NUMERIC(16,2)"),
+            ("total_bonus", "NUMERIC(16,2)"),
+            ("total_annuities", "NUMERIC(16,2)"),
+            ("total_retirement_enhancements", "NUMERIC(16,2)"),
+            ("total_other_benefits", "NUMERIC(16,2)"),
+            ("loaded_at", "TIMESTAMPTZ DEFAULT now()"),
+        ],
+    }
+    for table, cols in _eis_alters.items():
+        for col, sqltype in cols:
+            cur.execute(
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {sqltype}"
+            )
+
+    conn.commit()
+    cur.close()
+
+
 # ---------------------------------------------------------------------------
 # Per-file processor
 # ---------------------------------------------------------------------------
@@ -170,6 +334,11 @@ def _process_file(path: Path) -> tuple[int, str, float, float]:
     sick_col    = _find_col(norm_map, _SICK_KEYS)
     fte_col     = _find_col(norm_map, _FTE_KEYS, exclude_substr="salary")
     ftesal_col  = _find_col(norm_map, _FTE_SALARY_KEYS)
+    vac_col     = _find_col(norm_map, _VACATION_KEYS)
+    bonus_col   = _find_col(norm_map, _BONUS_KEYS)
+    annu_col    = _find_col(norm_map, _ANNUITY_KEYS)
+    ret_col     = _find_col(norm_map, _RETIRE_ENH_KEYS)
+    other_col   = _find_col(norm_map, _OTHER_BEN_KEYS)
 
     missing = [k for k, v in {"year": year_col, "rcdts": rcdts_col,
                                "position": pos_col, "fte": fte_col,
@@ -193,8 +362,22 @@ def _process_file(path: Path) -> tuple[int, str, float, float]:
     df["_rcdts"]   = df[rcdts_col].map(_normalize_rcdts)
     df["_fte"]     = df[fte_col].map(_to_float)
     df["_ftesal"]  = df[ftesal_col].map(_to_float)
-    df["_basesal"] = df[base_col].map(_to_float) if base_col else None
-    df["_sick"]    = df[sick_col].map(_to_float) if sick_col else None
+    # Optional numeric columns -> float64 (NaN where absent) so groupby
+    # aggregations below are safe; missing source column => all-NaN column.
+    df["_basesal"] = (df[base_col].map(_to_float).astype("float64")
+                      if base_col else np.nan)
+    df["_sick"]    = (df[sick_col].map(_to_float).astype("float64")
+                      if sick_col else np.nan)
+    df["_vac"]     = (df[vac_col].map(_to_float).astype("float64")
+                      if vac_col else np.nan)
+    df["_bonus"]   = (df[bonus_col].map(_to_float).astype("float64")
+                      if bonus_col else np.nan)
+    df["_annu"]    = (df[annu_col].map(_to_float).astype("float64")
+                      if annu_col else np.nan)
+    df["_ret"]     = (df[ret_col].map(_to_float).astype("float64")
+                      if ret_col else np.nan)
+    df["_other"]   = (df[other_col].map(_to_float).astype("float64")
+                      if other_col else np.nan)
 
     # Drop rows with null RCDTS
     total_rows = len(df)
@@ -258,6 +441,98 @@ def _process_file(path: Path) -> tuple[int, str, float, float]:
     if not results:
         return 0, school_yr, 0.0, 0.0
 
+    # -----------------------------------------------------------------------
+    # Per-educator rows (anonymized — names were dropped at read time).
+    # Stored unmasked (raw salaries) so downstream stats can be recomputed.
+    # tolist() converts numpy scalars to Python natives; _n() maps NaN -> None.
+    # -----------------------------------------------------------------------
+    df["_pos"] = df[pos_col].fillna("").astype(str).str.strip()
+    pos_series = df["_pos"].where(df["_pos"] != "", None)
+
+    rcdts_l  = df["_rcdts"].tolist()
+    pos_l    = pos_series.tolist()
+    teach_l  = df["_is_teacher"].tolist()
+    base_l   = df["_basesal"].tolist()
+    fte_l    = df["_fte"].tolist()
+    ftesal_l = df["_ftesal"].tolist()
+    sick_l   = df["_sick"].tolist()
+    vac_l    = df["_vac"].tolist()
+    bonus_l  = df["_bonus"].tolist()
+    annu_l   = df["_annu"].tolist()
+    ret_l    = df["_ret"].tolist()
+    other_l  = df["_other"].tolist()
+
+    educator_rows = [
+        (
+            rcdts_l[i], school_yr, pos_l[i], bool(teach_l[i]),
+            _n(base_l[i]), _n(fte_l[i]), _n(ftesal_l[i]), _n(sick_l[i]),
+            _n(vac_l[i]), _n(bonus_l[i]), _n(annu_l[i]), _n(ret_l[i]),
+            _n(other_l[i]),
+        )
+        for i in range(len(rcdts_l))
+    ]
+
+    # -----------------------------------------------------------------------
+    # Per-position summaries (district x position_description).
+    # -----------------------------------------------------------------------
+    pos_df = df[df["_pos"] != ""].copy()
+    summary_rows: list = []
+    if not pos_df.empty:
+        g = pos_df.groupby(["_rcdts", "_pos"])
+        agg = pd.DataFrame({
+            "headcount":   g.size(),
+            "total_fte":   g["_fte"].apply(lambda s: s.dropna().sum()
+                                           if s.notna().any() else np.nan),
+            "avg_sick":    g["_sick"].mean(),
+            "avg_vac":     g["_vac"].mean(),
+            "total_base":  g["_basesal"].sum(min_count=1),
+            "total_bonus": g["_bonus"].sum(min_count=1),
+            "total_annu":  g["_annu"].sum(min_count=1),
+            "total_ret":   g["_ret"].sum(min_count=1),
+            "total_other": g["_other"].sum(min_count=1),
+        })
+
+        # FTE-weighted salary stats over positive-FTE, in-range salaries only.
+        sal_df = pos_df[(pos_df["_fte"].fillna(0) > 0)
+                        & pos_df["_ftesal_clean"].notna()].copy()
+        if not sal_df.empty:
+            sal_df["_w"] = sal_df["_ftesal_clean"] * sal_df["_fte"]
+            sg = sal_df.groupby(["_rcdts", "_pos"])
+            sal_agg = pd.DataFrame({
+                "_num":    sg["_w"].sum(),
+                "_den":    sg["_fte"].sum(),
+                "med_sal": sg["_ftesal_clean"].median(),
+                "p25_sal": sg["_ftesal_clean"].quantile(0.25),
+                "p75_sal": sg["_ftesal_clean"].quantile(0.75),
+            })
+            sal_agg["avg_sal"] = (sal_agg["_num"]
+                                  / sal_agg["_den"].where(sal_agg["_den"] > 0))
+            agg = agg.join(sal_agg[["avg_sal", "med_sal", "p25_sal", "p75_sal"]])
+        else:
+            agg[["avg_sal", "med_sal", "p25_sal", "p75_sal"]] = np.nan
+
+        agg = agg.reset_index()
+        agg["_grp"] = agg["_pos"].map(_classify_position)
+
+        c = {col: agg[col].tolist() for col in agg.columns}
+        summary_rows = [
+            (
+                c["_rcdts"][i], school_yr, c["_pos"][i], c["_grp"][i],
+                _n(c["headcount"][i]), _n(c["total_fte"][i]),
+                _n(c["avg_sal"][i]), _n(c["med_sal"][i]),
+                _n(c["p25_sal"][i]), _n(c["p75_sal"][i]),
+                _n(c["avg_sick"][i]), _n(c["avg_vac"][i]),
+                _n(c["total_base"][i]), _n(c["total_bonus"][i]),
+                _n(c["total_annu"][i]), _n(c["total_ret"][i]),
+                _n(c["total_other"][i]),
+            )
+            for i in range(len(c["_rcdts"]))
+        ]
+
+    # -----------------------------------------------------------------------
+    # Write everything in one transaction. DELETE-by-year then insert gives a
+    # clean wholesale replace for the detail tables (the district table upserts).
+    # -----------------------------------------------------------------------
     conn = common.get_db_conn()
     cur  = conn.cursor()
     psycopg2.extras.execute_values(
@@ -286,9 +561,48 @@ def _process_file(path: Path) -> tuple[int, str, float, float]:
         results,
         template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())",
     )
+
+    # Per-educator detail — replace this school year wholesale.
+    cur.execute("DELETE FROM il_eis_educator WHERE school_year = %s", (school_yr,))
+    if educator_rows:
+        psycopg2.extras.execute_values(
+            cur,
+            """
+            INSERT INTO il_eis_educator (
+                state_district_id, school_year, position_description, is_teacher,
+                base_salary, fte, fte_salary, sick_days, vacation_days,
+                bonus, annuities, retirement_enhancements, other_benefits
+            ) VALUES %s
+            """,
+            educator_rows,
+            page_size=5000,
+        )
+
+    # Per-position summaries — replace this school year wholesale.
+    cur.execute("DELETE FROM il_eis_position_summary WHERE school_year = %s",
+                (school_yr,))
+    if summary_rows:
+        psycopg2.extras.execute_values(
+            cur,
+            """
+            INSERT INTO il_eis_position_summary (
+                state_district_id, school_year, position_description, position_group,
+                headcount, total_fte, avg_salary, median_salary, p25_salary,
+                p75_salary, avg_sick_days, avg_vacation_days, total_base_salary,
+                total_bonus, total_annuities, total_retirement_enhancements,
+                total_other_benefits
+            ) VALUES %s
+            """,
+            summary_rows,
+            page_size=5000,
+        )
+
     conn.commit()
     cur.close()
     conn.close()
+
+    log.info("  +%d educator rows, +%d position summaries",
+             len(educator_rows), len(summary_rows))
 
     # Statewide stats for this file
     teacher_rows = [r for r in results if r[3] is not None]
@@ -331,8 +645,13 @@ def main():
             sys.exit(1)
 
     print("\n" + "=" * 68)
-    print("ISBE EIS / ATSB Salary Loader (district aggregates only)")
+    print("ISBE EIS / ATSB Salary Loader (district + educator + position)")
     print("=" * 68)
+
+    # Self-apply the additive schema once before loading (idempotent, prod-safe).
+    _schema_conn = common.get_db_conn()
+    _ensure_eis_schema(_schema_conn)
+    _schema_conn.close()
 
     year_summary: dict[str, dict] = {}
     processed_ok = False

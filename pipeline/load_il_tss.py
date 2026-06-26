@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import sys
+from collections import namedtuple
 from pathlib import Path
 from typing import Any, Optional
 
@@ -35,6 +36,180 @@ FILE_SCHOOL_YEARS: dict[str, str] = {
     "TSS-2025.xlsx":                 "2024-25",
     "TSS-2026.xlsx":                 "2025-26",
 }
+
+
+# ---------------------------------------------------------------------------
+# Extended typed columns
+# ---------------------------------------------------------------------------
+# The full 85-column TSS row is always archived in tss_annual.payload. These
+# fields are *promoted* out of the payload into dedicated, queryable columns so
+# the AI agent and district profiles can read them without JSON gymnastics.
+#
+# Each field is resolved by an EXACT (case-insensitive, whitespace-normalized)
+# header match against the spreadsheet — robust against the duplicate/truncated
+# short headers that a fuzzy substring match would confuse. `kind` selects the
+# sanitizer + SQL type:
+#   money  -> NUMERIC(12,2), range 0..1,000,000 (premiums/salaries; 0 kept)
+#   pct    -> NUMERIC(6,2),  range 0..100 (whole-number percentages)
+#   years  -> INTEGER,       range 0..60
+#   text   -> TEXT,          trimmed string or NULL
+TF = namedtuple("TF", "key column sqltype header kind")
+
+_SQL_BY_KIND = {
+    "money": "NUMERIC(12,2)",
+    "pct":   "NUMERIC(6,2)",
+    "years": "INTEGER",
+    "text":  "TEXT",
+}
+
+EXTENDED_TSS_FIELDS: list[TF] = [
+    # --- Salary schedule structure -----------------------------------------
+    TF("salary_program", "salary_program", "TEXT", "Salary Program", "text"),
+    TF("ma30_begin", "ma30_begin", "NUMERIC(12,2)",
+       "Master's 30-32+ Beginning Salary", "money"),
+    TF("ma30_max", "ma30_max", "NUMERIC(12,2)",
+       "Master's 30-32+ Maximum Salary", "money"),
+    TF("ma30_ytm", "ma30_years_to_max", "INTEGER",
+       "Master's 30-32+ Years to Max", "years"),
+    TF("hss_ytm", "hss_years_to_max", "INTEGER",
+       "Years to Highest Scheduled Salary", "years"),
+    TF("education_level_required", "education_level_required", "TEXT",
+       "Education Level Required to Reach Highest Salary", "text"),
+    TF("masters_10th_year_salary", "masters_10th_year_salary", "NUMERIC(12,2)",
+       "MASTERS 10TH YEAR SALARY", "money"),
+    # --- Contract / structural flags ---------------------------------------
+    TF("severance_pay", "severance_pay", "TEXT", "Severance Pay", "text"),
+    TF("early_retirement_program", "early_retirement_program", "TEXT",
+       "Early Retirement Program", "text"),
+    TF("sick_leave_bank", "sick_leave_bank", "TEXT", "Sick Leave Bank", "text"),
+    TF("trs_included_in_salary", "trs_included_in_salary", "TEXT",
+       "Teacher Retirement System Monies Included in Salary Schedule", "text"),
+    TF("fair_share_provision", "fair_share_provision", "TEXT",
+       "DOES CONTRACT CONTAIN FAIR SHARE PROVISION?", "text"),
+    TF("longevity_pay_provided", "longevity_pay_provided", "TEXT",
+       "LONGEVITY PAY PROVIDED BY CONTRACT?", "text"),
+    # --- Benefits matrix: 6 types x {premium, % employer} x {employee, family}
+    TF("dental_premium_employee", "dental_premium_employee", "NUMERIC(12,2)",
+       "Annual Dental Premium for Employee", "money"),
+    TF("dental_pct_employer_employee", "dental_pct_employer_employee", "NUMERIC(6,2)",
+       "Percentage of Employee Dental Paid by Employer", "pct"),
+    TF("dental_premium_family", "dental_premium_family", "NUMERIC(12,2)",
+       "Annual Dental Premium for Family", "money"),
+    TF("dental_pct_employer_family", "dental_pct_employer_family", "NUMERIC(6,2)",
+       "Percentage of Family Dental Paid by Employer", "pct"),
+    TF("disability_premium_employee", "disability_premium_employee", "NUMERIC(12,2)",
+       "Annual Disability Insurance Premium for Employee", "money"),
+    TF("disability_pct_employer_employee", "disability_pct_employer_employee",
+       "NUMERIC(6,2)",
+       "Percentage of Employee Disability Insurance Paid by Employer", "pct"),
+    TF("disability_premium_family", "disability_premium_family", "NUMERIC(12,2)",
+       "Annual Disability Insurance Premium for Family", "money"),
+    TF("disability_pct_employer_family", "disability_pct_employer_family",
+       "NUMERIC(6,2)",
+       "Percentage of Family Disability Insurance Paid by Employer", "pct"),
+    TF("health_premium_employee", "health_premium_employee", "NUMERIC(12,2)",
+       "Annual Hospitalization Insurance Premium for Employee", "money"),
+    TF("health_pct_employer_employee", "health_pct_employer_employee", "NUMERIC(6,2)",
+       "Percentage of Employee Hospitalization Insurance Paid by Employer", "pct"),
+    TF("health_premium_family", "health_premium_family", "NUMERIC(12,2)",
+       "Annual Hospitalization Insurance Premium for Family", "money"),
+    TF("health_pct_employer_family", "health_pct_employer_family", "NUMERIC(6,2)",
+       "Percentage of Family Hospitalization Insurance Paid by Employer", "pct"),
+    TF("life_premium_employee", "life_premium_employee", "NUMERIC(12,2)",
+       "Annual Life Insurance Premium for Employee", "money"),
+    TF("life_pct_employer_employee", "life_pct_employer_employee", "NUMERIC(6,2)",
+       "Percentage of Employee Life Insurance Paid by Employer", "pct"),
+    TF("life_premium_family", "life_premium_family", "NUMERIC(12,2)",
+       "Annual Life Insurance Premium for Family", "money"),
+    TF("life_pct_employer_family", "life_pct_employer_family", "NUMERIC(6,2)",
+       "Percentage of Family Life Insurance Paid by Employer", "pct"),
+    TF("prescription_premium_employee", "prescription_premium_employee",
+       "NUMERIC(12,2)",
+       "Annual Prescription Insurance Premium for Employee", "money"),
+    TF("prescription_pct_employer_employee", "prescription_pct_employer_employee",
+       "NUMERIC(6,2)",
+       "Percentage of Employee Prescription Insurance Paid by Employer", "pct"),
+    TF("prescription_premium_family", "prescription_premium_family", "NUMERIC(12,2)",
+       "Annual Prescription Insurance Premium for Family", "money"),
+    TF("prescription_pct_employer_family", "prescription_pct_employer_family",
+       "NUMERIC(6,2)",
+       "Percentage of Family Prescription Insurance Paid by Employer", "pct"),
+    TF("vision_premium_employee", "vision_premium_employee", "NUMERIC(12,2)",
+       "Annual Vision Insurance Premium for Employee", "money"),
+    TF("vision_pct_employer_employee", "vision_pct_employer_employee", "NUMERIC(6,2)",
+       "Percentage of Employee Vision Insurance Paid by Employer", "pct"),
+    TF("vision_premium_family", "vision_premium_family", "NUMERIC(12,2)",
+       "Annual Vision Insurance Premium for Family", "money"),
+    TF("vision_pct_employer_family", "vision_pct_employer_family", "NUMERIC(6,2)",
+       "Percentage of Family Vision Insurance Paid by Employer", "pct"),
+    # --- Longevity pay: 4 lanes x {max, years-to-max} ----------------------
+    TF("longevity_ba_max", "longevity_ba_max", "NUMERIC(12,2)",
+       "LONGEVITY BACHELORS MAXIMUM", "money"),
+    TF("longevity_ba_ytm", "longevity_ba_years_to_max", "INTEGER",
+       "YEARS TO LONGEVITY BACHELORS MAXIMUM", "years"),
+    TF("longevity_ma_max", "longevity_ma_max", "NUMERIC(12,2)",
+       "LONGEVITY MASTERS MAXIMUM", "money"),
+    TF("longevity_ma_ytm", "longevity_ma_years_to_max", "INTEGER",
+       "YEARS TO LONGEVITY MASTERS MAXIMUM", "years"),
+    TF("longevity_ma30_max", "longevity_ma30_max", "NUMERIC(12,2)",
+       "LONGEVITY MASTERS 30-32+ MAXIMUM", "money"),
+    TF("longevity_ma30_ytm", "longevity_ma30_years_to_max", "INTEGER",
+       "YEARS TO LONGEVITY MASTERS 30-32+ MAXIMUM", "years"),
+    TF("longevity_hss_max", "longevity_hss_max", "NUMERIC(12,2)",
+       "LONGEVITY HIGHEST SCHEDULED SALARY MAXIMUM", "money"),
+    TF("longevity_hss_ytm", "longevity_hss_years_to_max", "INTEGER",
+       "LONGEVITY HIGHEST YEAR SCHEDULED SALARY MAXIMUM", "years"),
+]
+
+# Base DDL so a fresh database self-creates the table; the ALTER ... ADD COLUMN
+# IF NOT EXISTS in ensure_tss_schema() then adds every extended column.
+_TSS_BASE_DDL = """
+CREATE TABLE IF NOT EXISTS tss_annual (
+    id BIGSERIAL PRIMARY KEY,
+    state CHAR(2) NOT NULL DEFAULT 'IL',
+    state_district_id TEXT NOT NULL,
+    school_year VARCHAR(7) NOT NULL,
+    district_name TEXT,
+    enrollment_range TEXT,
+    affiliation TEXT,
+    ba_begin NUMERIC(12,2), ba_max NUMERIC(12,2), ba_years_to_max INTEGER,
+    ma_begin NUMERIC(12,2), ma_max NUMERIC(12,2), ma_years_to_max INTEGER,
+    highest_scheduled_salary NUMERIC(12,2),
+    trs_board_paid_pct NUMERIC(6,2),
+    contract_expires DATE,
+    personal_days NUMERIC(6,1), sick_days NUMERIC(6,1),
+    payload JSONB NOT NULL,
+    loaded_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (state, state_district_id, school_year)
+);
+"""
+
+# Column order for the dynamic INSERT (keys + base typed + extended + payload).
+_TSS_BASE_DATA_COLS = [
+    "district_name", "enrollment_range", "affiliation",
+    "ba_begin", "ba_max", "ba_years_to_max",
+    "ma_begin", "ma_max", "ma_years_to_max",
+    "highest_scheduled_salary", "trs_board_paid_pct",
+    "contract_expires", "personal_days", "sick_days",
+]
+_TSS_EXT_COLS = [f.column for f in EXTENDED_TSS_FIELDS]
+_TSS_INSERT_COLS = (
+    ["state", "state_district_id", "school_year"]
+    + _TSS_BASE_DATA_COLS + _TSS_EXT_COLS + ["payload"]
+)
+_TSS_UPDATE_COLS = _TSS_BASE_DATA_COLS + _TSS_EXT_COLS + ["payload"]
+_TSS_INSERT_SQL = (
+    "INSERT INTO tss_annual (" + ", ".join(_TSS_INSERT_COLS) + ") VALUES ("
+    + ", ".join(["%s"] * len(_TSS_INSERT_COLS)) + ") "
+    "ON CONFLICT (state, state_district_id, school_year) DO UPDATE SET "
+    + ", ".join(f"{c} = EXCLUDED.{c}" for c in _TSS_UPDATE_COLS)
+    + ", loaded_at = now()"
+)
+
+
+def _norm_hdr(s: Any) -> str:
+    """Normalize a header for exact matching: collapse whitespace, lowercase."""
+    return re.sub(r"\s+", " ", str(s)).strip().lower()
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +289,7 @@ def resolve_columns(headers: list[str]) -> dict[str, Optional[int]]:
     if personal is None:
         personal = ci("personal")
 
-    return {
+    col_map = {
         "rcdt":             ci("rcdt code", "rcdt"),
         "name":             ci("district name", "dist name"),
         "enrollment_range": ci("enrollment range", "ere"),
@@ -136,6 +311,14 @@ def resolve_columns(headers: list[str]) -> dict[str, Optional[int]]:
         "personal":         personal,
         "sick":             sick,
     }
+
+    # Extended typed fields: resolve by EXACT normalized header. Absent in older
+    # vintages (older files lack these columns) -> None, which is fine; the
+    # corresponding typed column is simply left NULL for those rows.
+    norm_map = {_norm_hdr(h): i for i, h in enumerate(headers)}
+    for f in EXTENDED_TSS_FIELDS:
+        col_map[f.key] = norm_map.get(_norm_hdr(f.header))
+    return col_map
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +342,27 @@ def _safe_num(val: Any, lo: float, hi: float) -> Optional[float]:
 def _safe_int(val: Any, lo: int, hi: int) -> Optional[int]:
     f = _safe_num(val, lo, hi)
     return int(round(f)) if f is not None else None
+
+
+def _safe_text(val: Any) -> Optional[str]:
+    """Trim to a non-empty string or None (drops blanks / 'nan' / 'none')."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    return s if s and s.lower() not in ("nan", "none") else None
+
+
+def _sanitize_ext(kind: str, val: Any) -> Any:
+    """Sanitize an extended-field value according to its declared kind."""
+    if kind == "money":
+        return _safe_num(val, 0, 1_000_000)
+    if kind == "pct":
+        return _safe_num(val, 0, 100)
+    if kind == "years":
+        return _safe_int(val, 0, 60)
+    if kind == "text":
+        return _safe_text(val)
+    return None
 
 
 def _parse_date(val: Any) -> Optional[str]:
@@ -361,6 +565,9 @@ def parse_row(
     aff = get("affiliation")
     affiliation = str(aff).strip() if aff is not None and str(aff).strip() else None
 
+    # Extended typed fields, sanitized per their declared kind.
+    ext = {f.key: _sanitize_ext(f.kind, get(f.key)) for f in EXTENDED_TSS_FIELDS}
+
     return {
         "rcdt":             rcdt,
         "district_name":    district_name,
@@ -377,6 +584,7 @@ def parse_row(
         "expires":   _parse_date(get("expires")),
         "personal":  _safe_num(get("personal"),    0, 100),
         "sick":      _safe_num(get("sick"),         0, 400),
+        "ext":       ext,
         "payload":   _payload(headers, row),
     }
 
@@ -399,53 +607,37 @@ def upsert_district(cur, rcdt: str, name: str) -> None:
     )
 
 
+def ensure_tss_schema(conn) -> None:
+    """Self-migrate: create tss_annual if missing, then additively add every
+    extended typed column. Safe to run repeatedly and in production (no drops,
+    no type changes) so an uploaded load applies the schema on its own."""
+    cur = conn.cursor()
+    cur.execute(_TSS_BASE_DDL)
+    for f in EXTENDED_TSS_FIELDS:
+        cur.execute(
+            f"ALTER TABLE tss_annual ADD COLUMN IF NOT EXISTS {f.column} {f.sqltype}"
+        )
+    conn.commit()
+    cur.close()
+
+
 def upsert_tss_row(cur, school_year: str, p: dict) -> None:
-    cur.execute(
-        """
-        INSERT INTO tss_annual
-            (state, state_district_id, school_year, district_name, enrollment_range,
-             affiliation, ba_begin, ba_max, ba_years_to_max, ma_begin, ma_max,
-             ma_years_to_max, highest_scheduled_salary, trs_board_paid_pct,
-             contract_expires, personal_days, sick_days, payload)
-        VALUES ('IL', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (state, state_district_id, school_year) DO UPDATE SET
-            district_name            = EXCLUDED.district_name,
-            enrollment_range         = EXCLUDED.enrollment_range,
-            affiliation              = EXCLUDED.affiliation,
-            ba_begin                 = EXCLUDED.ba_begin,
-            ba_max                   = EXCLUDED.ba_max,
-            ba_years_to_max          = EXCLUDED.ba_years_to_max,
-            ma_begin                 = EXCLUDED.ma_begin,
-            ma_max                   = EXCLUDED.ma_max,
-            ma_years_to_max          = EXCLUDED.ma_years_to_max,
-            highest_scheduled_salary = EXCLUDED.highest_scheduled_salary,
-            trs_board_paid_pct       = EXCLUDED.trs_board_paid_pct,
-            contract_expires         = EXCLUDED.contract_expires,
-            personal_days            = EXCLUDED.personal_days,
-            sick_days                = EXCLUDED.sick_days,
-            payload                  = EXCLUDED.payload,
-            loaded_at                = now()
-        """,
-        (
-            p["rcdt"],
-            school_year,
-            p["district_name"],
-            p["enrollment_range"],
-            p["affiliation"],
-            p["ba_begin"],
-            p["ba_max"],
-            p["ba_ytm"],
-            p["ma_begin"],
-            p["ma_max"],
-            p["ma_ytm"],
-            p["hss"],
-            p["trs_pct"],
-            p["expires"],
-            p["personal"],
-            p["sick"],
-            json.dumps(p["payload"], default=str),
-        ),
-    )
+    """Insert/replace one district-year row, including all extended typed columns.
+
+    The column list and SQL are built once from the declarative spec
+    (_TSS_INSERT_SQL); the values tuple below must stay in the same order:
+    keys, base data columns, extended columns (spec order), then payload.
+    """
+    vals: list[Any] = [
+        "IL", p["rcdt"], school_year,
+        p["district_name"], p["enrollment_range"], p["affiliation"],
+        p["ba_begin"], p["ba_max"], p["ba_ytm"],
+        p["ma_begin"], p["ma_max"], p["ma_ytm"],
+        p["hss"], p["trs_pct"], p["expires"], p["personal"], p["sick"],
+    ]
+    vals += [p["ext"].get(f.key) for f in EXTENDED_TSS_FIELDS]
+    vals.append(json.dumps(p["payload"], default=str))
+    cur.execute(_TSS_INSERT_SQL, vals)
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +647,9 @@ def upsert_tss_row(cur, school_year: str, p: dict) -> None:
 def load_file(conn, path: Path, school_year: str) -> dict:
     """Load one TSS file. Returns stats dict."""
     log.info("%-35s → %s", path.name, school_year)
+
+    # Self-apply the additive schema before loading (idempotent, prod-safe).
+    ensure_tss_schema(conn)
 
     if path.suffix.lower() == ".xls":
         headers, data_rows = load_xls(path)
