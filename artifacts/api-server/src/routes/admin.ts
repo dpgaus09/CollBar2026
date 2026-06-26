@@ -2412,6 +2412,296 @@ router.get("/admin/min-salary-status", requireAdminToken, async (_req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// ISBE salary-dataset uploads (EIS/ATSB + TSS) — browser upload → parse → upsert
+//
+// Deliberately simple: mirrors the min-salary sync (detached python spawn +
+// in-memory pid + sync_run_status row), with a raw-body file upload bolted on.
+// No AI extraction, versioning, or job queue — the loaders just parse the
+// spreadsheet and upsert district aggregates. The DB is the system of record;
+// the uploaded file is copied to object storage best-effort for reproducibility.
+// ---------------------------------------------------------------------------
+
+type DatasetKind = "eis" | "tss";
+
+const LOAD_EIS_SCRIPT = join(PIPELINE_DIR, "load_il_eis.py");
+const LOAD_TSS_SCRIPT = join(PIPELINE_DIR, "load_il_tss.py");
+const IL_EIS_DIR = join(PIPELINE_DIR, "data", "il_eis");
+const IL_TSS_DIR = join(PIPELINE_DIR, "data", "il_tss");
+
+const DATASET_LOG: Record<DatasetKind, string> = {
+  eis: join(PIPELINE_DIR, "logs", "load_il_eis.log"),
+  tss: join(PIPELINE_DIR, "logs", "load_il_tss.log"),
+};
+const DATASET_SYNC_NAME: Record<DatasetKind, string> = {
+  eis: "il_eis_load",
+  tss: "il_tss_load",
+};
+
+interface DatasetRunState {
+  pid: number | null;
+  lastRunAt: Date | null;
+  lastStatus: "running" | "success" | "error" | null;
+  lastFile: string | null;
+  lastSchoolYear: string | null;
+}
+const _datasetState: Record<DatasetKind, DatasetRunState> = {
+  eis: { pid: null, lastRunAt: null, lastStatus: null, lastFile: null, lastSchoolYear: null },
+  tss: { pid: null, lastRunAt: null, lastStatus: null, lastFile: null, lastSchoolYear: null },
+};
+
+/**
+ * Reduce an uploaded filename to a safe basename with an allowed spreadsheet
+ * extension. EIS accepts only .xlsx (openpyxl); TSS accepts .xlsx or .xls.
+ * Returns null if the name is empty or the extension is not allowed.
+ */
+function safeDatasetFilename(rawValue: unknown, kind: DatasetKind): string | null {
+  const base = String(rawValue ?? "").split(/[\\/]/).pop() ?? "";
+  const cleaned = base.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^[._]+/, "").slice(0, 200);
+  if (!cleaned) return null;
+  const ok = kind === "eis" ? /\.xlsx$/i.test(cleaned) : /\.(xlsx|xls)$/i.test(cleaned);
+  return ok ? cleaned : null;
+}
+
+/** Spawn a salary-dataset loader in single-file mode (detached, like min-salary). */
+function spawnDatasetLoad(
+  kind: DatasetKind,
+  filePath: string,
+  schoolYear: string | null,
+): { status: string; pid: number | null } {
+  const st = _datasetState[kind];
+  if (st.pid !== null) {
+    try {
+      process.kill(st.pid, 0);
+      return { status: "already_running", pid: st.pid };
+    } catch {
+      st.pid = null;
+    }
+  }
+
+  mkdirSync(join(PIPELINE_DIR, "logs"), { recursive: true });
+  const logFd = openSync(DATASET_LOG[kind], "a");
+
+  const script = kind === "eis" ? LOAD_EIS_SCRIPT : LOAD_TSS_SCRIPT;
+  const scriptArgs = ["-u", script, "--file", filePath];
+  if (kind === "tss" && schoolYear) scriptArgs.push("--school-year", schoolYear);
+
+  const child = spawn("python3", scriptArgs, {
+    cwd: PIPELINE_DIR,
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+    env: { ...process.env, PYTHONPATH: PIPELINE_DIR },
+  });
+  st.lastRunAt = new Date();
+  st.lastStatus = "running";
+  child.on("exit", (code) => {
+    const finalStatus = code === 0 ? "success" : "error";
+    st.lastStatus = finalStatus;
+    st.lastRunAt = new Date();
+    st.pid = null;
+    void recordSyncRunStatus(DATASET_SYNC_NAME[kind], finalStatus, DATASET_LOG[kind]);
+  });
+  child.unref();
+  st.pid = child.pid ?? null;
+  return { status: "started", pid: st.pid };
+}
+
+async function handleDatasetUpload(req: Request, res: Response): Promise<void> {
+  const kindRaw = String(req.query.kind ?? "").toLowerCase();
+  if (kindRaw !== "eis" && kindRaw !== "tss") {
+    res.status(400).json({ error: "kind must be 'eis' or 'tss'" });
+    return;
+  }
+  const kind = kindRaw as DatasetKind;
+
+  const buf = req.body as Buffer;
+  if (!Buffer.isBuffer(buf) || buf.length === 0) {
+    res.status(400).json({ error: "Empty upload — choose a spreadsheet file." });
+    return;
+  }
+
+  const filename = safeDatasetFilename(req.query.filename, kind);
+  if (!filename) {
+    res.status(400).json({
+      error: kind === "eis"
+        ? "EIS/ATSB files must be .xlsx"
+        : "TSS files must be .xlsx or .xls",
+    });
+    return;
+  }
+
+  // Validate the file's magic bytes so a mistaken PDF/CSV fails fast with a
+  // clear message instead of a confusing Python traceback. .xlsx is a ZIP
+  // ("PK"); legacy .xls is an OLE2 compound file (0xD0 0xCF).
+  const isXlsx = /\.xlsx$/i.test(filename);
+  if (isXlsx) {
+    if (!(buf[0] === 0x50 && buf[1] === 0x4b)) {
+      res.status(400).json({ error: "That doesn't look like a valid .xlsx file." });
+      return;
+    }
+  } else if (!(buf[0] === 0xd0 && buf[1] === 0xcf)) {
+    res.status(400).json({ error: "That doesn't look like a valid .xls file." });
+    return;
+  }
+
+  // School year: required for TSS (the loader cannot auto-detect it), optional
+  // for EIS (derived from the SchoolYearId column in the data).
+  const syNorm = normalizeSchoolYear(req.query.school_year);
+  if (!syNorm.ok) {
+    res.status(400).json({ error: "school_year must look like 2026-27" });
+    return;
+  }
+  const schoolYear = syNorm.value;
+  if (kind === "tss" && !schoolYear) {
+    res.status(400).json({ error: "A school year (e.g. 2026-27) is required for TSS uploads." });
+    return;
+  }
+
+  // Reject a concurrent upload BEFORE writing anything. Otherwise a retry or
+  // double-click during a running load would overwrite the spreadsheet the
+  // child process is still reading (and we'd mutate disk/object storage only to
+  // return "already_running" with an unprocessed file).
+  const active = _datasetState[kind];
+  if (active.pid !== null) {
+    try {
+      process.kill(active.pid, 0);
+      res.status(409).json({
+        error: "A load is already running for this dataset — wait for it to finish.",
+      });
+      return;
+    } catch {
+      active.pid = null;
+    }
+  }
+
+  const dir = kind === "eis" ? IL_EIS_DIR : IL_TSS_DIR;
+  mkdirSync(dir, { recursive: true });
+  const absPath = join(dir, filename);
+  writeFileSync(absPath, buf);
+
+  // Best-effort durable copy: the local filesystem is dev-only and autoscale
+  // instances are stateless, so persist the source spreadsheet to object
+  // storage for reproducibility. The DB is the system of record, so a failure
+  // here must NOT block the load (unlike CBA PDFs, which must be servable).
+  try {
+    await uploadBuffer(
+      `il_salary_datasets/${kind}/${filename}`,
+      buf,
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+  } catch (err) {
+    console.error("Object storage copy failed for salary dataset", kind, filename, err);
+  }
+
+  const { status, pid } = spawnDatasetLoad(kind, absPath, schoolYear);
+  if (status === "already_running") {
+    // Lost a race against another concurrent upload after the pre-write check.
+    res.status(409).json({
+      error: "A load is already running for this dataset — wait for it to finish.",
+    });
+    return;
+  }
+  _datasetState[kind].lastFile = filename;
+  _datasetState[kind].lastSchoolYear = schoolYear;
+  res.json({ ok: true, kind, filename, schoolYear, fileBytes: buf.length, status, pid });
+}
+
+router.post("/admin/upload-salary-dataset", requireAdminToken, (req, res) => {
+  uploadPdfBody(req, res, (err?: unknown) => {
+    if (err) {
+      const status =
+        (err as { status?: number }).status ??
+        (err as { statusCode?: number }).statusCode;
+      if (status === 413) {
+        res.status(413).json({ error: "File too large (max 64 MB)" });
+      } else {
+        res.status(400).json({ error: "Failed to read upload body" });
+      }
+      return;
+    }
+    handleDatasetUpload(req, res).catch((e) => {
+      console.error(e);
+      if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
+    });
+  });
+});
+
+router.get("/admin/salary-dataset-status", requireAdminToken, async (req, res) => {
+  const kindRaw = String(req.query.kind ?? "").toLowerCase();
+  if (kindRaw !== "eis" && kindRaw !== "tss") {
+    res.status(400).json({ error: "kind must be 'eis' or 'tss'" });
+    return;
+  }
+  const kind = kindRaw as DatasetKind;
+  const st = _datasetState[kind];
+
+  let running = false;
+  if (st.pid !== null) {
+    try { process.kill(st.pid, 0); running = true; } catch { st.pid = null; }
+  }
+  if (!running && st.lastStatus === "running") st.lastStatus = null;
+
+  let tailLines: string[] = [];
+  try {
+    const content = readFileSync(DATASET_LOG[kind], "utf8");
+    tailLines = content.split("\n").filter(Boolean).slice(-40);
+  } catch { /* log may not exist yet */ }
+
+  try {
+    // Durable last-run outcome — survives API restarts (these load rarely).
+    let persistedStatus: "success" | "error" | null = null;
+    let persistedRunAt: string | null = null;
+    try {
+      const rows = await db.execute(sql`
+        SELECT status, run_at FROM sync_run_status
+        WHERE sync_name = ${DATASET_SYNC_NAME[kind]} LIMIT 1
+      `);
+      const row = rows.rows[0] as { status: string; run_at: string | Date } | undefined;
+      if (row) {
+        persistedStatus = row.status === "success" ? "success" : "error";
+        persistedRunAt =
+          row.run_at instanceof Date ? row.run_at.toISOString() : String(row.run_at);
+      }
+    } catch (tableErr) {
+      const msg = String(tableErr);
+      if (!msg.includes("does not exist") && !msg.includes("relation")) throw tableErr;
+    }
+
+    // School years already loaded for this dataset, straight from the data table.
+    let loadedYears: string[] = [];
+    try {
+      const table = kind === "eis" ? "il_eis_district" : "tss_annual";
+      const whereIL = kind === "tss" ? "WHERE state = 'IL'" : "";
+      const rows = await db.execute(sql.raw(
+        `SELECT DISTINCT school_year FROM ${table} ${whereIL} ORDER BY school_year DESC LIMIT 8`,
+      ));
+      loadedYears = rows.rows.map((r) => String((r as { school_year: string }).school_year));
+    } catch (tableErr) {
+      const msg = String(tableErr);
+      if (!msg.includes("does not exist") && !msg.includes("relation")) throw tableErr;
+    }
+
+    const lastStatus = running ? "running" : (st.lastStatus ?? persistedStatus ?? null);
+    const lastRunAt = running
+      ? (st.lastRunAt?.toISOString() ?? null)
+      : (st.lastRunAt?.toISOString() ?? persistedRunAt);
+
+    res.json({
+      running,
+      pid: st.pid,
+      lastStatus,
+      lastRunAt,
+      lastFile: st.lastFile,
+      lastSchoolYear: st.lastSchoolYear,
+      loadedYears,
+      tail: tailLines,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Customer management endpoints (users table, role = 'district_user')
 // ---------------------------------------------------------------------------
 

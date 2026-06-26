@@ -509,7 +509,78 @@ def load_file(conn, path: Path, school_year: str) -> dict:
 # Main
 # ---------------------------------------------------------------------------
 
+def _load_single(path: Path, school_year: Optional[str]) -> None:
+    """Load one uploaded TSS file with an explicit school year (admin upload).
+
+    The school year cannot be auto-detected from TSS data, so it must be given
+    on the command line (or fall back to the built-in filename map). Exits
+    non-zero on failure so the admin panel surfaces an error.
+    """
+    if not path.exists():
+        log.error("File not found: %s", path)
+        sys.exit(1)
+
+    sy = (school_year or "").strip() or FILE_SCHOOL_YEARS.get(path.name)
+    if not sy:
+        log.error("No school year for %s — pass --school-year YYYY-YY (e.g. 2026-27)",
+                  path.name)
+        sys.exit(1)
+    if not re.match(r"^\d{4}-\d{2}$", sy):
+        log.error("Invalid --school-year %r — expected YYYY-YY (e.g. 2026-27)", sy)
+        sys.exit(1)
+
+    conn = common.get_db_conn()
+    try:
+        r = load_file(conn, path, sy)
+    except Exception as exc:
+        import traceback
+        log.error("Fatal error loading %s: %s", path.name, exc)
+        traceback.print_exc()
+        conn.close()
+        sys.exit(1)
+    conn.close()
+
+    W = 72
+    print()
+    print("=" * W)
+    print("  Illinois TSS Load Summary (single file)")
+    print("=" * W)
+    print(f"  File         : {path.name}")
+    print(f"  School Year  : {sy}")
+    print(f"  Districts    : {r['loaded']:,}")
+    print(f"  ba_begin     : {r['ba_begin_count']:,}")
+    print(f"  expires      : {r['expires_count']:,}")
+    print(f"  Skipped      : {r['skipped']:,}")
+    print("=" * W)
+    print()
+
+    if r["loaded"] == 0:
+        log.error("No rows loaded from %s — the file may not be a TSS export "
+                  "(expected an 'RCDT' header row).", path.name)
+        sys.exit(1)
+
+
 def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Load Illinois Teacher Salary Study (TSS) data into tss_annual",
+    )
+    parser.add_argument(
+        "--file",
+        help="Process a single TSS file instead of the built-in file list. "
+             "Used by the admin upload.",
+    )
+    parser.add_argument(
+        "--school-year", dest="school_year",
+        help="School year in YYYY-YY form (e.g. 2026-27) for the uploaded --file. "
+             "Required for files not in the built-in filename map.",
+    )
+    args = parser.parse_args()
+
+    if args.file:
+        _load_single(Path(args.file), args.school_year)
+        return
+
     conn = common.get_db_conn()
     results: list[tuple[str, dict]] = []
 

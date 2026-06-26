@@ -5218,10 +5218,252 @@ function ExtractionEngineTab() {
 }
 
 // ---------------------------------------------------------------------------
+// Salary dataset uploads (ISBE EIS/ATSB + TSS) — browser upload → parse → upsert
+// ---------------------------------------------------------------------------
+
+interface SalaryDatasetStatus {
+  running: boolean;
+  pid: number | null;
+  lastStatus: "running" | "success" | "error" | null;
+  lastRunAt: string | null;
+  lastFile: string | null;
+  lastSchoolYear: string | null;
+  loadedYears: string[];
+  tail: string[];
+}
+
+function useSalaryDatasetStatus(kind: "eis" | "tss") {
+  return useQuery<SalaryDatasetStatus>({
+    queryKey: ["/api/admin/salary-dataset-status", kind],
+    queryFn: () =>
+      fetch(apiUrl(`/api/admin/salary-dataset-status?kind=${kind}`), {
+        credentials: "include",
+      }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    refetchInterval: (query) => (query.state.data?.running ? 3_000 : 30_000),
+    retry: false,
+  });
+}
+
+function SalaryDatasetCard({
+  kind,
+  title,
+  description,
+  accept,
+  requireSchoolYear,
+  schoolYearHint,
+}: {
+  kind: "eis" | "tss";
+  title: string;
+  description: string;
+  accept: string;
+  requireSchoolYear: boolean;
+  schoolYearHint?: string;
+}) {
+  const queryClient = useQueryClient();
+  const { data, refetch } = useSalaryDatasetStatus(kind);
+  const [file, setFile] = useState<File | null>(null);
+  const [schoolYear, setSchoolYear] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const running = data?.running ?? false;
+  const lastStatus = data?.lastStatus ?? null;
+  const lastRunAt = data?.lastRunAt ?? null;
+  const tail = data?.tail ?? [];
+  const loadedYears = data?.loadedYears ?? [];
+
+  const statusColor =
+    running ? "text-amber-400"
+    : lastStatus === "success" ? "text-emerald-400"
+    : lastStatus === "error" ? "text-red-400"
+    : loadedYears.length > 0 ? "text-emerald-400"
+    : "text-slate-500";
+  const statusLabel =
+    running ? "loading…"
+    : lastStatus === "success" ? "last load: success"
+    : lastStatus === "error" ? "last load: failed"
+    : loadedYears.length > 0 ? "loaded"
+    : "never loaded";
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    if (!file) {
+      setError("Choose a spreadsheet file to upload.");
+      return;
+    }
+    if (requireSchoolYear && !schoolYear.trim()) {
+      setError("Enter the school year this file covers (e.g. 2026-27).");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const params = new URLSearchParams({ kind, filename: file.name });
+      if (schoolYear.trim()) params.set("school_year", schoolYear.trim());
+      const r = await fetch(apiUrl(`/api/admin/upload-salary-dataset?${params}`), {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: file,
+      });
+      const body = (await r.json()) as { ok?: boolean; status?: string; error?: string };
+      if (!r.ok || !body.ok) {
+        setError(body.error ?? `Upload failed (HTTP ${r.status})`);
+      } else if (body.status === "already_running") {
+        setError("A load is already running for this dataset — wait for it to finish.");
+      } else {
+        setFile(null);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        queryClient.invalidateQueries({ queryKey: ["/api/admin/salary-dataset-status", kind] });
+        refetch();
+      }
+    } catch {
+      setError("Network error during upload.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-950 p-5 space-y-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="space-y-1">
+          <h3 className="text-sm font-semibold text-slate-200">{title}</h3>
+          <p className="text-xs text-slate-500 max-w-md">{description}</p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {running && (
+            <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+          )}
+          <span className={`text-xs font-mono font-medium ${statusColor}`}>{statusLabel}</span>
+        </div>
+      </div>
+
+      {loadedYears.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[11px] text-slate-500">Loaded years:</span>
+          {loadedYears.map((y) => (
+            <span
+              key={y}
+              className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-300"
+            >
+              {y}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {lastStatus === "error" && !running && (
+        <div className="rounded border border-red-900/60 bg-red-950/40 px-3 py-2 text-xs text-red-300">
+          ✗ Last load failed. Check the log below and re-upload once resolved.
+        </div>
+      )}
+
+      <form onSubmit={handleSubmit} className="space-y-3">
+        <div className="flex flex-col sm:flex-row gap-3 sm:items-end">
+          <label className="flex-1 space-y-1">
+            <span className="block text-[11px] text-slate-500">Spreadsheet file</span>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept={accept}
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              className="block w-full text-xs text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border file:border-slate-700 file:bg-slate-900 file:text-slate-300 file:text-xs hover:file:border-sky-600 file:cursor-pointer"
+            />
+          </label>
+          {requireSchoolYear && (
+            <label className="space-y-1">
+              <span className="block text-[11px] text-slate-500">School year</span>
+              <input
+                type="text"
+                value={schoolYear}
+                onChange={(e) => setSchoolYear(e.target.value)}
+                placeholder={schoolYearHint ?? "2026-27"}
+                className="w-28 px-2 py-1.5 rounded border border-slate-700 bg-slate-900 text-xs text-slate-200 font-mono focus:border-sky-600 focus:outline-none"
+              />
+            </label>
+          )}
+          <button
+            type="submit"
+            disabled={running || submitting}
+            className="shrink-0 text-xs px-4 py-1.5 rounded border border-slate-700 hover:border-sky-600 text-slate-300 hover:text-sky-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {running ? "Loading…" : submitting ? "Uploading…" : "Upload & load"}
+          </button>
+        </div>
+        {!requireSchoolYear && (
+          <p className="text-[11px] text-slate-600">
+            The school year is detected automatically from the file.
+          </p>
+        )}
+      </form>
+
+      {error && <div className="text-xs text-red-400">{error}</div>}
+
+      <div className="text-xs text-slate-500">
+        {lastRunAt
+          ? `Last load: ${new Date(lastRunAt).toLocaleString()}`
+          : "No upload yet."}
+        {data?.lastFile ? ` · ${data.lastFile}` : ""}
+        {data?.lastSchoolYear ? ` · ${data.lastSchoolYear}` : ""}
+      </div>
+
+      {tail.length > 0 && (
+        <details className="text-xs" open={lastStatus === "error" && !running}>
+          <summary className="cursor-pointer text-slate-500 hover:text-slate-300 select-none">
+            Run log ({tail.length} line{tail.length === 1 ? "" : "s"})
+          </summary>
+          <pre className="mt-2 text-[10px] leading-relaxed text-slate-500 bg-slate-950 border border-slate-800 rounded p-3 max-h-48 overflow-auto whitespace-pre-wrap">
+            {tail.join("\n")}
+          </pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function SalaryDataTab() {
+  return (
+    <div className="space-y-6">
+      <div className="space-y-1">
+        <h2 className="text-lg font-semibold text-slate-100">ISBE Salary Data</h2>
+        <p className="text-sm text-slate-500 max-w-2xl">
+          Upload the annual ISBE spreadsheets to refresh teacher salary benchmarks.
+          Pick the file ISBE provides, click <em>Upload &amp; load</em>, and the data
+          is parsed and written straight to the database. Re-uploading the same year
+          is safe — it overwrites that year's figures.
+        </p>
+      </div>
+
+      <SalaryDatasetCard
+        kind="tss"
+        title="Teacher Salary Study (TSS)"
+        description="ISBE Teacher Salary Study — district salary schedules (BA/MA begin & max, TRS, contract expirations). Download from ISBE, then enter the school year it covers."
+        accept=".xlsx,.xls"
+        requireSchoolYear
+        schoolYearHint="2026-27"
+      />
+
+      <SalaryDatasetCard
+        kind="eis"
+        title="EIS / ATSB Salary Data"
+        description="ISBE Employment Information System / Administrator-Teacher Salary & Benefits export (e.g. SY25-Admin-Teacher-Salary-Benefit.xlsx). District-level teacher salary aggregates — no individual names are stored."
+        accept=".xlsx"
+        requireSchoolYear={false}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page shell with tab routing
 // ---------------------------------------------------------------------------
 
-type TabKey = "overview" | "crawl-report" | "extraction-report" | "extraction" | "review-queue" | "alerts" | "eis-crosscheck" | "customers" | "upload";
+type TabKey = "overview" | "crawl-report" | "extraction-report" | "extraction" | "review-queue" | "alerts" | "eis-crosscheck" | "customers" | "upload" | "salary-data";
 
 function useAlertsPendingCount() {
   return useQuery<{ pendingCount: number }>({
@@ -5241,6 +5483,7 @@ const TABS: { key: TabKey; label: string; path: string }[] = [
   { key: "extraction-report", label: "Extraction", path: "/admin/extraction-report" },
   { key: "extraction", label: "Extraction Engine", path: "/admin/extraction" },
   { key: "upload", label: "Upload CBA", path: "/admin/upload" },
+  { key: "salary-data", label: "Salary Data", path: "/admin/salary-data" },
   { key: "review-queue", label: "Review Queue", path: "/admin/review-queue" },
   { key: "alerts", label: "Alerts", path: "/admin/alerts" },
   { key: "eis-crosscheck", label: "EIS Cross-Check", path: "/admin/eis-crosscheck" },
@@ -5249,6 +5492,7 @@ const TABS: { key: TabKey; label: string; path: string }[] = [
 
 function activeTab(location: string): TabKey {
   if (location.includes("/admin/alerts")) return "alerts";
+  if (location.includes("/admin/salary-data")) return "salary-data";
   if (location.includes("/admin/upload")) return "upload";
   if (location.includes("review-queue")) return "review-queue";
   if (location.includes("extraction-report")) return "extraction-report";
@@ -5352,6 +5596,7 @@ export default function AdminPage() {
             <EditContractUnitSection />
           </div>
         )}
+        {tab === "salary-data" && <SalaryDataTab />}
         {tab === "review-queue" && <ReviewQueueTab />}
         {tab === "alerts" && <AlertsTab />}
         {tab === "eis-crosscheck" && <EisXCheckTab />}

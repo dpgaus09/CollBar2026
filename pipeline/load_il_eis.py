@@ -306,25 +306,57 @@ def _process_file(path: Path) -> tuple[int, str, float, float]:
 # ---------------------------------------------------------------------------
 
 def main():
-    files = sorted(IL_EIS_DIR.glob("*.xlsx"))
-    if not files:
-        log.error("No .xlsx files found in %s", IL_EIS_DIR)
-        sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Load ISBE EIS/ATSB salary data into il_eis_district",
+    )
+    parser.add_argument(
+        "--file",
+        help="Process a single .xlsx file (school year auto-detected from the "
+             "data) instead of globbing the data dir. Used by the admin upload.",
+    )
+    args = parser.parse_args()
+
+    single_file_mode = bool(args.file)
+    if single_file_mode:
+        one = Path(args.file)
+        if not one.exists():
+            log.error("File not found: %s", one)
+            sys.exit(1)
+        files = [one]
+    else:
+        files = sorted(IL_EIS_DIR.glob("*.xlsx"))
+        if not files:
+            log.error("No .xlsx files found in %s", IL_EIS_DIR)
+            sys.exit(1)
 
     print("\n" + "=" * 68)
     print("ISBE EIS / ATSB Salary Loader (district aggregates only)")
     print("=" * 68)
 
     year_summary: dict[str, dict] = {}
+    processed_ok = False
 
     for path in files:
         rows, yr, fte, avg_sal = _process_file(path)
-        if yr == "unknown":
+        if yr == "unknown" or rows == 0:
             continue
+        processed_ok = True
         year_summary.setdefault(yr, {"rows": 0, "fte": 0.0, "avg": 0.0})
         year_summary[yr]["rows"] = max(year_summary[yr]["rows"], rows)
         year_summary[yr]["fte"]  = max(year_summary[yr]["fte"], fte)
         year_summary[yr]["avg"]  = max(year_summary[yr]["avg"], avg_sal)
+
+    # In single-file (upload) mode, a file that produced no usable rows is a
+    # hard failure so the admin panel surfaces an error instead of "success".
+    if single_file_mode and not processed_ok:
+        log.error(
+            "No usable rows parsed from %s — the file may not be an EIS/ATSB "
+            "salary export (expected SchoolYearId, RCDTS, PositionCodeDescription, "
+            "FullTimeEquivalent, FTESalary columns).",
+            files[0].name,
+        )
+        sys.exit(1)
 
     print(f"\n{'School Year':<12} {'Districts':>10} {'Teacher FTE':>13} {'FW Avg Salary':>15}")
     print("-" * 54)
