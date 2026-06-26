@@ -33,8 +33,9 @@ ISBE_URL = (
     "https://www.isbe.net/_layouts/Download.aspx"
     "?SourceUrl=/Documents/dir_ed_entities.xls"
 )
-DOWNLOAD_UA      = "CollBarBot/1.0 (hello@collbar.com)"
-DOWNLOAD_TIMEOUT = 30
+ISBE_REFERER     = "https://www.isbe.net/Pages/Data-Analysis-Directories.aspx"
+DOWNLOAD_UA      = "Mozilla/5.0 (compatible; CollBarBot/1.0; +https://collbar.com)"
+DOWNLOAD_TIMEOUT = 45
 DOWNLOAD_RETRIES = 3
 
 IL_DIR_DIR = common.DATA_DIR / "il_directory"
@@ -63,8 +64,15 @@ def _ensure_log_table(conn) -> None:
 
 def _download_xls() -> bytes:
     """Download ISBE directory XLS with exponential-backoff retry."""
-    headers = {"User-Agent": DOWNLOAD_UA, "Accept": "*/*"}
+    headers = {
+        "User-Agent": DOWNLOAD_UA,
+        "Accept": "application/vnd.ms-excel,application/octet-stream,*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": ISBE_REFERER,
+    }
     last_exc: Exception | None = None
+    last_status: int | None = None
+    last_content_len: int = 0
     for attempt in range(DOWNLOAD_RETRIES):
         wait = 2 ** (attempt + 1)
         try:
@@ -72,16 +80,29 @@ def _download_xls() -> bytes:
                 ISBE_URL, headers=headers,
                 timeout=DOWNLOAD_TIMEOUT, allow_redirects=True,
             )
-            if r.status_code == 200 and len(r.content) > 1000:
+            last_status = r.status_code
+            last_content_len = len(r.content)
+            if r.status_code == 200 and last_content_len > 1000:
                 return r.content
-            log.warning("HTTP %s (attempt %d) — retrying in %ds", r.status_code, attempt + 1, wait)
+            log.warning(
+                "HTTP %s body=%d bytes (attempt %d) — retrying in %ds",
+                r.status_code, last_content_len, attempt + 1, wait,
+            )
         except Exception as exc:
             last_exc = exc
             log.warning("Download error (attempt %d): %s — retrying in %ds", attempt + 1, exc, wait)
         if attempt < DOWNLOAD_RETRIES - 1:
             time.sleep(wait)
+
+    # Build a diagnostic message that surfaces in the admin panel error field.
+    if last_exc is not None:
+        root_cause = f"{type(last_exc).__name__}: {last_exc}"
+    elif last_status is not None:
+        root_cause = f"HTTP {last_status}, body={last_content_len} bytes"
+    else:
+        root_cause = "unknown error"
     raise RuntimeError(
-        f"Failed to download ISBE directory after {DOWNLOAD_RETRIES} attempts"
+        f"Failed to download ISBE directory after {DOWNLOAD_RETRIES} attempts ({root_cause})"
     ) from last_exc
 
 
