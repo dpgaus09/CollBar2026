@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useLocation } from "wouter";
-import { useAuth, useLogout } from "@/hooks/use-auth";
+import { useAuth } from "@/hooks/use-auth";
 import { apiUrl } from "@/lib/api";
+import { WorkspaceShell } from "@/components/workspace-shell";
+import { useRoster, useMatters, useActiveMatter } from "@/hooks/use-firm";
 
 interface FirmMe {
   firm: { id: number; name: string; planTier: "state" | "region" | "national" };
@@ -11,81 +12,73 @@ interface FirmMe {
   pendingInvites: Array<{ id: number; email: string; role: string }>;
 }
 
-const TIER_LABEL: Record<string, string> = {
-  state: "State",
-  region: "Regional",
-  national: "National",
-};
-
-// The authenticated firm workspace shell. Phase 1 establishes the chrome (firm
-// name, sign-out, teammate roster + invite) that later phases mount pages into.
+// Firm workspace home: a quick overview (roster + matter counts, active matter)
+// plus the team roster and (for admins) the invite control.
 export default function AppHomePage() {
-  const { isAuthenticated, isLoading, firm, isAdmin, districtId, email } = useAuth();
-  const [, setLocation] = useLocation();
-  const logout = useLogout();
-
-  // Client-side guard. Server endpoints enforce the same rules; this only keeps
-  // the wrong audience from staring at an empty shell.
-  useEffect(() => {
-    if (isLoading) return;
-    if (!isAuthenticated) {
-      setLocation("/login");
-      return;
-    }
-    if (!firm) {
-      setLocation(isAdmin ? "/admin" : districtId ? `/dashboard/${districtId}` : "/dashboard");
-    }
-  }, [isLoading, isAuthenticated, firm, isAdmin, districtId, setLocation]);
+  const { isAuthenticated, firm } = useAuth();
+  const enabled = isAuthenticated && !!firm;
+  const base = import.meta.env.BASE_URL;
 
   const { data, isLoading: meLoading, refetch } = useQuery<FirmMe>({
     queryKey: ["/api/firm/me"],
-    queryFn: () => fetch(apiUrl("/api/firm/me"), { credentials: "include" }).then((r) => r.json()),
-    enabled: isAuthenticated && !!firm,
+    queryFn: () =>
+      fetch(apiUrl("/api/firm/me"), { credentials: "include" }).then((r) => r.json()),
+    enabled,
   });
 
-  if (isLoading || !isAuthenticated || !firm) {
-    return (
-      <main className="min-h-screen bg-slate-950 flex items-center justify-center">
-        <div className="w-6 h-6 rounded-full border-2 border-blue-500 border-t-transparent animate-spin" />
-      </main>
-    );
-  }
+  const roster = useRoster(enabled);
+  const matters = useMatters(enabled);
+  const active = useActiveMatter(enabled);
 
-  const isFirmAdmin = data?.role === "firm_admin" || firm.role === "firm_admin";
+  const isFirmAdmin = data?.role === "firm_admin" || firm?.role === "firm_admin";
+
+  const rosterCount = roster.data?.roster.length ?? 0;
+  const matterCount = matters.data?.matters.length ?? 0;
+  const activeName = active.data?.matter?.name ?? "None selected";
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
-      <header className="border-b border-slate-800 px-6 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-2 h-2 rounded-full bg-blue-500" />
-          <div>
-            <h1 className="text-sm font-semibold text-slate-100 leading-none">
-              {firm.name}
-            </h1>
+    <WorkspaceShell>
+      <div className="space-y-8">
+        <section className="space-y-1">
+          <h2 className="text-lg font-semibold text-slate-100">
+            Welcome to your workspace
+          </h2>
+          <p className="text-sm text-slate-400">
+            Your firm's shared research workspace. Build a client roster, group
+            districts into matters, and switch the active matter from the header.
+          </p>
+        </section>
+
+        <section className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <a
+            href={`${base}app/roster`}
+            className="rounded-xl border border-slate-800 bg-slate-900 p-5 hover:border-slate-700 transition-colors"
+          >
+            <p className="text-xs text-slate-500">Tracked districts</p>
+            <p className="text-2xl font-semibold text-slate-100 mt-1">
+              {roster.isLoading ? "…" : rosterCount}
+            </p>
+            <p className="text-xs text-blue-400 mt-2">Manage roster →</p>
+          </a>
+          <a
+            href={`${base}app/matters`}
+            className="rounded-xl border border-slate-800 bg-slate-900 p-5 hover:border-slate-700 transition-colors"
+          >
+            <p className="text-xs text-slate-500">Matters</p>
+            <p className="text-2xl font-semibold text-slate-100 mt-1">
+              {matters.isLoading ? "…" : matterCount}
+            </p>
+            <p className="text-xs text-blue-400 mt-2">View matters →</p>
+          </a>
+          <div className="rounded-xl border border-slate-800 bg-slate-900 p-5">
+            <p className="text-xs text-slate-500">Active matter</p>
+            <p className="text-sm font-medium text-slate-100 mt-2 truncate">
+              {active.isLoading ? "…" : activeName}
+            </p>
             <p className="text-[11px] text-slate-500 mt-1">
-              {TIER_LABEL[firm.planTier] ?? firm.planTier} workspace
+              Switch from the header dropdown.
             </p>
           </div>
-        </div>
-        <div className="flex items-center gap-3">
-          <span className="hidden sm:inline text-xs text-slate-500">{email}</span>
-          <button
-            onClick={() => logout.mutate()}
-            className="text-xs text-slate-300 hover:text-white border border-slate-700 rounded-md px-3 py-1.5 hover:bg-slate-800 transition-colors"
-          >
-            Sign out
-          </button>
-        </div>
-      </header>
-
-      <main id="main-content" className="max-w-3xl mx-auto px-6 py-10 space-y-8">
-        <section className="space-y-1">
-          <h2 className="text-lg font-semibold text-slate-100">Welcome to your workspace</h2>
-          <p className="text-sm text-slate-400">
-            This is your firm's shared research workspace. Client rosters,
-            cross-district comparisons, clause search, and settlement alerts will
-            appear here as they come online.
-          </p>
         </section>
 
         <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 space-y-4">
@@ -99,8 +92,12 @@ export default function AppHomePage() {
             {(data?.members ?? []).map((m) => (
               <li key={m.id} className="flex items-center justify-between py-2.5">
                 <div className="min-w-0">
-                  <p className="text-sm text-slate-200 truncate">{m.name ?? m.email}</p>
-                  {m.name && <p className="text-xs text-slate-500 truncate">{m.email}</p>}
+                  <p className="text-sm text-slate-200 truncate">
+                    {m.name ?? m.email}
+                  </p>
+                  {m.name && (
+                    <p className="text-xs text-slate-500 truncate">{m.email}</p>
+                  )}
                 </div>
                 <span
                   className={`text-[11px] px-2 py-0.5 rounded-full border ${
@@ -122,8 +119,8 @@ export default function AppHomePage() {
             onInvited={() => refetch()}
           />
         )}
-      </main>
-    </div>
+      </div>
+    </WorkspaceShell>
   );
 }
 
@@ -151,7 +148,11 @@ function InviteSection({
         credentials: "include",
         body: JSON.stringify({ email: email.trim() }),
       });
-      const body = (await res.json()) as { ok?: boolean; inviteLink?: string; error?: string };
+      const body = (await res.json()) as {
+        ok?: boolean;
+        inviteLink?: string;
+        error?: string;
+      };
       if (res.ok && body.ok) {
         setEmail("");
         if (body.inviteLink) {

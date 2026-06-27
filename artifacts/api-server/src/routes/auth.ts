@@ -21,6 +21,10 @@ declare module "express-session" {
     // login/signup/invite-accept; resolved fresh by lib/firm-access.ts.
     activeFirmId?: number | null;
     firmRole?: "firm_admin" | "member" | null;
+    // The firm workspace's current matter context (Phase 2). Validated against
+    // the active firm on read; cleared when stale (matter deleted or firm
+    // switched). Later phases operate over this matter's selection set.
+    activeMatterId?: number | null;
   }
 }
 

@@ -8,6 +8,9 @@ import LoginPage from "@/pages/login";
 import FirmSignupPage from "@/pages/firm/signup";
 import AcceptInvitePage from "@/pages/firm/accept-invite";
 import AppHomePage from "@/pages/app/index";
+import RosterPage from "@/pages/app/roster";
+import MattersPage from "@/pages/app/matters";
+import MatterDetailPage from "@/pages/app/matter-detail";
 import DashboardIndexPage from "@/pages/dashboard/index";
 import DistrictDashboardPage from "@/pages/dashboard/district";
 import ClausesPage from "@/pages/dashboard/clauses";
@@ -78,6 +81,9 @@ function Router() {
 
       {/* Firm workspace */}
       <Route path="/app" component={AppHomePage} />
+      <Route path="/app/roster" component={RosterPage} />
+      <Route path="/app/matters" component={MattersPage} />
+      <Route path="/app/matters/:id" component={MatterDetailPage} />
 
       {/* Toolkit (free + paid + admin) */}
       <Route path="/toolkit" component={ToolkitPage} />

@@ -279,6 +279,64 @@ async function runMigrations(): Promise<void> {
     logger.info("Migration OK: firms / firm_members / firm_invites ensured");
 
     // -----------------------------------------------------------------------
+    // Phase 2 — Client roster & matters (firm workspace selection sets).
+    // Firm-scoped; part of the firm_members entitlement, never the CFO gate().
+    // Dual-declared in lib/db/src/schema/matters.ts (verified by check-drift).
+    // -----------------------------------------------------------------------
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS tracked_districts (
+        id          bigserial PRIMARY KEY,
+        firm_id     bigint NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+        district_id bigint NOT NULL REFERENCES districts(id) ON DELETE CASCADE,
+        label       text,
+        created_by  bigint REFERENCES users(id) ON DELETE SET NULL,
+        created_at  timestamptz NOT NULL DEFAULT NOW(),
+        CONSTRAINT tracked_districts_firm_district_unique UNIQUE (firm_id, district_id)
+      )
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS tracked_districts_firm_idx ON tracked_districts(firm_id)
+    `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS matters (
+        id                  bigserial PRIMARY KEY,
+        firm_id             bigint NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+        name                text NOT NULL,
+        primary_district_id bigint REFERENCES districts(id) ON DELETE SET NULL,
+        status              text NOT NULL DEFAULT 'active',
+        created_by          bigint REFERENCES users(id) ON DELETE SET NULL,
+        created_at          timestamptz NOT NULL DEFAULT NOW(),
+        CONSTRAINT matters_status_check CHECK (status IN ('active','archived'))
+      )
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS matters_firm_idx ON matters(firm_id)
+    `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS matter_districts (
+        matter_id   bigint NOT NULL REFERENCES matters(id) ON DELETE CASCADE,
+        district_id bigint NOT NULL REFERENCES districts(id) ON DELETE CASCADE,
+        role        text NOT NULL,
+        created_at  timestamptz NOT NULL DEFAULT NOW(),
+        CONSTRAINT matter_districts_pkey PRIMARY KEY (matter_id, district_id),
+        CONSTRAINT matter_districts_role_check CHECK (role IN ('client','peer'))
+      )
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS matter_districts_district_idx ON matter_districts(district_id)
+    `);
+    // Safety net beyond the API transactions: at most one 'client' per matter.
+    // (check-drift ignores indexes, so this does not affect the guardrail.)
+    await db.execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS matter_districts_one_client_idx
+        ON matter_districts(matter_id) WHERE role = 'client'
+    `);
+
+    logger.info("Migration OK: tracked_districts / matters / matter_districts ensured");
+
+    // -----------------------------------------------------------------------
     // IL ELRB board-vs-union final offers (Task #112).
     //
     // 1. Allow source_documents.doc_type = 'final_offer' (the scraped offer
