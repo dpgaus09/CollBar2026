@@ -553,3 +553,85 @@ export async function downloadExport(
   // and revoking synchronously can cancel it.
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
+
+// ===========================================================================
+// Phase 6 — Settlement alerts on tracked districts.
+//
+// A firm subscribes a district to an event type (new settlement / new contract)
+// and the feed surfaces alerts the on-demand data refresh wrote for those
+// subscriptions (no polling, no new store — the feed joins the shared `alerts`
+// table). All endpoints are firm-scoped (requireFirmSession); a district or
+// subscription id outside the firm's workspace is a 404. The API's event_type
+// is 'new_settlement' / 'new_doc'; the UI labels 'new_doc' "New contract".
+// ===========================================================================
+
+export type AlertEventType = "new_settlement" | "new_doc";
+
+export interface AlertSubscription {
+  id: number;
+  districtId: number;
+  districtName: string;
+  eventType: AlertEventType;
+  createdAt: string | null;
+}
+
+export interface FirmAlert {
+  id: number;
+  districtId: number;
+  districtName: string;
+  eventType: AlertEventType;
+  docName: string | null;
+  sourceUrl: string | null;
+  status: string;
+  detectedAt: string | null;
+}
+
+export const ALERT_SUBSCRIPTIONS_KEY = ["/api/firm/alert-subscriptions"];
+export const FIRM_ALERTS_KEY = ["/api/firm/alerts"];
+
+export function useAlertSubscriptions(enabled = true) {
+  return useQuery<{ subscriptions: AlertSubscription[] }>({
+    queryKey: ALERT_SUBSCRIPTIONS_KEY,
+    queryFn: () => firmFetch("/api/firm/alert-subscriptions"),
+    enabled,
+  });
+}
+
+export function useFirmAlerts(enabled = true) {
+  return useQuery<{ alerts: FirmAlert[] }>({
+    queryKey: FIRM_ALERTS_KEY,
+    queryFn: () => firmFetch("/api/firm/alerts"),
+    enabled,
+  });
+}
+
+export function useCreateAlertSubscription() {
+  const qc = useQueryClient();
+  return useMutation<
+    AlertSubscription,
+    Error,
+    { districtId: number; eventType: AlertEventType }
+  >({
+    mutationFn: (vars) =>
+      firmFetch<AlertSubscription>("/api/firm/alert-subscriptions", {
+        method: "POST",
+        body: JSON.stringify(vars),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ALERT_SUBSCRIPTIONS_KEY });
+      qc.invalidateQueries({ queryKey: FIRM_ALERTS_KEY });
+    },
+  });
+}
+
+export function useDeleteAlertSubscription() {
+  const qc = useQueryClient();
+  return useMutation<{ ok: boolean; id: number }, Error, number>({
+    mutationFn: (id) =>
+      firmFetch(`/api/firm/alert-subscriptions/${id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ALERT_SUBSCRIPTIONS_KEY });
+      qc.invalidateQueries({ queryKey: FIRM_ALERTS_KEY });
+    },
+  });
+}

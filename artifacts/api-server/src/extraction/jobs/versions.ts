@@ -25,6 +25,7 @@ import {
   computeComparisons,
 } from "../domains/final-offers-store";
 import { storeContractMetaForDoc } from "../domains/contract-meta-store";
+import { recordSettlementAlertsForDoc } from "../../lib/alert-detection";
 import { EMPTY_CONTRACT_META, type ContractMeta } from "../domains/contract-meta";
 import type {
   SalarySchedule,
@@ -291,6 +292,10 @@ export async function promoteVersion(
       const r = await storeSettlementsForDoc(v.sourceDocId, settlements);
       store = r;
       targets = r.inserted;
+      // Phase 6 — fire firm settlement alerts for subscribed districts. Best-
+      // effort + idempotent (own dedup index): a failure here must never break
+      // the promotion, and a later re-promote re-runs detection harmlessly.
+      await recordSettlementAlertsForDoc(v.sourceDocId, settlements);
     } else if (domain === "contract_meta") {
       const meta =
         ((v.normalized as { meta?: ContractMeta })?.meta) ?? EMPTY_CONTRACT_META;

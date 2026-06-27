@@ -10,6 +10,7 @@ import { sql } from "drizzle-orm";
 import { VALID_BARGAINING_UNITS, BARGAINING_UNIT_LABELS } from "./bargaining-units.js";
 import { runPromotion } from "../lib/promote.js";
 import { uploadBuffer, uploadedCbaKey } from "../lib/objectStorage.js";
+import { recordNewContractAlert } from "../lib/alert-detection.js";
 import {
   parseDriveFolderId,
   listFolderTree,
@@ -1727,6 +1728,17 @@ async function handleCbaUpload(req: Request, res: Response): Promise<void> {
     throw err;
   }
 
+  // Phase 6 — a genuinely new CBA document (the duplicate path returned a 409
+  // above) fires exactly one 'new_doc' (new contract) alert for any firm that
+  // subscribes this district. Best-effort + idempotent on source_doc_id.
+  await recordNewContractAlert({
+    sourceDocId,
+    districtId,
+    docName: filename,
+    sourceUrl,
+    fileHash,
+  });
+
   // Ensure a contracts row exists so promotion can attach extracted data, then
   // enqueue a single-doc extraction job for the in-process worker to run.
   await ensureContractForUpload(sourceDocId, districtId, unit, schoolYear);
@@ -2008,6 +2020,18 @@ async function bulkIngestOneFile(
         return fail(`source_documents insert failed: ${msg}`);
       }
     }
+  }
+
+  // Phase 6 — only a genuinely new doc (not a content-dedup hit) fires a
+  // 'new_doc' alert for subscribed firms. Best-effort + idempotent.
+  if (status === "ingested") {
+    await recordNewContractAlert({
+      sourceDocId,
+      districtId,
+      docName: filename,
+      sourceUrl: `upload://district-${districtId}/${unit}/${filename}`,
+      fileHash,
+    });
   }
 
   // Pin the bargaining unit (unit_override), ensure an attachable contract row,

@@ -11,6 +11,7 @@ export * from "./extraction_runs";
 export * from "./users";
 export * from "./benchmarks";
 export * from "./alerts";
+export * from "./alert-subscriptions";
 export * from "./cdss_staging";
 export * from "./peer_sets";
 export * from "./tracker_stats_cache";

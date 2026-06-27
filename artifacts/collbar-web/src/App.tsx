@@ -15,6 +15,7 @@ import ComparePage from "@/pages/app/compare";
 import ClauseSearchPage from "@/pages/app/clause-search";
 import ClauseComparePage from "@/pages/app/clause-compare";
 import ExportsPage from "@/pages/app/exports";
+import AlertsPage from "@/pages/app/alerts";
 import DashboardIndexPage from "@/pages/dashboard/index";
 import DistrictDashboardPage from "@/pages/dashboard/district";
 import ClausesPage from "@/pages/dashboard/clauses";
@@ -92,6 +93,7 @@ function Router() {
       <Route path="/app/clause-search" component={ClauseSearchPage} />
       <Route path="/app/clause-compare" component={ClauseComparePage} />
       <Route path="/app/exports" component={ExportsPage} />
+      <Route path="/app/alerts" component={AlertsPage} />
 
       {/* Toolkit (free + paid + admin) */}
       <Route path="/toolkit" component={ToolkitPage} />

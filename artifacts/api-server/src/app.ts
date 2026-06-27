@@ -415,6 +415,53 @@ async function runMigrations(): Promise<void> {
     logger.info("Migration OK: firm_exports ensured");
 
     // -----------------------------------------------------------------------
+    // Phase 6 — Settlement alerts on tracked districts (firm workspace).
+    // One row per (firm, district, event_type) subscription. event_type
+    // mirrors alerts.alert_type ('new_settlement' / 'new_doc') so the firm feed
+    // joins the shared global `alerts` table on (district_id, event_type) — no
+    // parallel alerts store. Firm-scoped (firm_members / requireFirmSession),
+    // never the per-district gate(). Dual-declared in
+    // lib/db/src/schema/alert-subscriptions.ts (verified by check-drift).
+    // -----------------------------------------------------------------------
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS alert_subscriptions (
+        id          bigserial PRIMARY KEY,
+        firm_id     bigint NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+        district_id bigint NOT NULL REFERENCES districts(id) ON DELETE CASCADE,
+        event_type  text NOT NULL,
+        created_by  bigint REFERENCES users(id) ON DELETE SET NULL,
+        created_at  timestamptz NOT NULL DEFAULT NOW(),
+        CONSTRAINT alert_subscriptions_firm_district_event_unique UNIQUE (firm_id, district_id, event_type),
+        CONSTRAINT alert_subscriptions_event_type_check CHECK (event_type IN ('new_settlement','new_doc'))
+      )
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS alert_subscriptions_firm_idx ON alert_subscriptions(firm_id)
+    `);
+
+    // Idempotency guards on the shared `alerts` table (indexes only — no new
+    // columns, so check-drift, which compares column sets, is unaffected). The
+    // detection service writes at most one alert per real-world event:
+    //  - new_settlement: file_hash holds a deterministic machine key
+    //    sha256("settlement:v1:<district>:<unit>:<from>:<to>"). file_hash is
+    //    immutable (the admin acknowledge endpoint rewrites notes, never
+    //    file_hash), so it is a safe dedup key across re-promotions (stated
+    //    settlements are delete+reinserted, so row ids are NOT stable).
+    //  - new_doc: dedup on source_doc_id. Existing pipeline new_doc rows carry
+    //    a NULL source_doc_id, so the partial predicate excludes them and the
+    //    index build never conflicts with historical data.
+    await db.execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS alerts_new_settlement_event_uniq
+        ON alerts (file_hash) WHERE alert_type = 'new_settlement'
+    `);
+    await db.execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS alerts_new_doc_source_uniq
+        ON alerts (source_doc_id) WHERE alert_type = 'new_doc' AND source_doc_id IS NOT NULL
+    `);
+
+    logger.info("Migration OK: alert_subscriptions + alerts dedup indexes ensured");
+
+    // -----------------------------------------------------------------------
     // IL ELRB board-vs-union final offers (Task #112).
     //
     // 1. Allow source_documents.doc_type = 'final_offer' (the scraped offer
