@@ -17,6 +17,7 @@ const NAV_ITEMS = [
   { href: "/app", label: "Workspace" },
   { href: "/app/roster", label: "Roster" },
   { href: "/app/matters", label: "Matters" },
+  { href: "/app/compare", label: "Compare" },
 ];
 
 // Shared chrome for every authenticated firm workspace page: firm header, the

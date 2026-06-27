@@ -261,3 +261,88 @@ export function useSetActiveMatter() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ACTIVE_MATTER_KEY }),
   });
 }
+
+// ===========================================================================
+// Phase 3 — Cross-District Comparison Matrix.
+//
+// POST /api/firm/compare returns a districts × metrics grid where every cell is
+// computed from STORED structured data (no LLM) and carries full provenance. A
+// cell is only present when its value can be cited; an absent cell means "no
+// citable value" and renders empty (never fabricated).
+// ===========================================================================
+
+export type CompareColumnKind =
+  | "pct"
+  | "money"
+  | "count"
+  | "years"
+  | "bool"
+  | "text";
+
+export interface CompareColumn {
+  id: string;
+  label: string;
+  source: "settlement" | "provision";
+  kind: CompareColumnKind;
+  unit: string | null;
+  group: string;
+}
+
+export interface CompareDistrict {
+  districtId: number;
+  name: string;
+  county: string | null;
+  districtType: string | null;
+  enrollment: number | null;
+  state: string;
+  role: "client" | "peer" | null;
+}
+
+export interface CompareCell {
+  value: number | string | boolean;
+  kind: CompareColumnKind;
+  unit: string | null;
+  confidence: number | null;
+  humanVerified: boolean;
+  verifiedBy: string | null;
+  provisionId: number | null;
+  settlementId: number | null;
+  clauseExcerpt: string | null;
+  pageRef: number | null;
+  sourceUrl: string | null;
+  retrievedAt: string | null;
+}
+
+export interface CompareMatrix {
+  bargainingUnit: string;
+  matterId: number | null;
+  matterName: string | null;
+  districts: CompareDistrict[];
+  // The columns actually present in this response (selected subset, ordered).
+  columns: CompareColumn[];
+  // Every column the user could choose from (for the column picker).
+  catalog: CompareColumn[];
+  cells: Record<string, Record<string, CompareCell>>;
+}
+
+export interface CompareRequest {
+  matterId?: number | null;
+  districtIds?: number[];
+  bargainingUnit?: string;
+  columns?: string[];
+}
+
+export const COMPARE_KEY = ["/api/firm/compare"];
+
+export function useCompareMatrix(req: CompareRequest, enabled = true) {
+  return useQuery<CompareMatrix>({
+    queryKey: [...COMPARE_KEY, req],
+    queryFn: () =>
+      firmFetch<CompareMatrix>("/api/firm/compare", {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+    enabled,
+    staleTime: 30_000,
+  });
+}

@@ -32,3 +32,22 @@ export function sourceHref(
   }
   return `${sourceUrl}${hash}`;
 }
+
+// The firm-workspace counterpart to sourceHref. Identical behavior, but routes
+// upload:// PDFs through /api/firm/document, which authorizes by FIRM scope
+// rather than the per-district gate()/isFree() rules. Use this for any document
+// link rendered inside the /app workspace (comparison matrix, clause search,
+// etc.) so peer-district PDFs stay reachable for free-plan firm members.
+export function firmSourceHref(
+  sourceUrl?: string | null,
+  pageRef?: number | null,
+): string | null {
+  if (!sourceUrl) return null;
+  const hash = pageRef != null ? `#page=${pageRef}` : "";
+  if (sourceUrl.startsWith("upload://")) {
+    const params = new URLSearchParams({ src: sourceUrl });
+    if (documentToken) params.set("token", documentToken);
+    return `${apiUrl("api/firm/document")}?${params.toString()}${hash}`;
+  }
+  return `${sourceUrl}${hash}`;
+}
