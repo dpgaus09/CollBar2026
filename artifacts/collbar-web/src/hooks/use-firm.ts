@@ -346,3 +346,117 @@ export function useCompareMatrix(req: CompareRequest, enabled = true) {
     staleTime: 30_000,
   });
 }
+
+// ===========================================================================
+// Phase 4 — Clause search & side-by-side clause comparison.
+//
+// Retrieval-first keyword search over the VERBATIM clause language stored in
+// contract_provisions, scoped to the firm's workspace (roster ∪ matters). Every
+// returned clause is a real, fully-cited stored clause; the optional model
+// synthesis only summarizes the retrieved clauses and is null when unavailable.
+// clause-compare lines up ONE provision type across districts side by side.
+// ===========================================================================
+
+export type ClauseScope = "matter" | "tracked" | "explicit" | "all";
+
+export interface ClauseRow {
+  provisionId: number;
+  districtId: number;
+  districtName: string;
+  county: string | null;
+  state: string;
+  category: string | null;
+  provisionKey: string | null;
+  valueNumeric: number | null;
+  valueText: string | null;
+  unit: string | null;
+  clauseExcerpt: string;
+  pageRef: number | null;
+  confidence: number | null;
+  humanVerified: boolean;
+  sourceUrl: string | null;
+  retrievedAt: string | null;
+  rank?: number;
+}
+
+export interface ClauseSearchRequest {
+  query: string;
+  scope: ClauseScope;
+  matterId?: number | null;
+  districtIds?: number[];
+  category?: string | null;
+  provisionKey?: string | null;
+  bargainingUnit?: string;
+  limit?: number;
+  synthesize?: boolean;
+}
+
+export interface ClauseSearchResponse {
+  query: string;
+  scope: ClauseScope;
+  bargainingUnit: string;
+  matterId: number | null;
+  matterName: string | null;
+  category: string | null;
+  provisionKey: string | null;
+  clauses: ClauseRow[];
+  synthesis: string | null;
+}
+
+export interface ClauseProvisionType {
+  category: string | null;
+  provisionKey: string;
+  districtCount: number;
+}
+
+export interface ClauseCompareRequest {
+  scope: ClauseScope;
+  provisionKey?: string | null;
+  matterId?: number | null;
+  districtIds?: number[];
+  bargainingUnit?: string;
+  synthesize?: boolean;
+}
+
+export interface ClauseCompareResponse {
+  scope: ClauseScope;
+  bargainingUnit: string;
+  matterId: number | null;
+  matterName: string | null;
+  provisionKey: string | null;
+  availableTypes: ClauseProvisionType[];
+  clauses: ClauseRow[];
+  synthesis: string | null;
+}
+
+// Clause search is a user-initiated action that can trigger an expensive model
+// call, so it's a mutation (fires only on submit) rather than an auto-firing
+// query; the result persists on `.data` until the next search.
+export function useClauseSearch() {
+  return useMutation<ClauseSearchResponse, Error, ClauseSearchRequest>({
+    mutationFn: (req) =>
+      firmFetch<ClauseSearchResponse>("/api/firm/clause-search", {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+  });
+}
+
+export const CLAUSE_COMPARE_KEY = ["/api/firm/clause-compare"];
+
+// One query backs both the provision-type picker (provisionKey omitted → cheap,
+// no model call) and the side-by-side comparison (provisionKey set → clauses +
+// optional synthesis). Callers keep the two concerns on separate keys so the
+// picker stays stable while a comparison loads.
+export function useClauseCompare(req: ClauseCompareRequest, enabled = true) {
+  return useQuery<ClauseCompareResponse>({
+    queryKey: [...CLAUSE_COMPARE_KEY, req],
+    queryFn: () =>
+      firmFetch<ClauseCompareResponse>("/api/firm/clause-compare", {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+    enabled,
+    staleTime: 60_000,
+  });
+}

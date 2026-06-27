@@ -18,6 +18,8 @@ const NAV_ITEMS = [
   { href: "/app/roster", label: "Roster" },
   { href: "/app/matters", label: "Matters" },
   { href: "/app/compare", label: "Compare" },
+  { href: "/app/clause-search", label: "Clause search" },
+  { href: "/app/clause-compare", label: "Clause compare" },
 ];
 
 // Shared chrome for every authenticated firm workspace page: firm header, the

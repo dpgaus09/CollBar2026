@@ -499,6 +499,35 @@ async function runMigrations(): Promise<void> {
     logger.info("Migration OK: contracts.unit_override ensured");
 
     // -----------------------------------------------------------------------
+    // Clause full-text search (Task #203 — Phase 4). A STORED generated tsvector
+    // over the verbatim clause language so the firm workspace can keyword-search
+    // contract_provisions.clause_excerpt and rank by relevance. Weighted
+    // A=clause_excerpt (the verbatim clause), B=value_text, C=provision_key +
+    // category so excerpt matches outrank metadata matches. Uses the two-arg
+    // to_tsvector('english', ...) form, which is IMMUTABLE and therefore valid
+    // in a GENERATED column (the one-arg form depends on a GUC and is not).
+    // Additive + idempotent; declared (name only) in lib/db schema for the drift
+    // guard. Kept in lockstep with that declaration.
+    // -----------------------------------------------------------------------
+    await db.execute(sql`
+      ALTER TABLE contract_provisions
+        ADD COLUMN IF NOT EXISTS clause_tsv tsvector
+        GENERATED ALWAYS AS (
+          setweight(to_tsvector('english', coalesce(clause_excerpt, '')), 'A') ||
+          setweight(to_tsvector('english', coalesce(value_text, '')), 'B') ||
+          setweight(to_tsvector('english', coalesce(replace(provision_key, '_', ' '), '') || ' ' || coalesce(category, '')), 'C')
+        ) STORED
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS contract_provisions_clause_tsv_idx
+        ON contract_provisions USING GIN (clause_tsv)
+    `);
+
+    logger.info(
+      "Migration OK: contract_provisions.clause_tsv + GIN index ensured",
+    );
+
+    // -----------------------------------------------------------------------
     // TS-native extraction engine cache (Task #174). Operational cache table
     // (managed here like login_events / sync_run_status, not by Drizzle). One
     // row per (file_hash, request_hash) — the deterministic key for a vision

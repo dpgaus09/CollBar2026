@@ -7,6 +7,7 @@ import {
 import { db, BARGAINING_UNITS } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import { requireFirmSession } from "../lib/firm-access.js";
+import { firmScopeDistrictIds } from "../lib/firm-scope.js";
 import { verifyDocumentAccessToken } from "../lib/documentToken.js";
 import { streamObjectTo, uploadedCbaKey } from "../lib/objectStorage.js";
 
@@ -216,26 +217,6 @@ function publicColumn(c: ColumnDef) {
     unit: c.unit,
     group: c.group,
   };
-}
-
-// The full set of districts a firm may compare: everything on its roster plus
-// every district attached to one of its matters. Used to authorize an explicit
-// districtIds request (the matterId path is authorized by firm ownership of the
-// matter itself).
-async function firmScopeDistrictIds(firmId: number): Promise<Set<number>> {
-  const r = await db.execute(sql`
-    SELECT district_id FROM tracked_districts WHERE firm_id = ${firmId}
-    UNION
-    SELECT md.district_id
-    FROM matter_districts md
-    JOIN matters m ON m.id = md.matter_id
-    WHERE m.firm_id = ${firmId}
-  `);
-  return new Set(
-    (r.rows as Array<{ district_id: unknown }>).map((row) =>
-      Number(row.district_id),
-    ),
-  );
 }
 
 interface Cell {
