@@ -217,7 +217,7 @@ function nav(): string {
   <div class="nav-links">
     <a href="${BASE_URL}/tracker" class="hide-mobile">Tracker</a>
     <a href="${BASE_URL}/login">Sign in</a>
-    <a href="${BASE_URL}/signup" class="nav-btn">Free account</a>
+    <a href="${BASE_URL}/login" class="nav-btn">Free account</a>
   </div>
 </nav>`.trim();
 }
@@ -383,7 +383,7 @@ ${nav()}
       Create a free account to see your district's full settlement history, key clauses,
       and upcoming contract expirations.
     </div>
-    <a href="${BASE_URL}/signup" class="btn btn-primary">Create free account</a>
+    <a href="${BASE_URL}/login" class="btn btn-primary">Create free account</a>
     <a href="${BASE_URL}/login" class="btn btn-ghost">Sign in</a>
   </div>
 </div>
@@ -579,14 +579,14 @@ router.get("/oh/:slug", async (req: Request, res: Response) => {
               </div>
             </div>
             <div class="comp-overlay">
-              <a href="${BASE_URL}/signup?district=${esc(rawSlug)}">Unlock</a>
+              <a href="${BASE_URL}/login">Unlock</a>
             </div>
           </div>
         </div>`,
       )
       .join("\n");
 
-    const signupHref = `${BASE_URL}/signup?district=${esc(rawSlug)}`;
+    const signupHref = `${BASE_URL}/login`;
 
     const body = `
 ${nav()}
@@ -780,7 +780,7 @@ router.get("/il/:slug", async (req: Request, res: Response) => {
         </div>`
       : `<div class="card"><div class="card-body" style="color:#475569">No settlement data extracted yet. Extraction pipeline coming soon.</div></div>`;
 
-    const signupHref = `${BASE_URL}/signup?district=${esc(rawSlug)}`;
+    const signupHref = `${BASE_URL}/login`;
 
     const compCards = comps.map((comp) => `
         <div class="comp-card">
@@ -895,11 +895,7 @@ router.get("/sitemap.xml", async (_req: Request, res: Response) => {
     <changefreq>daily</changefreq>
     <priority>0.9</priority>
   </url>
-  <url>
-    <loc>${BASE_URL}/signup</loc>
-    <changefreq>monthly</changefreq>
-    <priority>0.8</priority>
-  </url>${urls.join("")}
+  ${urls.join("")}
 </urlset>`;
 
     res

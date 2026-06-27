@@ -62,9 +62,6 @@ export default function TrackerPage() {
           <span className="text-slate-600 text-xs">Illinois K-12 Settlement Tracker</span>
         </div>
         <div className="flex items-center gap-4">
-          <a href={`${import.meta.env.BASE_URL}signup`} className="text-xs text-blue-400 hover:text-blue-300">
-            Free account
-          </a>
           <a href={`${import.meta.env.BASE_URL}login`} className="text-xs text-slate-500 hover:text-slate-300">
             Sign in
           </a>
@@ -212,14 +209,8 @@ export default function TrackerPage() {
               </p>
               <div className="flex items-center justify-center gap-3">
                 <a
-                  href={`${import.meta.env.BASE_URL}signup`}
-                  className="px-5 py-2.5 rounded bg-blue-700 hover:bg-blue-600 text-sm font-semibold text-white transition-colors"
-                >
-                  Create free account
-                </a>
-                <a
                   href={`${import.meta.env.BASE_URL}login`}
-                  className="px-5 py-2.5 rounded border border-slate-700 text-sm text-slate-400 hover:text-slate-200 hover:border-slate-500 transition-colors"
+                  className="px-5 py-2.5 rounded bg-blue-700 hover:bg-blue-600 text-sm font-semibold text-white transition-colors"
                 >
                   Sign in
                 </a>

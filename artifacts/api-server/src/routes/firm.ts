@@ -31,99 +31,12 @@ function hashToken(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
-function isDuplicateEmail(err: unknown): boolean {
-  const msg = String(err);
-  return msg.includes("users_email") || msg.includes("duplicate key");
-}
-
 const router: IRouter = Router();
 
-// ----------------------------------------------------------------------------
-// POST /api/firm/signup
-// Create a brand-new firm + its first member (firm_admin) and sign them in.
-// body: { firmName, email, name?, password }
-// ----------------------------------------------------------------------------
-router.post("/firm/signup", loginLimiter, async (req: Request, res: Response) => {
-  const { firmName, email, name, password } = req.body as {
-    firmName?: string;
-    email?: string;
-    name?: string;
-    password?: string;
-  };
-
-  if (!firmName?.trim() || !email || !password) {
-    res.status(400).json({ error: "Firm name, email, and password are required." });
-    return;
-  }
-  const normalized = normEmail(email);
-  if (!isEmail(normalized)) {
-    res.status(400).json({ error: "Please enter a valid email address." });
-    return;
-  }
-  if (password.length < MIN_PASSWORD) {
-    res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD} characters.` });
-    return;
-  }
-
-  try {
-    const existing = await db.execute(
-      sql`SELECT id FROM users WHERE email = ${normalized} LIMIT 1`,
-    );
-    if (existing.rows.length) {
-      res.status(409).json({ error: "An account with this email already exists. Please sign in." });
-      return;
-    }
-
-    const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
-
-    const { userId, firmId } = await db.transaction(async (tx) => {
-      const u = await tx.execute(sql`
-        INSERT INTO users (email, name, password_hash, role, plan, active)
-        VALUES (${normalized}, ${name?.trim() || null}, ${passwordHash}, 'district_user', 'free', true)
-        RETURNING id
-      `);
-      const uid = Number((u.rows[0] as { id: unknown }).id);
-      const f = await tx.execute(sql`
-        INSERT INTO firms (name, plan_tier) VALUES (${firmName.trim()}, 'state') RETURNING id
-      `);
-      const fid = Number((f.rows[0] as { id: unknown }).id);
-      await tx.execute(sql`
-        INSERT INTO firm_members (firm_id, user_id, role) VALUES (${fid}, ${uid}, 'firm_admin')
-      `);
-      return { userId: uid, firmId: fid };
-    });
-
-    try {
-      await db.execute(sql`INSERT INTO login_events (user_id) VALUES (${userId})`);
-    } catch (e) {
-      console.error("Failed to record login_event:", e);
-    }
-    await db.execute(sql`UPDATE users SET last_sign_in_at = NOW() WHERE id = ${userId}`);
-
-    // Regenerate session to prevent session fixation, then log them in.
-    req.session.regenerate((err) => {
-      if (err) {
-        res.status(500).json({ error: "Session error. Please try again." });
-        return;
-      }
-      req.session.userId = userId;
-      req.session.userRole = "district_user";
-      req.session.userEmail = normalized;
-      req.session.userPlan = "free";
-      req.session.userDistrictId = null;
-      req.session.activeFirmId = firmId;
-      req.session.firmRole = "firm_admin";
-      res.json({ ok: true, redirect: "/app" });
-    });
-  } catch (err) {
-    if (isDuplicateEmail(err)) {
-      res.status(409).json({ error: "An account with this email already exists. Please sign in." });
-      return;
-    }
-    console.error("Firm signup error:", err);
-    res.status(500).json({ error: "A server error occurred. Please try again." });
-  }
-});
+// Public firm self-signup was removed: firms are now provisioned by the platform
+// admin (POST /api/admin/firms in routes/admin.ts), which reuses the same
+// users + firms + firm_members creation logic and bcrypt cost. Firm members
+// continue to sign in at /login and accept invites via the routes below.
 
 // ----------------------------------------------------------------------------
 // GET /api/firm/me

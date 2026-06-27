@@ -3,7 +3,7 @@ import { readFileSync, existsSync, openSync, writeFileSync } from "fs";
 import { mkdirSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { spawn } from "child_process";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual, randomBytes } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { db, pool } from "@workspace/db";
 import { sql } from "drizzle-orm";
@@ -3419,6 +3419,142 @@ router.post("/admin/customers", requireAdminToken, heavyAdminLimiter, async (req
       console.error(err);
       res.status(500).json({ error: "Internal server error" });
     }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Firm provisioning (admin-only). Public firm self-signup was removed; the
+// platform admin creates a firm + its first firm_admin user here and hands the
+// credentials to the client. This reuses the same users + firms + firm_members
+// creation logic and bcrypt cost as the old POST /api/firm/signup, but never
+// touches the admin's own session.
+// ---------------------------------------------------------------------------
+
+const FIRM_PLAN_TIERS = ["state", "region", "national"] as const;
+const FIRM_MIN_PASSWORD = 8;
+
+// Generate a readable, high-entropy password for hand-off. base64url avoids
+// shell/URL-unsafe characters; ~16 chars from 12 random bytes.
+function generateFirmPassword(): string {
+  return randomBytes(12).toString("base64url");
+}
+
+// GET /admin/firms — list firms with member counts and created dates.
+router.get("/admin/firms", requireAdminToken, async (_req, res) => {
+  try {
+    const rows = await db.execute(sql`
+      SELECT f.id, f.name, f.plan_tier, f.created_at,
+             COUNT(fm.user_id)::int AS member_count
+      FROM firms f
+      LEFT JOIN firm_members fm ON fm.firm_id = f.id
+      GROUP BY f.id, f.name, f.plan_tier, f.created_at
+      ORDER BY f.created_at DESC, f.id DESC
+    `);
+    res.json({ firms: rows.rows });
+  } catch (err) {
+    console.error("admin/firms list error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /admin/firms — create a firm plus its first firm_admin user in one
+// transaction. Body: { firmName, planTier?, email, name?, password? }. When no
+// password is supplied a secure one is generated and returned once. Duplicate
+// email is rejected. Does NOT modify the admin's session.
+router.post("/admin/firms", requireAdminToken, heavyAdminLimiter, async (req, res) => {
+  const { firmName, planTier, email, name, password } = req.body as {
+    firmName?: string;
+    planTier?: string;
+    email?: string;
+    name?: string;
+    password?: string;
+  };
+
+  if (!firmName?.trim()) {
+    res.status(400).json({ error: "Firm name is required." });
+    return;
+  }
+  const normalEmail = (email ?? "").toLowerCase().trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalEmail)) {
+    res.status(400).json({ error: "Please enter a valid email address." });
+    return;
+  }
+  const tier = (FIRM_PLAN_TIERS as readonly string[]).includes(planTier ?? "")
+    ? (planTier as string)
+    : "state";
+
+  // Use the supplied password, or generate one to hand off. Validate length
+  // only when the admin typed one.
+  const suppliedPassword = typeof password === "string" && password.length > 0;
+  if (suppliedPassword && (password as string).length < FIRM_MIN_PASSWORD) {
+    res.status(400).json({ error: `Password must be at least ${FIRM_MIN_PASSWORD} characters.` });
+    return;
+  }
+  const plainPassword = suppliedPassword ? (password as string) : generateFirmPassword();
+
+  try {
+    const existing = await db.execute(
+      sql`SELECT id FROM users WHERE email = ${normalEmail} LIMIT 1`,
+    );
+    if (existing.rows.length) {
+      res.status(409).json({ error: "An account with this email already exists." });
+      return;
+    }
+
+    const bcrypt = await import("bcrypt");
+    const passwordHash = await bcrypt.hash(plainPassword, 12);
+
+    const created = await db.transaction(async (tx) => {
+      const u = await tx.execute(sql`
+        INSERT INTO users (email, name, password_hash, role, plan, active)
+        VALUES (${normalEmail}, ${name?.trim() || null}, ${passwordHash}, 'district_user', 'free', true)
+        RETURNING id
+      `);
+      const uid = Number((u.rows[0] as { id: unknown }).id);
+      const f = await tx.execute(sql`
+        INSERT INTO firms (name, plan_tier) VALUES (${firmName.trim()}, ${tier})
+        RETURNING id, name, plan_tier, created_at
+      `);
+      const frow = f.rows[0] as {
+        id: unknown;
+        name: unknown;
+        plan_tier: unknown;
+        created_at: unknown;
+      };
+      await tx.execute(sql`
+        INSERT INTO firm_members (firm_id, user_id, role)
+        VALUES (${Number(frow.id)}, ${uid}, 'firm_admin')
+      `);
+      return { userId: uid, firm: frow };
+    });
+
+    res.json({
+      ok: true,
+      firm: {
+        id: Number(created.firm.id),
+        name: String(created.firm.name),
+        plan_tier: String(created.firm.plan_tier),
+        created_at: created.firm.created_at,
+        member_count: 1,
+      },
+      user: {
+        id: created.userId,
+        email: normalEmail,
+        name: name?.trim() || null,
+      },
+      // Returned once for the admin's hand-off panel. A generated password is
+      // not stored anywhere in plaintext and cannot be retrieved again.
+      password: plainPassword,
+      passwordGenerated: !suppliedPassword,
+    });
+  } catch (err) {
+    const msg = String(err);
+    if (msg.includes("users_email") || msg.includes("unique") || msg.includes("duplicate")) {
+      res.status(409).json({ error: "An account with this email already exists." });
+      return;
+    }
+    console.error("admin/firms create error:", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 

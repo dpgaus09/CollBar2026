@@ -51,10 +51,10 @@ export default function PlansPage() {
               ))}
             </ul>
             <a
-              href={`${import.meta.env.BASE_URL}signup`}
+              href={`${import.meta.env.BASE_URL}login`}
               className="mt-8 block w-full text-center py-2.5 rounded border border-slate-700 text-sm font-semibold text-slate-300 hover:bg-slate-800 transition-colors"
             >
-              Get started free
+              Sign in
             </a>
           </div>
 

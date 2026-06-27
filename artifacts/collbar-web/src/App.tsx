@@ -5,7 +5,6 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import AdminPage from "@/pages/admin";
 import LoginPage from "@/pages/login";
-import FirmSignupPage from "@/pages/firm/signup";
 import AcceptInvitePage from "@/pages/firm/accept-invite";
 import AppHomePage from "@/pages/app/index";
 import RosterPage from "@/pages/app/roster";
@@ -79,9 +78,8 @@ function Router() {
       <Route path="/tracker" component={TrackerPage} />
       <Route path="/plans" component={PlansPage} />
 
-      {/* Auth */}
+      {/* Auth — firms are admin-provisioned; there is no public signup */}
       <Route path="/login" component={LoginPage} />
-      <Route path="/signup" component={FirmSignupPage} />
       <Route path="/invite/accept" component={AcceptInvitePage} />
 
       {/* Firm workspace */}

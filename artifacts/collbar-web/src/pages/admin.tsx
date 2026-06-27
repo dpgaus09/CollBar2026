@@ -5975,7 +5975,331 @@ function BulkEntryTable({ title, entries }: { title: string; entries: BulkMatche
   );
 }
 
-type TabKey = "overview" | "crawl-report" | "extraction-report" | "extraction" | "review-queue" | "alerts" | "eis-crosscheck" | "customers" | "upload" | "salary-data" | "bulk-cba";
+// ---------------------------------------------------------------------------
+// Firms tab — admin-only firm provisioning. Public firm self-signup was removed;
+// the admin creates a firm + its first firm_admin here, then hands off the
+// login URL / email / password (a generated password is shown only once).
+// ---------------------------------------------------------------------------
+
+interface FirmRow {
+  id: number;
+  name: string;
+  plan_tier: string;
+  created_at: string | null;
+  member_count: number;
+}
+
+interface FirmCreated {
+  firm: FirmRow;
+  user: { id: number; email: string; name: string | null };
+  password: string;
+  passwordGenerated: boolean;
+}
+
+const FIRM_TIER_OPTIONS: { value: string; label: string }[] = [
+  { value: "state", label: "State" },
+  { value: "region", label: "Region" },
+  { value: "national", label: "National" },
+];
+
+function FirmsTab() {
+  const { data: session } = useAdminSession();
+  const isAuthenticated = session?.authenticated === true;
+  const qc = useQueryClient();
+
+  const { data, isLoading, error } = useQuery<{ firms: FirmRow[] }>({
+    queryKey: ["/api/admin/firms"],
+    queryFn: () =>
+      fetch(apiUrl("/api/admin/firms"), { credentials: "include" }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    enabled: isAuthenticated,
+    retry: false,
+  });
+  const firms = data?.firms ?? [];
+
+  const [firmName, setFirmName] = useState("");
+  const [planTier, setPlanTier] = useState("state");
+  const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
+  const [generatePw, setGeneratePw] = useState(true);
+  const [password, setPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState("");
+  const [handoff, setHandoff] = useState<FirmCreated | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  // The login URL handed to the client. Absolute so it can be pasted anywhere.
+  const loginUrl = `${window.location.origin}${import.meta.env.BASE_URL}login`;
+
+  const resetForm = () => {
+    setFirmName("");
+    setPlanTier("state");
+    setEmail("");
+    setName("");
+    setGeneratePw(true);
+    setPassword("");
+    setFormError("");
+  };
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError("");
+    setHandoff(null);
+    setCopied(false);
+    if (!firmName.trim()) {
+      setFormError("Firm name is required.");
+      return;
+    }
+    if (!email.includes("@")) {
+      setFormError("A valid email is required.");
+      return;
+    }
+    if (!generatePw && password.length < 8) {
+      setFormError("Password must be at least 8 characters (or let one be generated).");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const res = await fetch(apiUrl("/api/admin/firms"), {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          firmName: firmName.trim(),
+          planTier,
+          email: email.trim(),
+          name: name.trim() || undefined,
+          password: generatePw ? undefined : password,
+        }),
+      });
+      const body = (await res.json()) as Partial<FirmCreated> & { error?: string };
+      if (!res.ok || !body.firm) {
+        setFormError(body.error ?? `Could not create firm (HTTP ${res.status}).`);
+        return;
+      }
+      setHandoff(body as FirmCreated);
+      resetForm();
+      qc.invalidateQueries({ queryKey: ["/api/admin/firms"] });
+    } catch {
+      setFormError("Network error. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const copyHandoff = async () => {
+    if (!handoff) return;
+    const text =
+      `CollBar workspace login\n` +
+      `Login URL: ${loginUrl}\n` +
+      `Email: ${handoff.user.email}\n` +
+      `Password: ${handoff.password}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  if (!isAuthenticated) return <LoginRequiredCard onLogin={goToLogin} />;
+
+  return (
+    <div className="space-y-8">
+      <div>
+        <h2 className="text-sm font-semibold text-slate-200">Firms</h2>
+        <p className="text-xs text-slate-500 mt-1">
+          Create a firm workspace and its first admin user, then hand off the credentials.
+          Firms can no longer self-register.
+        </p>
+      </div>
+
+      {/* One-time hand-off panel */}
+      {handoff && (
+        <div className="rounded-lg border border-emerald-800/60 bg-emerald-950/20 p-5 space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-semibold text-emerald-300">
+              Firm created — send these to {handoff.firm.name}
+            </p>
+            <button
+              onClick={() => setHandoff(null)}
+              className="text-xs text-slate-500 hover:text-slate-300"
+            >
+              Dismiss
+            </button>
+          </div>
+          {handoff.passwordGenerated && (
+            <p className="text-[11px] text-amber-300">
+              This generated password is shown only once. Copy it now — it cannot be retrieved later.
+            </p>
+          )}
+          <dl className="space-y-2 text-xs">
+            <div className="flex gap-2">
+              <dt className="w-20 shrink-0 text-slate-500">Login URL</dt>
+              <dd className="font-mono text-slate-200 break-all">{loginUrl}</dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="w-20 shrink-0 text-slate-500">Email</dt>
+              <dd className="font-mono text-slate-200 break-all">{handoff.user.email}</dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="w-20 shrink-0 text-slate-500">Password</dt>
+              <dd className="font-mono text-slate-200 break-all">{handoff.password}</dd>
+            </div>
+          </dl>
+          <button
+            onClick={copyHandoff}
+            className="text-xs px-3 py-1.5 rounded bg-emerald-800 hover:bg-emerald-700 text-emerald-100 transition-colors"
+          >
+            {copied ? "Copied!" : "Copy hand-off details"}
+          </button>
+        </div>
+      )}
+
+      {/* Create form */}
+      <form
+        onSubmit={handleCreate}
+        className="rounded-lg border border-slate-800 bg-slate-900/40 p-5 space-y-4"
+      >
+        <p className="text-xs font-semibold text-slate-300">Create a firm</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="space-y-1">
+            <label className="block text-[11px] text-slate-400 font-medium" htmlFor="firm-name">
+              Firm name
+            </label>
+            <input
+              id="firm-name"
+              type="text"
+              value={firmName}
+              onChange={(e) => setFirmName(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30"
+              placeholder="Acme Labor Group"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="block text-[11px] text-slate-400 font-medium" htmlFor="firm-tier">
+              Plan tier
+            </label>
+            <select
+              id="firm-tier"
+              value={planTier}
+              onChange={(e) => setPlanTier(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30"
+            >
+              {FIRM_TIER_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-1">
+            <label className="block text-[11px] text-slate-400 font-medium" htmlFor="firm-email">
+              First user's email
+            </label>
+            <input
+              id="firm-email"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30"
+              placeholder="admin@firm.com"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="block text-[11px] text-slate-400 font-medium" htmlFor="firm-user-name">
+              First user's name <span className="text-slate-600">(optional)</span>
+            </label>
+            <input
+              id="firm-user-name"
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30"
+              placeholder="Jane Counsel"
+            />
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <label className="flex items-center gap-2 text-xs text-slate-400">
+            <input
+              type="checkbox"
+              checked={generatePw}
+              onChange={(e) => setGeneratePw(e.target.checked)}
+              className="accent-blue-600"
+            />
+            Generate a secure password
+          </label>
+          {!generatePw && (
+            <input
+              type="text"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="off"
+              className="w-full sm:w-1/2 bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30"
+              placeholder="At least 8 characters"
+            />
+          )}
+        </div>
+
+        {formError && <p className="text-xs text-red-400">{formError}</p>}
+
+        <button
+          type="submit"
+          disabled={submitting}
+          className="text-sm px-4 py-2 rounded bg-blue-700 hover:bg-blue-600 text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {submitting ? "Creating…" : "Create firm"}
+        </button>
+      </form>
+
+      {/* Existing firms */}
+      <div className="space-y-2">
+        <p className="text-xs font-semibold text-slate-300">
+          Existing firms{firms.length ? ` (${firms.length})` : ""}
+        </p>
+        {isLoading ? (
+          <p className="text-xs text-slate-500">Loading…</p>
+        ) : error ? (
+          <p className="text-xs text-red-400">Could not load firms.</p>
+        ) : firms.length === 0 ? (
+          <p className="text-xs text-slate-500">No firms yet.</p>
+        ) : (
+          <div className="overflow-x-auto rounded-lg border border-slate-800">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-slate-500 border-b border-slate-800">
+                  <th className="px-3 py-2 font-medium">Firm</th>
+                  <th className="px-3 py-2 font-medium">Plan tier</th>
+                  <th className="px-3 py-2 font-medium">Members</th>
+                  <th className="px-3 py-2 font-medium">Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                {firms.map((f) => (
+                  <tr key={f.id} className="border-b border-slate-800/60 last:border-0">
+                    <td className="px-3 py-2 text-slate-200">{f.name}</td>
+                    <td className="px-3 py-2 text-slate-400 capitalize">{f.plan_tier}</td>
+                    <td className="px-3 py-2 text-slate-400">{f.member_count}</td>
+                    <td className="px-3 py-2 text-slate-500">
+                      {f.created_at ? new Date(f.created_at).toLocaleDateString() : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+type TabKey = "overview" | "crawl-report" | "extraction-report" | "extraction" | "review-queue" | "alerts" | "eis-crosscheck" | "customers" | "firms" | "upload" | "salary-data" | "bulk-cba";
 
 function useAlertsPendingCount() {
   return useQuery<{ pendingCount: number }>({
@@ -6001,6 +6325,7 @@ const TABS: { key: TabKey; label: string; path: string }[] = [
   { key: "eis-crosscheck", label: "EIS Cross-Check", path: "/admin/eis-crosscheck" },
   { key: "bulk-cba", label: "Bulk CBA Import", path: "/admin/bulk-cba" },
   { key: "customers", label: "Customers", path: "/admin/customers" },
+  { key: "firms", label: "Firms", path: "/admin/firms" },
 ];
 
 function activeTab(location: string): TabKey {
@@ -6014,6 +6339,7 @@ function activeTab(location: string): TabKey {
   if (location.includes("eis-crosscheck")) return "eis-crosscheck";
   if (location.includes("bulk-cba")) return "bulk-cba";
   if (location.includes("customers")) return "customers";
+  if (location.includes("firms")) return "firms";
   return "overview";
 }
 
@@ -6116,6 +6442,7 @@ export default function AdminPage() {
         {tab === "eis-crosscheck" && <EisXCheckTab />}
         {tab === "bulk-cba" && <BulkCbaImportTab />}
         {tab === "customers" && <CustomersTab />}
+        {tab === "firms" && <FirmsTab />}
       </main>
     </div>
   );
