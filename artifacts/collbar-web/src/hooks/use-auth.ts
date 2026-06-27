@@ -1,6 +1,13 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiUrl, setDocumentToken } from "@/lib/api";
 
+export interface FirmSummary {
+  id: number;
+  name: string;
+  planTier: "state" | "region" | "national";
+  role: "firm_admin" | "member";
+}
+
 export interface AuthUser {
   authenticated: boolean;
   userId?: number;
@@ -8,6 +15,9 @@ export interface AuthUser {
   plan?: "free" | "pro";
   districtId?: number | null;
   email?: string;
+  // Firm workspace membership (null/undefined for non-firm users). Drives the
+  // /app workspace surface; independent of the free/pro district plan above.
+  firm?: FirmSummary | null;
   // Signed credential for opening source-PDF links in a new tab.
   documentToken?: string;
 }
@@ -43,6 +53,9 @@ export function useAuth() {
     isFree: isAuthenticated && !isPro,
     districtId: data?.districtId ?? null,
     email: data?.email,
+    firm: data?.firm ?? null,
+    isFirmMember: !!data?.firm,
+    isFirmAdmin: data?.firm?.role === "firm_admin",
     refetch,
   };
 }

@@ -225,6 +225,60 @@ async function runMigrations(): Promise<void> {
     logger.info("Migration OK: sync_run_status ensured");
 
     // -----------------------------------------------------------------------
+    // Firm workspaces (multi-seat attorney / labor-consultant accounts).
+    // Parallel to the per-district CFO entitlement: firm members are normal
+    // `users` rows whose workspace access comes from firm_members membership,
+    // independent of users.plan / lib/access.ts gate(). Dual-declared in
+    // lib/db/src/schema/firms.ts (verified by check-drift).
+    // -----------------------------------------------------------------------
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS firms (
+        id          bigserial PRIMARY KEY,
+        name        text NOT NULL,
+        plan_tier   text NOT NULL DEFAULT 'state',
+        created_at  timestamptz NOT NULL DEFAULT NOW(),
+        CONSTRAINT firms_plan_tier_check CHECK (plan_tier IN ('state','region','national'))
+      )
+    `);
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS firm_members (
+        id          bigserial PRIMARY KEY,
+        firm_id     bigint NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+        user_id     bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        role        text NOT NULL DEFAULT 'member',
+        created_at  timestamptz NOT NULL DEFAULT NOW(),
+        CONSTRAINT firm_members_role_check CHECK (role IN ('firm_admin','member')),
+        CONSTRAINT firm_members_firm_user_unique UNIQUE (firm_id, user_id)
+      )
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS firm_members_user_idx ON firm_members(user_id)
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS firm_members_firm_idx ON firm_members(firm_id)
+    `);
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS firm_invites (
+        id                 bigserial PRIMARY KEY,
+        firm_id            bigint NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+        email              text NOT NULL,
+        role               text NOT NULL DEFAULT 'member',
+        token_hash         text NOT NULL,
+        invited_by_user_id bigint REFERENCES users(id),
+        expires_at         timestamptz,
+        accepted_at        timestamptz,
+        created_at         timestamptz NOT NULL DEFAULT NOW(),
+        CONSTRAINT firm_invites_role_check CHECK (role IN ('firm_admin','member')),
+        CONSTRAINT firm_invites_token_hash_unique UNIQUE (token_hash)
+      )
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS firm_invites_firm_idx ON firm_invites(firm_id)
+    `);
+
+    logger.info("Migration OK: firms / firm_members / firm_invites ensured");
+
+    // -----------------------------------------------------------------------
     // IL ELRB board-vs-union final offers (Task #112).
     //
     // 1. Allow source_documents.doc_type = 'final_offer' (the scraped offer

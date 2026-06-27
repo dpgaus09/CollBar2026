@@ -3,28 +3,31 @@ import { useAuth } from "@/hooks/use-auth";
 import { useLocation } from "wouter";
 import { apiUrl } from "@/lib/api";
 
-export default function LoginPage() {
-  const { isAuthenticated, isLoading, districtId, isAdmin, firm } = useAuth();
+// Firm workspace signup — creates a new firm and its first admin member, then
+// drops them into the /app workspace shell. Distinct from the legacy district
+// magic-link signup (pages/signup.tsx), which is unrelated and unrouted.
+export default function FirmSignupPage() {
+  const { isAuthenticated, isLoading, isAdmin, firm, districtId } = useAuth();
   const [, setLocation] = useLocation();
 
+  const [firmName, setFirmName] = useState("");
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  // Already signed in — send them where they belong instead of re-signing-up.
   useEffect(() => {
-    if (!isLoading && isAuthenticated) {
-      // Redirect precedence mirrors the server: admins -> admin panel; firm
-      // members -> workspace; otherwise the district dashboard.
-      const dest = isAdmin
-        ? "/admin"
-        : firm
-        ? "/app"
-        : districtId
-        ? `/dashboard/${districtId}`
-        : "/dashboard";
-      setLocation(dest);
-    }
+    if (isLoading || !isAuthenticated) return;
+    const dest = isAdmin
+      ? "/admin"
+      : firm
+      ? "/app"
+      : districtId
+      ? `/dashboard/${districtId}`
+      : "/dashboard";
+    setLocation(dest);
   }, [isLoading, isAuthenticated, isAdmin, firm, districtId, setLocation]);
 
   if (!isLoading && isAuthenticated) return null;
@@ -34,17 +37,22 @@ export default function LoginPage() {
     setError("");
     setSubmitting(true);
     try {
-      const res = await fetch(apiUrl("/api/auth/login"), {
+      const res = await fetch(apiUrl("/api/firm/signup"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ email: email.trim(), password }),
+        body: JSON.stringify({
+          firmName: firmName.trim(),
+          name: name.trim(),
+          email: email.trim(),
+          password,
+        }),
       });
       const body = (await res.json()) as { ok?: boolean; redirect?: string; error?: string };
       if (res.ok && body.redirect) {
         window.location.href = `${import.meta.env.BASE_URL}${body.redirect.replace(/^\//, "")}`;
       } else {
-        setError(body.error ?? "Sign-in failed. Please try again.");
+        setError(body.error ?? "Sign-up failed. Please try again.");
       }
     } catch {
       setError("Network error. Please check your connection and try again.");
@@ -54,11 +62,11 @@ export default function LoginPage() {
   };
 
   return (
-    <main className="min-h-screen bg-slate-950 flex items-center justify-center px-4">
+    <main className="min-h-screen bg-slate-950 flex items-center justify-center px-4 py-10">
       <div className="w-full max-w-sm space-y-6">
         <div className="text-center space-y-2">
           <h1 className="text-2xl font-bold text-slate-100 tracking-tight">CollBar</h1>
-          <p className="text-slate-400 text-sm">Collective Bargaining Database</p>
+          <p className="text-slate-400 text-sm">Create your firm workspace</p>
         </div>
 
         <form
@@ -66,8 +74,38 @@ export default function LoginPage() {
           className="rounded-xl border border-slate-800 bg-slate-900 p-6 space-y-4"
         >
           <div className="space-y-1">
+            <label className="block text-xs text-slate-400 font-medium" htmlFor="firmName">
+              Firm name
+            </label>
+            <input
+              id="firmName"
+              type="text"
+              required
+              value={firmName}
+              onChange={(e) => setFirmName(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-colors"
+              placeholder="Acme Labor Group"
+            />
+          </div>
+
+          <div className="space-y-1">
+            <label className="block text-xs text-slate-400 font-medium" htmlFor="name">
+              Your name <span className="text-slate-600">(optional)</span>
+            </label>
+            <input
+              id="name"
+              type="text"
+              autoComplete="name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-colors"
+              placeholder="Jane Counsel"
+            />
+          </div>
+
+          <div className="space-y-1">
             <label className="block text-xs text-slate-400 font-medium" htmlFor="email">
-              Email
+              Work email
             </label>
             <input
               id="email"
@@ -77,19 +115,20 @@ export default function LoginPage() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-colors"
-              placeholder="you@example.com"
+              placeholder="you@firm.com"
             />
           </div>
 
           <div className="space-y-1">
             <label className="block text-xs text-slate-400 font-medium" htmlFor="password">
-              Password
+              Password <span className="text-slate-600">(8+ characters)</span>
             </label>
             <input
               id="password"
               type="password"
-              autoComplete="current-password"
+              autoComplete="new-password"
               required
+              minLength={8}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-colors"
@@ -108,20 +147,19 @@ export default function LoginPage() {
             disabled={submitting}
             className="w-full py-2.5 rounded-md bg-blue-700 text-white text-sm font-medium hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
-            {submitting ? "Signing in…" : "Sign in"}
+            {submitting ? "Creating workspace…" : "Create workspace"}
           </button>
         </form>
 
-        <div className="space-y-3 text-center">
-          <p className="text-xs leading-relaxed text-slate-400">
-            CollBar gives Illinois CSBOs, treasurers, and superintendents eleven
-            years of teacher settlement data and full multi-year CBA cost
-            modeling — so you bargain from precedent, not from memory.
-          </p>
-          <p className="text-xs text-slate-500">
-            Contact: E: hello@collbar.com&nbsp;&nbsp;P: (312) 768-8009
-          </p>
-        </div>
+        <p className="text-center text-xs text-slate-500">
+          Already have an account?{" "}
+          <a
+            href={`${import.meta.env.BASE_URL}login`}
+            className="text-blue-400 hover:text-blue-300"
+          >
+            Sign in
+          </a>
+        </p>
       </div>
     </main>
   );

@@ -4,6 +4,7 @@ import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import { signDocumentAccessToken } from "../lib/documentToken.js";
 import { loginLimiter } from "../lib/rateLimit.js";
+import { loadFirmSummaryForUser } from "../lib/firm-access.js";
 
 // ============================================================================
 // Session type augmentation
@@ -16,6 +17,10 @@ declare module "express-session" {
     userEmail?: string;
     userPlan?: "free" | "pro";
     adminAuthenticated?: boolean;
+    // Firm workspace session (parallel to the district fields above). Set on
+    // login/signup/invite-accept; resolved fresh by lib/firm-access.ts.
+    activeFirmId?: number | null;
+    firmRole?: "firm_admin" | "member" | null;
   }
 }
 
@@ -172,6 +177,16 @@ router.post("/auth/login", loginLimiter, async (req: Request, res: Response) => 
       console.error("Failed to record login_event:", trackErr);
     }
 
+    // Resolve firm membership (if any) so firm members route to the workspace
+    // and their session is seeded. Isolated so a firm-table issue can never
+    // block a valid login.
+    let firm: Awaited<ReturnType<typeof loadFirmSummaryForUser>> = null;
+    try {
+      firm = await loadFirmSummaryForUser(user.id);
+    } catch (firmErr) {
+      console.error("Firm lookup failed at login:", firmErr);
+    }
+
     // Regenerate session to prevent session fixation
     req.session.regenerate((err) => {
       if (err) {
@@ -189,10 +204,15 @@ router.post("/auth/login", loginLimiter, async (req: Request, res: Response) => 
       if (user.role === "admin") {
         req.session.adminAuthenticated = true;
       }
+      if (firm) {
+        req.session.activeFirmId = firm.id;
+        req.session.firmRole = firm.role;
+      }
 
-      // Customers land on the district picker (with their own district pinned
-      // at the top); admins go to the admin panel.
-      const dest = user.role === "admin" ? "/admin" : "/dashboard";
+      // Redirect precedence: admins -> admin panel; firm members -> workspace;
+      // otherwise the district dashboard (existing CFO behavior, unchanged).
+      const dest =
+        user.role === "admin" ? "/admin" : firm ? "/app" : "/dashboard";
 
       res.json({ ok: true, redirect: dest });
     });
@@ -234,6 +254,18 @@ router.get("/auth/me", async (req: Request, res: Response) => {
     req.session.userRole = role;
     req.session.userPlan = plan;
     req.session.userDistrictId = districtId;
+
+    // Firm membership (if any) drives the attorney workspace surface. Isolated
+    // so a firm-table issue never signs a valid user out.
+    let firm = null;
+    try {
+      firm = await loadFirmSummaryForUser(req.session.userId);
+      req.session.activeFirmId = firm ? firm.id : null;
+      req.session.firmRole = firm ? firm.role : null;
+    } catch (firmErr) {
+      console.error("Firm lookup failed in /auth/me:", firmErr);
+    }
+
     res.json({
       authenticated: true,
       userId: req.session.userId,
@@ -241,6 +273,7 @@ router.get("/auth/me", async (req: Request, res: Response) => {
       plan,
       districtId,
       email: typeof u.email === "string" ? u.email : req.session.userEmail,
+      firm,
       // Self-contained credential for "View source PDF" links, which open in a
       // new top-level tab that does not carry the cross-site iframe session
       // cookie. See lib/documentToken.ts.

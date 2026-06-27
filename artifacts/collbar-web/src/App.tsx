@@ -5,6 +5,9 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import AdminPage from "@/pages/admin";
 import LoginPage from "@/pages/login";
+import FirmSignupPage from "@/pages/firm/signup";
+import AcceptInvitePage from "@/pages/firm/accept-invite";
+import AppHomePage from "@/pages/app/index";
 import DashboardIndexPage from "@/pages/dashboard/index";
 import DistrictDashboardPage from "@/pages/dashboard/district";
 import ClausesPage from "@/pages/dashboard/clauses";
@@ -70,6 +73,11 @@ function Router() {
 
       {/* Auth */}
       <Route path="/login" component={LoginPage} />
+      <Route path="/signup" component={FirmSignupPage} />
+      <Route path="/invite/accept" component={AcceptInvitePage} />
+
+      {/* Firm workspace */}
+      <Route path="/app" component={AppHomePage} />
 
       {/* Toolkit (free + paid + admin) */}
       <Route path="/toolkit" component={ToolkitPage} />

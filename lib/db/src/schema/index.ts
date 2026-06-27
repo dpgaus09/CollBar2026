@@ -15,6 +15,7 @@ export * from "./cdss_staging";
 export * from "./peer_sets";
 export * from "./tracker_stats_cache";
 export * from "./customers";
+export * from "./firms";
 export * from "./conversations";
 export * from "./il_min_teacher_salary";
 export * from "./final_offers";
