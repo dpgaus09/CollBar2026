@@ -10,9 +10,20 @@ import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import { requireFirmSession } from "../lib/firm-access.js";
-import { firmScopeDistrictIds } from "../lib/firm-scope.js";
 import { parseUnit } from "./bargaining-units.js";
 import { logger } from "../lib/logger.js";
+import {
+  MAX_DISTRICTS,
+  MAX_KEY_LEN,
+  parseScope,
+  toInt,
+  prettyKey,
+  resolveScope,
+  mapClauseRow,
+  latestContractCte,
+  buildClauseCompare,
+  type ClauseRow,
+} from "../lib/firm-clauses-model.js";
 
 // ============================================================================
 // Phase 4 — Clause search & side-by-side clause comparison (firm workspace).
@@ -39,9 +50,7 @@ const router: IRouter = Router();
 
 const SEARCH_MODEL = "claude-haiku-4-5"; // fast model for search synthesis
 const COMPARE_MODEL = "claude-opus-4-8"; // strongest model for multi-clause compare
-const MAX_DISTRICTS = 60;
 const MAX_QUERY_LEN = 300;
-const MAX_KEY_LEN = 80;
 const MAX_RESULTS = 50;
 const DEFAULT_RESULTS = 20;
 const SYNTH_MAX_CLAUSES = 12; // clauses handed to the model
@@ -64,18 +73,6 @@ const VALID_CATEGORIES = new Set<string>([
   "grievance",
   "other",
 ]);
-
-type ClauseScope = "matter" | "tracked" | "explicit" | "all";
-function parseScope(v: unknown): ClauseScope {
-  return v === "matter" || v === "tracked" || v === "explicit" || v === "all"
-    ? v
-    : "all";
-}
-
-function toInt(v: unknown): number | null {
-  const n = Number(v);
-  return Number.isInteger(n) && n > 0 ? n : null;
-}
 
 // Rate limit the model-backed clause endpoints per user (falling back to IP for
 // the unauthenticated edge, which requireFirmSession rejects anyway).
@@ -117,166 +114,6 @@ function cacheSet(key: string, value: unknown): void {
     if (first !== undefined) responseCache.delete(first);
   }
   responseCache.set(key, { expires: Date.now() + CACHE_TTL_MS, value });
-}
-
-interface ScopeResult {
-  districtIds: number[];
-  matterId: number | null;
-  matterName: string | null;
-}
-type ScopeOutcome =
-  | { ok: true; scope: ScopeResult }
-  | { ok: false; status: number; error: string };
-
-// Resolve + AUTHORIZE the district set for a clause request. Everything stays
-// inside the firm's scope so every returned clause has a reachable source PDF.
-// A cross-firm matter id is a 404 (no existence leak); an explicit id outside
-// the firm scope is a 403; the whole request is rejected rather than silently
-// dropping ids (a silent drop would hide an authorization mistake).
-async function resolveScope(
-  firmId: number,
-  scope: ClauseScope,
-  matterId: number | null,
-  districtIds: number[] | null,
-): Promise<ScopeOutcome> {
-  if (scope === "matter") {
-    if (matterId == null) {
-      return {
-        ok: false,
-        status: 400,
-        error: "matterId is required for the matter scope.",
-      };
-    }
-    const m = await db.execute(sql`
-      SELECT id, name FROM matters
-      WHERE id = ${matterId} AND firm_id = ${firmId}
-      LIMIT 1
-    `);
-    const row = m.rows[0] as { id: unknown; name: unknown } | undefined;
-    if (!row) return { ok: false, status: 404, error: "Matter not found." };
-    const d = await db.execute(sql`
-      SELECT district_id FROM matter_districts WHERE matter_id = ${matterId}
-    `);
-    const ids = (d.rows as Array<{ district_id: unknown }>).map((r) =>
-      Number(r.district_id),
-    );
-    return {
-      ok: true,
-      scope: {
-        districtIds: ids,
-        matterId: Number(row.id),
-        matterName: String(row.name),
-      },
-    };
-  }
-
-  if (scope === "tracked") {
-    const r = await db.execute(sql`
-      SELECT district_id FROM tracked_districts WHERE firm_id = ${firmId}
-    `);
-    const ids = (r.rows as Array<{ district_id: unknown }>).map((row) =>
-      Number(row.district_id),
-    );
-    return {
-      ok: true,
-      scope: { districtIds: ids, matterId: null, matterName: null },
-    };
-  }
-
-  if (scope === "all") {
-    const all = await firmScopeDistrictIds(firmId);
-    return {
-      ok: true,
-      scope: { districtIds: [...all], matterId: null, matterName: null },
-    };
-  }
-
-  // explicit
-  if (!districtIds || districtIds.length === 0) {
-    return {
-      ok: false,
-      status: 400,
-      error: "districtIds is required for the explicit scope.",
-    };
-  }
-  const firmScope = await firmScopeDistrictIds(firmId);
-  const outside = districtIds.filter((id) => !firmScope.has(id));
-  if (outside.length > 0) {
-    return {
-      ok: false,
-      status: 403,
-      error: "One or more districts are outside your workspace.",
-    };
-  }
-  return {
-    ok: true,
-    scope: { districtIds, matterId: null, matterName: null },
-  };
-}
-
-function prettyKey(key: string | null): string {
-  if (!key) return "";
-  return key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-interface ClauseRow {
-  provisionId: number;
-  districtId: number;
-  districtName: string;
-  county: string | null;
-  state: string;
-  category: string | null;
-  provisionKey: string | null;
-  valueNumeric: number | null;
-  valueText: string | null;
-  unit: string | null;
-  clauseExcerpt: string;
-  pageRef: number | null;
-  confidence: number | null;
-  humanVerified: boolean;
-  sourceUrl: string | null;
-  retrievedAt: string | null;
-  rank?: number;
-}
-
-function mapClauseRow(row: Record<string, unknown>): ClauseRow {
-  return {
-    provisionId: Number(row.provision_id),
-    districtId: Number(row.district_id),
-    districtName: String(row.district_name ?? ""),
-    county: row.county == null ? null : String(row.county),
-    state: String(row.state ?? ""),
-    category: row.category == null ? null : String(row.category),
-    provisionKey: row.provision_key == null ? null : String(row.provision_key),
-    valueNumeric: row.value_numeric == null ? null : Number(row.value_numeric),
-    valueText: row.value_text == null ? null : String(row.value_text),
-    unit: row.unit == null ? null : String(row.unit),
-    clauseExcerpt: String(row.clause_excerpt ?? ""),
-    pageRef: row.page_ref == null ? null : Number(row.page_ref),
-    confidence: row.confidence == null ? null : Number(row.confidence),
-    humanVerified: row.human_verified === true,
-    sourceUrl: row.source_url == null ? null : String(row.source_url),
-    retrievedAt: row.retrieved_at == null ? null : String(row.retrieved_at),
-    rank: row.rank == null ? undefined : Number(row.rank),
-  };
-}
-
-// The latest contract per district for a bargaining unit (the same precedence
-// the comparison matrix uses): newest effective_end, then effective_start, then
-// id. Anchors which contract_provisions rows we read so we never surface a stale
-// prior contract's clause.
-function latestContractCte(idList: ReturnType<typeof sql>, unit: string) {
-  return sql`
-    SELECT DISTINCT ON (c.district_id)
-      c.id, c.district_id, c.source_doc_id
-    FROM contracts c
-    WHERE c.district_id IN (${idList})
-      AND c.bargaining_unit = ${unit}
-    ORDER BY c.district_id,
-             c.effective_end DESC NULLS LAST,
-             c.effective_start DESC NULLS LAST,
-             c.id DESC
-  `;
 }
 
 // Best-effort grounded synthesis over the retrieved clauses. Never throws;
@@ -575,113 +412,25 @@ router.post(
     }
     const wantSynthesis = body.synthesize !== false;
 
-    const outcome = await resolveScope(
-      firm.firmId,
-      scope,
-      matterId,
-      explicitIds,
-    );
-    if (!outcome.ok) {
-      res.status(outcome.status).json({ error: outcome.error });
-      return;
-    }
-    const districtIds = outcome.scope.districtIds;
-
-    const base = {
-      scope,
-      bargainingUnit: unit,
-      matterId: outcome.scope.matterId,
-      matterName: outcome.scope.matterName,
-      provisionKey,
-      availableTypes: [] as Array<{
-        category: string | null;
-        provisionKey: string;
-        districtCount: number;
-      }>,
-      clauses: [] as ClauseRow[],
-      synthesis: null as string | null,
-    };
-
-    if (districtIds.length === 0) {
-      res.json(base);
-      return;
-    }
-    if (districtIds.length > MAX_DISTRICTS) {
-      res
-        .status(400)
-        .json({ error: `Too many districts in scope (max ${MAX_DISTRICTS}).` });
-      return;
-    }
-
     try {
-      const idList = sql.join(
-        districtIds.map((id) => sql`${id}`),
-        sql`, `,
-      );
-
-      // The provision types actually present across the scoped districts' latest
-      // contracts (drives the picker). Count = districts carrying each type.
-      const typesRes = await db.execute(sql`
-        WITH latest_contract AS (${latestContractCte(idList, unit)})
-        SELECT cp.category, cp.provision_key,
-               count(DISTINCT lc.district_id) AS district_count
-        FROM latest_contract lc
-        JOIN contract_provisions cp ON cp.contract_id = lc.id
-        JOIN source_documents sd ON sd.id = lc.source_doc_id
-        WHERE cp.provision_key IS NOT NULL
-          AND cp.clause_excerpt IS NOT NULL
-          AND btrim(cp.clause_excerpt) <> ''
-          AND sd.source_url IS NOT NULL
-        GROUP BY cp.category, cp.provision_key
-        ORDER BY district_count DESC, cp.provision_key ASC
-      `);
-      const availableTypes = (typesRes.rows as Array<Record<string, unknown>>).map(
-        (row) => ({
-          category: row.category == null ? null : String(row.category),
-          provisionKey: String(row.provision_key),
-          districtCount: Number(row.district_count),
-        }),
-      );
-
-      let clauses: ClauseRow[] = [];
-      if (provisionKey) {
-        const cmp = await db.execute(sql`
-          WITH latest_contract AS (${latestContractCte(idList, unit)})
-          SELECT DISTINCT ON (lc.district_id)
-            lc.district_id,
-            d.name AS district_name,
-            d.county,
-            d.state,
-            cp.id AS provision_id,
-            cp.category,
-            cp.provision_key,
-            cp.value_numeric,
-            cp.value_text,
-            cp.unit,
-            cp.clause_excerpt,
-            cp.page_ref,
-            cp.confidence,
-            cp.human_verified,
-            sd.source_url,
-            sd.retrieved_at
-          FROM latest_contract lc
-          JOIN contract_provisions cp ON cp.contract_id = lc.id
-          JOIN districts d ON d.id = lc.district_id
-          JOIN source_documents sd ON sd.id = lc.source_doc_id
-          WHERE cp.provision_key = ${provisionKey}
-            AND cp.clause_excerpt IS NOT NULL
-            AND btrim(cp.clause_excerpt) <> ''
-            AND sd.source_url IS NOT NULL
-          ORDER BY lc.district_id,
-                   cp.human_verified DESC NULLS LAST,
-                   cp.confidence DESC NULLS LAST,
-                   cp.id DESC
-        `);
-        clauses = (cmp.rows as Array<Record<string, unknown>>).map(mapClauseRow);
-        // Stable side-by-side order: by district name.
-        clauses.sort((a, b) => a.districtName.localeCompare(b.districtName));
+      // Single source of truth: the clause-appendix export builder calls the
+      // same buildClauseCompare(), so a generated appendix renders byte-for-byte
+      // the verbatim clauses + citations the UI shows.
+      const result = await buildClauseCompare(firm.firmId, {
+        scope,
+        matterId,
+        districtIds: explicitIds,
+        unit,
+        provisionKey,
+      });
+      if (!result.ok) {
+        res.status(result.status).json({ error: result.error });
+        return;
       }
+      const { availableTypes, clauses } = result.data;
 
+      // Best-effort grounded synthesis over the retrieved clauses — a route-only
+      // layer that never alters the verbatim clauses or their citations.
       let synthesis: string | null = null;
       if (wantSynthesis && provisionKey && clauses.length > 1) {
         const blocks = clauses
@@ -698,7 +447,16 @@ router.post(
         );
       }
 
-      res.json({ ...base, availableTypes, clauses, synthesis });
+      res.json({
+        scope,
+        bargainingUnit: unit,
+        matterId: result.data.matterId,
+        matterName: result.data.matterName,
+        provisionKey,
+        availableTypes,
+        clauses,
+        synthesis,
+      });
     } catch (err) {
       logger.error({ err, firmId: firm.firmId }, "clause compare failed");
       res.status(500).json({ error: "Clause comparison failed." });

@@ -7,9 +7,13 @@ import {
 import { db, BARGAINING_UNITS } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import { requireFirmSession } from "../lib/firm-access.js";
-import { firmScopeDistrictIds } from "../lib/firm-scope.js";
 import { verifyDocumentAccessToken } from "../lib/documentToken.js";
 import { streamObjectTo, uploadedCbaKey } from "../lib/objectStorage.js";
+import {
+  CATALOG_BY_ID,
+  DEFAULT_COLUMN_IDS,
+  buildMatrix,
+} from "../lib/firm-compare-model.js";
 
 // ============================================================================
 // Phase 3 — Cross-District Comparison Matrix (firm attorney workspace).
@@ -32,206 +36,9 @@ import { streamObjectTo, uploadedCbaKey } from "../lib/objectStorage.js";
 
 const router: IRouter = Router();
 
-// ---------------------------------------------------------------------------
-// Column catalog — the only metrics that can be requested. Column ids are
-// validated against this server-side constant; arbitrary/free-form provision
-// keys are NOT accepted (keeps the matrix bounded and the SQL predictable).
-//
-//  - source 'settlement'  -> a column on the latest `settlements` row. These
-//    are the curated, often human-verified salary-settlement figures. They have
-//    no verbatim clause text (clauseExcerpt is always null — we never synthesize
-//    one), but they still carry full provenance + the source PDF.
-//  - source 'provision'   -> a contract_provisions row keyed by provision_key on
-//    the district's latest contract. These carry the verbatim clause_excerpt.
-// ---------------------------------------------------------------------------
-type ColumnSource = "settlement" | "provision";
-type ColumnKind = "pct" | "money" | "count" | "years" | "bool" | "text";
-
-interface ColumnDef {
-  id: string;
-  label: string;
-  source: ColumnSource;
-  kind: ColumnKind;
-  unit: string | null;
-  // settlement: the snake_case DB column; provision: the provision_key.
-  field: string;
-  group: string;
-}
-
-const COLUMN_CATALOG: ColumnDef[] = [
-  {
-    id: "settlement.base_increase_pct",
-    label: "Base increase — yr 1",
-    source: "settlement",
-    kind: "pct",
-    unit: "%",
-    field: "base_increase_pct",
-    group: "Salary settlement",
-  },
-  {
-    id: "settlement.year2_pct",
-    label: "Base increase — yr 2",
-    source: "settlement",
-    kind: "pct",
-    unit: "%",
-    field: "year2_pct",
-    group: "Salary settlement",
-  },
-  {
-    id: "settlement.year3_pct",
-    label: "Base increase — yr 3",
-    source: "settlement",
-    kind: "pct",
-    unit: "%",
-    field: "year3_pct",
-    group: "Salary settlement",
-  },
-  {
-    id: "settlement.off_schedule_payment",
-    label: "Off-schedule / lump sum",
-    source: "settlement",
-    kind: "money",
-    unit: "$",
-    field: "off_schedule_payment",
-    group: "Salary settlement",
-  },
-  {
-    id: "settlement.term_years",
-    label: "Contract term",
-    source: "settlement",
-    kind: "years",
-    unit: "yr",
-    field: "term_years",
-    group: "Salary settlement",
-  },
-  {
-    id: "settlement.insurance_changed",
-    label: "Insurance changed",
-    source: "settlement",
-    kind: "bool",
-    unit: null,
-    field: "insurance_changed",
-    group: "Salary settlement",
-  },
-  {
-    id: "settlement.method",
-    label: "Settlement method",
-    source: "settlement",
-    kind: "text",
-    unit: null,
-    field: "method",
-    group: "Salary settlement",
-  },
-  {
-    id: "provision.ba_min_salary",
-    label: "BA min salary",
-    source: "provision",
-    kind: "money",
-    unit: "$",
-    field: "ba_min_salary",
-    group: "Salary schedule",
-  },
-  {
-    id: "provision.ba_max_salary",
-    label: "BA max salary",
-    source: "provision",
-    kind: "money",
-    unit: "$",
-    field: "ba_max_salary",
-    group: "Salary schedule",
-  },
-  {
-    id: "provision.ma_min_salary",
-    label: "MA min salary",
-    source: "provision",
-    kind: "money",
-    unit: "$",
-    field: "ma_min_salary",
-    group: "Salary schedule",
-  },
-  {
-    id: "provision.ma_max_salary",
-    label: "MA max salary",
-    source: "provision",
-    kind: "money",
-    unit: "$",
-    field: "ma_max_salary",
-    group: "Salary schedule",
-  },
-  {
-    id: "provision.salary_steps_count",
-    label: "Salary steps",
-    source: "provision",
-    kind: "count",
-    unit: null,
-    field: "salary_steps_count",
-    group: "Salary schedule",
-  },
-  {
-    id: "provision.salary_lanes_count",
-    label: "Salary lanes",
-    source: "provision",
-    kind: "count",
-    unit: null,
-    field: "salary_lanes_count",
-    group: "Salary schedule",
-  },
-  {
-    id: "provision.off_schedule_bonus_yr1",
-    label: "Off-schedule bonus — yr 1",
-    source: "provision",
-    kind: "money",
-    unit: "$",
-    field: "off_schedule_bonus_yr1",
-    group: "Salary schedule",
-  },
-];
-
-const CATALOG_BY_ID = new Map(COLUMN_CATALOG.map((c) => [c.id, c]));
-
-const DEFAULT_COLUMN_IDS = [
-  "settlement.base_increase_pct",
-  "settlement.year2_pct",
-  "settlement.year3_pct",
-  "settlement.off_schedule_payment",
-  "settlement.term_years",
-  "provision.ba_min_salary",
-  "provision.ma_min_salary",
-  "provision.salary_steps_count",
-];
-
-// Bound the matrix so one request can't fan out into an unbounded scan.
-const MAX_DISTRICTS = 60;
-
 function toInt(v: unknown): number | null {
   const n = Number(v);
   return Number.isInteger(n) && n > 0 ? n : null;
-}
-
-function publicColumn(c: ColumnDef) {
-  return {
-    id: c.id,
-    label: c.label,
-    source: c.source,
-    kind: c.kind,
-    unit: c.unit,
-    group: c.group,
-  };
-}
-
-interface Cell {
-  value: number | string | boolean;
-  kind: ColumnKind;
-  unit: string | null;
-  confidence: number | null;
-  humanVerified: boolean;
-  verifiedBy: string | null;
-  provisionId: number | null;
-  settlementId: number | null;
-  clauseExcerpt: string | null;
-  pageRef: number | null;
-  sourceUrl: string | null;
-  retrievedAt: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -284,7 +91,6 @@ router.post(
     }
     // De-dupe while preserving order.
     columnIds = [...new Set(columnIds)];
-    const columns = columnIds.map((id) => CATALOG_BY_ID.get(id)!);
 
     // matterId XOR districtIds — providing both is ambiguous, so reject rather
     // than silently letting one path win.
@@ -295,289 +101,33 @@ router.post(
       return;
     }
 
-    // Resolve the district set + authorize it against the firm.
-    const districtRoles = new Map<number, string | null>();
-    let matterId: number | null = null;
-    let matterName: string | null = null;
-
-    const mid = toInt(body.matterId);
-    if (mid != null) {
-      // Matter path — the matter must belong to the caller's firm (no existence
-      // leak: a cross-firm id is a 404). Its districts are inherently in scope.
-      const m = await db.execute(sql`
-        SELECT id, name FROM matters
-        WHERE id = ${mid} AND firm_id = ${firm.firmId}
-        LIMIT 1
-      `);
-      if (m.rows.length === 0) {
-        res.status(404).json({ error: "Matter not found" });
-        return;
-      }
-      matterId = mid;
-      matterName = String((m.rows[0] as { name: unknown }).name);
-      const r = await db.execute(sql`
-        SELECT district_id, role FROM matter_districts WHERE matter_id = ${mid}
-      `);
-      for (const row of r.rows as Array<{
-        district_id: unknown;
-        role: unknown;
-      }>) {
-        districtRoles.set(Number(row.district_id), String(row.role));
-      }
-    } else if (Array.isArray(body.districtIds)) {
-      // Explicit ids — every one MUST be inside the firm's scope, else 403. We
-      // reject the whole request rather than silently dropping ids (silent drop
-      // would hide an authorization mistake and mislead the user).
-      const ids = (body.districtIds as unknown[])
-        .map(toInt)
-        .filter((n): n is number => n != null);
-      const scope = await firmScopeDistrictIds(firm.firmId);
-      for (const id of ids) {
-        if (!scope.has(id)) {
-          res.status(403).json({
-            error: "FORBIDDEN_DISTRICT",
-            message: "One or more districts are outside your workspace.",
-          });
-          return;
-        }
-        districtRoles.set(id, null);
-      }
-    } else {
-      res.status(400).json({ error: "Provide a matterId or districtIds." });
-      return;
-    }
-
-    const districtIds = [...districtRoles.keys()];
-    if (districtIds.length === 0) {
-      res.json({
-        bargainingUnit: unit,
-        matterId,
-        matterName,
-        districts: [],
-        columns: columns.map(publicColumn),
-        catalog: COLUMN_CATALOG.map(publicColumn),
-        cells: {},
-      });
-      return;
-    }
-    if (districtIds.length > MAX_DISTRICTS) {
-      res
-        .status(400)
-        .json({ error: `Too many districts (max ${MAX_DISTRICTS}).` });
-      return;
-    }
+    const matterId = toInt(body.matterId);
+    const districtIds = Array.isArray(body.districtIds)
+      ? (body.districtIds as unknown[])
+          .map(toInt)
+          .filter((n): n is number => n != null)
+      : null;
 
     try {
-      const idList = sql.join(
-        districtIds.map((id) => sql`${id}`),
-        sql`, `,
-      );
-
-      // District metadata for the rows. Ordered client → peer → alpha so the
-      // matter's client district leads the matrix.
-      const dmeta = await db.execute(sql`
-        SELECT id, name, county, district_type, enrollment, state
-        FROM districts WHERE id IN (${idList})
-      `);
-      const districts = (
-        dmeta.rows as Array<{
-          id: unknown;
-          name: unknown;
-          county: unknown;
-          district_type: unknown;
-          enrollment: unknown;
-          state: unknown;
-        }>
-      )
-        .map((row) => ({
-          districtId: Number(row.id),
-          name: String(row.name),
-          county: row.county == null ? null : String(row.county),
-          districtType:
-            row.district_type == null ? null : String(row.district_type),
-          enrollment: row.enrollment == null ? null : Number(row.enrollment),
-          state: String(row.state ?? ""),
-          role: districtRoles.get(Number(row.id)) ?? null,
-        }))
-        .sort((a, b) => {
-          const rank = (r: string | null) =>
-            r === "client" ? 0 : r === "peer" ? 1 : 2;
-          const rr = rank(a.role) - rank(b.role);
-          return rr !== 0 ? rr : a.name.localeCompare(b.name);
-        });
-
-      const cells: Record<string, Record<string, Cell>> = {};
-
-      // --- Provision cells -------------------------------------------------
-      // The latest contract per district (effective_end, then effective_start,
-      // then id) anchors which contract_provisions we read, so we never surface
-      // a stale prior contract's value. For each (district, provision_key) we
-      // pick the single best row: human-verified first, then highest
-      // confidence, then newest. The contract's source_doc supplies the
-      // citation; a row with no value or no citable source_url is excluded.
-      const provColumns = columns.filter((c) => c.source === "provision");
-      if (provColumns.length > 0) {
-        const keyList = sql.join(
-          provColumns.map((c) => sql`${c.field}`),
-          sql`, `,
-        );
-        const r = await db.execute(sql`
-          WITH latest_contract AS (
-            SELECT DISTINCT ON (c.district_id)
-              c.id, c.district_id, c.source_doc_id
-            FROM contracts c
-            WHERE c.district_id IN (${idList})
-              AND c.bargaining_unit = ${unit}
-            ORDER BY c.district_id,
-                     c.effective_end DESC NULLS LAST,
-                     c.effective_start DESC NULLS LAST,
-                     c.id DESC
-          )
-          SELECT DISTINCT ON (lc.district_id, cp.provision_key)
-            lc.district_id,
-            cp.id AS provision_id,
-            cp.provision_key,
-            cp.value_numeric,
-            cp.value_text,
-            cp.unit,
-            cp.clause_excerpt,
-            cp.page_ref,
-            cp.confidence,
-            cp.human_verified,
-            sd.source_url,
-            sd.retrieved_at
-          FROM latest_contract lc
-          JOIN contract_provisions cp ON cp.contract_id = lc.id
-          JOIN source_documents sd ON sd.id = lc.source_doc_id
-          WHERE cp.provision_key IN (${keyList})
-            AND (
-              cp.value_numeric IS NOT NULL
-              OR (cp.value_text IS NOT NULL AND btrim(cp.value_text) <> '')
-            )
-            AND sd.source_url IS NOT NULL
-            -- Provision cells must carry a verbatim clause excerpt (the value is
-            -- derived from that clause). A cited value with no excerpt cannot be
-            -- verified against source language, so it is excluded; the best
-            -- EXCERPT-BEARING provision per key is then chosen by DISTINCT ON.
-            AND cp.clause_excerpt IS NOT NULL
-            AND btrim(cp.clause_excerpt) <> ''
-          ORDER BY lc.district_id, cp.provision_key,
-                   cp.human_verified DESC NULLS LAST,
-                   cp.confidence DESC NULLS LAST,
-                   cp.id DESC
-        `);
-        const provByField = new Map(provColumns.map((c) => [c.field, c]));
-        for (const row of r.rows as Array<Record<string, unknown>>) {
-          const col = provByField.get(String(row.provision_key));
-          if (!col) continue;
-          const did = Number(row.district_id);
-          const valueNumeric =
-            row.value_numeric == null ? null : Number(row.value_numeric);
-          const value =
-            valueNumeric != null ? valueNumeric : String(row.value_text);
-          const cell: Cell = {
-            value,
-            kind: col.kind,
-            unit: col.unit,
-            confidence: row.confidence == null ? null : Number(row.confidence),
-            humanVerified: row.human_verified === true,
-            verifiedBy: null,
-            provisionId: Number(row.provision_id),
-            settlementId: null,
-            clauseExcerpt:
-              row.clause_excerpt == null ? null : String(row.clause_excerpt),
-            pageRef: row.page_ref == null ? null : Number(row.page_ref),
-            sourceUrl: row.source_url == null ? null : String(row.source_url),
-            retrievedAt:
-              row.retrieved_at == null ? null : String(row.retrieved_at),
-          };
-          (cells[did] ??= {})[col.id] = cell;
-        }
-      }
-
-      // --- Settlement cells ------------------------------------------------
-      // Pick the LATEST settlement per district FIRST (CTE), then LEFT JOIN its
-      // citation. Anchoring the latest row before the citation check means we can
-      // never fall back to an older, cited settlement when the newest one is
-      // uncited: an uncited latest settlement yields a null source_url and is
-      // skipped below, leaving the district with no settlement cells (empty,
-      // never stale). Each requested metric is unpivoted from that single row; a
-      // null metric is skipped.
-      const setColumns = columns.filter((c) => c.source === "settlement");
-      if (setColumns.length > 0) {
-        const r = await db.execute(sql`
-          WITH latest_settlement AS (
-            SELECT DISTINCT ON (s.district_id)
-              s.id, s.district_id,
-              s.base_increase_pct, s.year2_pct, s.year3_pct,
-              s.off_schedule_payment, s.term_years, s.insurance_changed, s.method,
-              s.confidence, s.human_verified, s.verified_by, s.page_ref,
-              s.source_doc_id
-            FROM settlements s
-            WHERE s.district_id IN (${idList})
-              AND s.bargaining_unit = ${unit}
-            ORDER BY s.district_id,
-                     COALESCE(s.to_year, s.from_year) DESC NULLS LAST,
-                     s.id DESC
-          )
-          SELECT
-            ls.id, ls.district_id,
-            ls.base_increase_pct, ls.year2_pct, ls.year3_pct,
-            ls.off_schedule_payment, ls.term_years, ls.insurance_changed, ls.method,
-            ls.confidence, ls.human_verified, ls.verified_by, ls.page_ref,
-            sd.source_url, sd.retrieved_at
-          FROM latest_settlement ls
-          LEFT JOIN source_documents sd ON sd.id = ls.source_doc_id
-        `);
-        for (const row of r.rows as Array<Record<string, unknown>>) {
-          const did = Number(row.district_id);
-          const sourceUrl =
-            row.source_url == null ? null : String(row.source_url);
-          if (!sourceUrl) continue; // citation mandatory
-          for (const col of setColumns) {
-            const raw = row[col.field];
-            if (raw == null) continue;
-            let value: number | string | boolean;
-            if (col.kind === "bool") {
-              value = raw === true;
-            } else if (col.kind === "text") {
-              const s = String(raw).trim();
-              if (!s) continue;
-              value = s;
-            } else {
-              value = Number(raw);
-            }
-            const cell: Cell = {
-              value,
-              kind: col.kind,
-              unit: col.unit,
-              confidence:
-                row.confidence == null ? null : Number(row.confidence),
-              humanVerified: row.human_verified === true,
-              verifiedBy:
-                row.verified_by == null ? null : String(row.verified_by),
-              provisionId: null,
-              settlementId: Number(row.id),
-              clauseExcerpt: null,
-              pageRef: row.page_ref == null ? null : Number(row.page_ref),
-              sourceUrl,
-              retrievedAt:
-                row.retrieved_at == null ? null : String(row.retrieved_at),
-            };
-            (cells[did] ??= {})[col.id] = cell;
-          }
-        }
-      }
-
-      res.json({
-        bargainingUnit: unit,
+      // Single source of truth: the export builders call the same buildMatrix(),
+      // so a generated memo/exhibit cites byte-for-byte what the matrix shows.
+      const result = await buildMatrix(firm.firmId, {
         matterId,
-        matterName,
-        districts,
-        columns: columns.map(publicColumn),
-        catalog: COLUMN_CATALOG.map(publicColumn),
-        cells,
+        districtIds,
+        unit,
+        columnIds,
       });
+      if (!result.ok) {
+        res
+          .status(result.status)
+          .json(
+            result.message
+              ? { error: result.error, message: result.message }
+              : { error: result.error },
+          );
+        return;
+      }
+      res.json(result.data);
     } catch (err) {
       console.error("firm compare error:", err);
       res.status(500).json({ error: "Internal server error" });

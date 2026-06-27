@@ -96,16 +96,19 @@ export async function downloadBuffer(key: string): Promise<Buffer | null> {
 
 // Stream an object to an Express response. Returns false (without writing a
 // body) when the object does not exist, so the caller can fall back / 404.
+// `disposition` is the full Content-Disposition value (default inline); pass an
+// `attachment; filename="..."` value to force a download.
 export async function streamObjectTo(
   key: string,
   res: import("express").Response,
   contentType = "application/pdf",
+  disposition = "inline",
 ): Promise<boolean> {
   const file = fileForKey(key);
   const [exists] = await file.exists();
   if (!exists) return false;
   res.setHeader("Content-Type", contentType);
-  res.setHeader("Content-Disposition", "inline");
+  res.setHeader("Content-Disposition", disposition);
   try {
     const [metadata] = await file.getMetadata();
     if (metadata.size) res.setHeader("Content-Length", String(metadata.size));
@@ -120,4 +123,13 @@ export async function streamObjectTo(
       .pipe(res);
   });
   return true;
+}
+
+// Build a safe RFC-6266 Content-Disposition attachment header. The ASCII
+// fallback filename is sanitized and a UTF-8 filename* is included so names with
+// non-ASCII characters survive. Used by the work-product export download route.
+export function attachmentDisposition(filename: string): string {
+  const ascii = filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  const encoded = encodeURIComponent(filename);
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
 }

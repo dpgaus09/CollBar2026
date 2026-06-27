@@ -374,6 +374,47 @@ async function runMigrations(): Promise<void> {
     logger.info("Migration OK: tracked_districts / matters / matter_districts ensured");
 
     // -----------------------------------------------------------------------
+    // Phase 5 — Work-product exports (firm workspace billable deliverables).
+    // One row per generated document (comparison memo / benchmark exhibit /
+    // clause appendix) rendered to PDF or DOCX. The rendered bytes live in
+    // object storage under object_key; this table is the durable index used to
+    // list + re-download prior exports. matter_id is SET NULL (not CASCADE) and
+    // matter_name / generated_by_name are snapshots so a delivered, billed
+    // document survives matter/user deletion. Firm-scoped (firm_members /
+    // requireFirmSession), never the per-district gate(). Dual-declared in
+    // lib/db/src/schema/exports.ts (verified by check-drift).
+    // -----------------------------------------------------------------------
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS firm_exports (
+        id                bigserial PRIMARY KEY,
+        firm_id           bigint NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+        matter_id         bigint REFERENCES matters(id) ON DELETE SET NULL,
+        matter_name       text NOT NULL,
+        type              text NOT NULL,
+        format            text NOT NULL,
+        object_key        text NOT NULL,
+        title             text NOT NULL,
+        bargaining_unit   text NOT NULL,
+        file_size         bigint NOT NULL,
+        generated_by      bigint REFERENCES users(id) ON DELETE SET NULL,
+        generated_by_name text,
+        created_at        timestamptz NOT NULL DEFAULT NOW(),
+        CONSTRAINT firm_exports_object_key_unique UNIQUE (object_key),
+        CONSTRAINT firm_exports_type_check CHECK (type IN ('comparison_memo','benchmark_exhibit','clause_appendix')),
+        CONSTRAINT firm_exports_format_check CHECK (format IN ('pdf','docx'))
+      )
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS firm_exports_firm_created_idx
+        ON firm_exports (firm_id, created_at DESC)
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS firm_exports_matter_idx ON firm_exports(matter_id)
+    `);
+
+    logger.info("Migration OK: firm_exports ensured");
+
+    // -----------------------------------------------------------------------
     // IL ELRB board-vs-union final offers (Task #112).
     //
     // 1. Allow source_documents.doc_type = 'final_offer' (the scraped offer

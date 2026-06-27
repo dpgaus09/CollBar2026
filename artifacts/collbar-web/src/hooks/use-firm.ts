@@ -460,3 +460,96 @@ export function useClauseCompare(req: ClauseCompareRequest, enabled = true) {
     staleTime: 60_000,
   });
 }
+
+// ===========================================================================
+// Phase 5 — Work-product exports.
+//
+// Generate a comparison memo / benchmark exhibit / clause appendix from a
+// matter, rendered server-side to PDF or DOCX from the SAME data the live views
+// use (no new analysis), persisted to Object Storage, and indexed in
+// firm_exports so the firm can list + re-download prior deliverables. Access is
+// firm membership (requireFirmSession); another firm's export id is a 404.
+// ===========================================================================
+
+export type ExportType =
+  | "comparison_memo"
+  | "benchmark_exhibit"
+  | "clause_appendix";
+export type ExportFormat = "pdf" | "docx";
+
+export interface FirmExport {
+  id: number;
+  matterId: number | null;
+  matterName: string;
+  type: ExportType;
+  format: ExportFormat;
+  title: string;
+  bargainingUnit: string;
+  fileSize: number | null;
+  generatedByName: string | null;
+  createdAt: string | null;
+}
+
+export interface GenerateExportRequest {
+  matterId: number;
+  type: ExportType;
+  format: ExportFormat;
+  bargainingUnit?: string;
+  provisionKeys?: string[];
+  title?: string;
+}
+
+export const EXPORTS_KEY = ["/api/firm/exports"];
+
+export function useExports(enabled = true) {
+  return useQuery<{ exports: FirmExport[] }>({
+    queryKey: EXPORTS_KEY,
+    queryFn: () => firmFetch("/api/firm/exports"),
+    enabled,
+  });
+}
+
+export function useGenerateExport() {
+  const qc = useQueryClient();
+  return useMutation<FirmExport, Error, GenerateExportRequest>({
+    mutationFn: (req) =>
+      firmFetch<FirmExport>("/api/firm/exports", {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: EXPORTS_KEY }),
+  });
+}
+
+// Download a stored export. The download endpoint authorizes by firm session
+// cookie, so we fetch the bytes with credentials and hand the browser a blob via
+// a transient anchor — a plain <a href> would drop the cookie / can't be scoped.
+export async function downloadExport(
+  id: number,
+  filename: string,
+): Promise<void> {
+  const res = await fetch(apiUrl(`/api/firm/exports/${id}/download`), {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    let msg = "Download failed";
+    try {
+      const b = (await res.json()) as { error?: string };
+      if (b.error) msg = b.error;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Defer revoke: some browsers start the download asynchronously after click(),
+  // and revoking synchronously can cancel it.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
