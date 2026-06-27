@@ -10,6 +10,20 @@ import { sql } from "drizzle-orm";
 import { VALID_BARGAINING_UNITS, BARGAINING_UNIT_LABELS } from "./bargaining-units.js";
 import { runPromotion } from "../lib/promote.js";
 import { uploadBuffer, uploadedCbaKey } from "../lib/objectStorage.js";
+import {
+  parseDriveFolderId,
+  listFolderTree,
+  downloadDriveFile,
+  exportGoogleSheetCsv,
+  SHEET_MIME,
+  DriveNotConnectedError,
+  type DriveFile,
+} from "../lib/google-drive.js";
+import {
+  mapManifestColumns,
+  matchEntries,
+  isPdfFile,
+} from "../lib/bulk-cba.js";
 import { enqueueJob, listJobs, getQueueStats } from "../extraction/jobs/queue.js";
 import { heavyAdminLimiter } from "../lib/rateLimit.js";
 import {
@@ -1539,6 +1553,7 @@ async function ensureContractForUpload(
   districtId: number,
   unit: string,
   schoolYear: string | null,
+  unitOverride = false,
 ): Promise<{ contractId: string | null }> {
   const existing = await db.execute(sql`
     SELECT id::text AS id FROM contracts WHERE source_doc_id = ${sourceDocId} LIMIT 1
@@ -1552,8 +1567,8 @@ async function ensureContractForUpload(
     if (m) effectiveStart = `${m[1]}-07-01`;
   }
   const inserted = await db.execute(sql`
-    INSERT INTO contracts (district_id, bargaining_unit, effective_start, source_doc_id)
-    VALUES (${districtId}, ${unit}, ${effectiveStart}, ${sourceDocId})
+    INSERT INTO contracts (district_id, bargaining_unit, effective_start, source_doc_id, unit_override)
+    VALUES (${districtId}, ${unit}, ${effectiveStart}, ${sourceDocId}, ${unitOverride})
     ON CONFLICT (district_id, bargaining_unit, unit_scope, effective_start) DO NOTHING
     RETURNING id::text AS id
   `);
@@ -1752,6 +1767,619 @@ router.post("/admin/upload-cba", requireAdminToken, heavyAdminLimiter, (req, res
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Bulk CBA import from Google Drive (Task #199). An admin points the panel at a
+// Drive folder holding ~850 districts' CBA PDFs plus a mapping spreadsheet. The
+// preview is a pure dry run (writes nothing); ingest is idempotent + resumable
+// via the bulk_cba_imports ledger and re-uses the proven single-upload path
+// (object-storage-first, %PDF-gated, (district,unit,hash) dedup). Extraction is
+// enqueued only where the worker actually runs (production) so a dev preview/
+// ingest can never trigger a paid Claude job.
+// ---------------------------------------------------------------------------
+
+// Per-request ingest batch cap. Each entry downloads a PDF and writes to object
+// storage + DB; the client batches the (potentially ~850) matched rows under
+// the global 100kb JSON body limit and the deployment's ~300s request cap.
+const BULK_INGEST_BATCH_CAP = 25;
+// Max docs a single retry press may re-enqueue (each is a paid Vision run).
+const BULK_RETRY_CAP = 200;
+const BULK_RUN_ID_RE = /^[A-Za-z0-9_:.-]{1,64}$/;
+
+interface BulkIngestEntry {
+  driveFileId: string;
+  districtId: number;
+  unit: string;
+  schoolYear: string | null;
+  filename: string;
+  driveFileName?: string | null;
+  driveMd5?: string | null;
+  driveSize?: number | null;
+  driveModifiedTime?: string | null;
+}
+
+interface BulkIngestResult {
+  driveFileId: string;
+  status: string;
+  sourceDocId: number | null;
+  error: string | null;
+}
+
+// Extraction is enqueued in production (worker runs there). In dev it is skipped
+// unless explicitly opted in, so previewing/ingesting a real folder in dev never
+// spends money on Claude. Source docs/contracts are still recorded either way.
+function bulkShouldEnqueue(): boolean {
+  return (
+    process.env.NODE_ENV === "production" ||
+    process.env.BULK_IMPORT_ALLOW_DEV_ENQUEUE === "1"
+  );
+}
+
+// Upsert one ledger row keyed by (run_id, drive_file_id). Preserves an existing
+// file_hash/source_doc_id when a later attempt does not carry one.
+async function bulkRecordLedger(p: {
+  runId: string;
+  driveFileId: string;
+  driveFileName: string | null;
+  driveMd5: string | null;
+  driveSize: number | null;
+  driveModified: string | null;
+  districtId: number | null;
+  unit: string | null;
+  schoolYear: string | null;
+  filename: string | null;
+  fileHash: string | null;
+  sourceDocId: number | null;
+  status: string;
+  error: string | null;
+}): Promise<void> {
+  await db.execute(sql`
+    INSERT INTO bulk_cba_imports
+      (run_id, drive_file_id, drive_file_name, drive_md5, drive_size, drive_modified,
+       district_id, bargaining_unit, school_year, filename, file_hash, source_doc_id,
+       status, error)
+    VALUES (${p.runId}, ${p.driveFileId}, ${p.driveFileName}, ${p.driveMd5}, ${p.driveSize},
+            ${p.driveModified}, ${p.districtId}, ${p.unit}, ${p.schoolYear}, ${p.filename},
+            ${p.fileHash}, ${p.sourceDocId}, ${p.status}, ${p.error})
+    ON CONFLICT (run_id, drive_file_id) DO UPDATE SET
+      drive_file_name = EXCLUDED.drive_file_name,
+      drive_md5       = EXCLUDED.drive_md5,
+      drive_size      = EXCLUDED.drive_size,
+      drive_modified  = EXCLUDED.drive_modified,
+      district_id     = EXCLUDED.district_id,
+      bargaining_unit = EXCLUDED.bargaining_unit,
+      school_year     = EXCLUDED.school_year,
+      filename        = EXCLUDED.filename,
+      file_hash       = COALESCE(EXCLUDED.file_hash, bulk_cba_imports.file_hash),
+      source_doc_id   = COALESCE(EXCLUDED.source_doc_id, bulk_cba_imports.source_doc_id),
+      status          = EXCLUDED.status,
+      error           = EXCLUDED.error,
+      updated_at      = NOW()
+  `);
+}
+
+// Ingest one Drive-hosted CBA PDF. Idempotent + resumable: an unchanged file
+// already ingested in this run is skipped without re-downloading; content is
+// deduped by (district, unit, hash). Every failure path records a 'failed'
+// ledger row (with the reason) and returns — it never throws.
+async function bulkIngestOneFile(
+  runId: string,
+  e: BulkIngestEntry,
+  requestedBy: string,
+): Promise<BulkIngestResult> {
+  const driveFileId = String(e.driveFileId ?? "");
+  const driveFileName = e.driveFileName ? String(e.driveFileName).slice(0, 300) : null;
+  const driveMd5 = e.driveMd5 ? String(e.driveMd5).slice(0, 64) : null;
+  const driveSize = typeof e.driveSize === "number" ? e.driveSize : null;
+  const driveModified = e.driveModifiedTime ? String(e.driveModifiedTime) : null;
+  const districtId = Number(e.districtId);
+  const unit = String(e.unit ?? "");
+  const sy = normalizeSchoolYear(e.schoolYear);
+  const schoolYear = sy.ok ? sy.value : null;
+  const filename = sanitizeFilename(
+    String(e.filename || e.driveFileName || "contract.pdf"),
+  );
+
+  const fail = async (error: string): Promise<BulkIngestResult> => {
+    await bulkRecordLedger({
+      runId,
+      driveFileId,
+      driveFileName,
+      driveMd5,
+      driveSize,
+      driveModified,
+      districtId: Number.isFinite(districtId) ? districtId : null,
+      unit: unit || null,
+      schoolYear,
+      filename,
+      fileHash: null,
+      sourceDocId: null,
+      status: "failed",
+      error: error.slice(0, 500),
+    });
+    return { driveFileId, status: "failed", sourceDocId: null, error: error.slice(0, 500) };
+  };
+
+  if (!driveFileId) {
+    return { driveFileId, status: "failed", sourceDocId: null, error: "missing driveFileId" };
+  }
+  if (!Number.isFinite(districtId) || districtId < 1) return fail("invalid districtId");
+  if (!VALID_BARGAINING_UNITS.has(unit)) return fail(`invalid bargaining_unit "${unit}"`);
+
+  // Resume: an unchanged file already ingested in this run → reuse, skip download.
+  const prior = await db.execute(sql`
+    SELECT source_doc_id, drive_md5, status FROM bulk_cba_imports
+    WHERE run_id = ${runId} AND drive_file_id = ${driveFileId} LIMIT 1
+  `);
+  if (prior.rows.length) {
+    const p = prior.rows[0] as {
+      source_doc_id: number | null;
+      drive_md5: string | null;
+      status: string;
+    };
+    if (
+      p.source_doc_id != null &&
+      (p.status === "ingested" || p.status === "duplicate") &&
+      (driveMd5 == null || p.drive_md5 == null || p.drive_md5 === driveMd5)
+    ) {
+      return {
+        driveFileId,
+        status: p.status,
+        sourceDocId: Number(p.source_doc_id),
+        error: null,
+      };
+    }
+  }
+
+  // District must exist.
+  const distRows = await db.execute(sql`SELECT id FROM districts WHERE id = ${districtId}`);
+  if (!distRows.rows.length) return fail(`district ${districtId} not found`);
+
+  // Download bytes (direct googleapis, 401→refresh once, 64MB cap).
+  let buf: Buffer;
+  try {
+    buf = await downloadDriveFile(driveFileId);
+  } catch (err) {
+    return fail(`download failed: ${(err as Error).message}`);
+  }
+  if (buf.subarray(0, 1024).indexOf(Buffer.from("%PDF")) === -1) {
+    return fail("not a valid PDF (missing %PDF header)");
+  }
+  const fileHash = createHash("sha256").update(buf).digest("hex");
+
+  // Object storage MUST hold the PDF for it to be servable in prod (the prod fs
+  // is ephemeral; resolvePdfBuffer reads il_cba/<hash>.pdf by hash FIRST). Do
+  // this for BOTH new and duplicate docs: a pre-existing source_documents row
+  // may have come from an older local-only path and otherwise be unservable in
+  // prod. The write is idempotent by key, so re-uploading the same hash is safe.
+  try {
+    await uploadBuffer(uploadedCbaKey(fileHash), buf);
+  } catch (err) {
+    return fail(`object storage upload failed: ${(err as Error).message}`);
+  }
+
+  // Content-level dedup: same (district, unit, hash) → reuse existing source doc.
+  const existing = await db.execute(sql`
+    SELECT id FROM source_documents
+    WHERE district_id = ${districtId} AND bargaining_unit = ${unit} AND file_hash = ${fileHash}
+    LIMIT 1
+  `);
+  let sourceDocId: number;
+  let status: string;
+  if (existing.rows.length) {
+    sourceDocId = Number((existing.rows[0] as { id: number }).id);
+    status = "duplicate";
+  } else {
+    // Best-effort local copy for the dev pipeline; NULL storage_key in prod is OK.
+    let storageKey: string | null = null;
+    try {
+      mkdirSync(IL_CBA_PDF_DIR, { recursive: true });
+      const absPath = join(IL_CBA_PDF_DIR, `${fileHash}.pdf`);
+      writeFileSync(absPath, buf);
+      storageKey = `local:${absPath}`;
+    } catch {
+      storageKey = null;
+    }
+    const sourceUrl = `upload://district-${districtId}/${unit}/${filename}`;
+    try {
+      const inserted = await db.execute(sql`
+        INSERT INTO source_documents
+          (district_id, doc_type, bargaining_unit, source_url, file_hash, storage_key, school_year)
+        VALUES (${districtId}, 'cba_pdf', ${unit}, ${sourceUrl}, ${fileHash}, ${storageKey}, ${schoolYear})
+        RETURNING id
+      `);
+      sourceDocId = Number((inserted.rows[0] as { id: number }).id);
+      status = "ingested";
+    } catch (err) {
+      const msg = String((err as Error).message ?? err);
+      if (/unique|duplicate/i.test(msg)) {
+        const r = await db.execute(sql`
+          SELECT id FROM source_documents
+          WHERE district_id = ${districtId} AND bargaining_unit = ${unit} AND file_hash = ${fileHash}
+          LIMIT 1
+        `);
+        if (r.rows.length) {
+          sourceDocId = Number((r.rows[0] as { id: number }).id);
+          status = "duplicate";
+        } else {
+          return fail(`source_documents insert conflict: ${msg}`);
+        }
+      } else {
+        return fail(`source_documents insert failed: ${msg}`);
+      }
+    }
+  }
+
+  // Pin the bargaining unit (unit_override), ensure an attachable contract row,
+  // and enqueue extraction. If any of this fails AFTER the source doc exists,
+  // record a failed ledger row that still carries the doc id, so progress/retry
+  // can see and re-drive it instead of silently losing the row.
+  try {
+    await ensureContractForUpload(sourceDocId, districtId, unit, schoolYear, true);
+
+    // Enqueue extraction only where the worker runs, and only if not already done.
+    if (bulkShouldEnqueue()) {
+      const succeeded = await db.execute(sql`
+        SELECT 1 FROM extraction_runs WHERE source_doc_id = ${sourceDocId} AND status = 'success' LIMIT 1
+      `);
+      if (succeeded.rows.length === 0) {
+        await enqueueJob({
+          sourceDocId,
+          domain: "cba",
+          requestedBy,
+          requestReason: "bulk-import",
+        });
+      }
+    }
+  } catch (err) {
+    const msg = `post-ingest step failed: ${String((err as Error).message ?? err)}`;
+    await bulkRecordLedger({
+      runId,
+      driveFileId,
+      driveFileName,
+      driveMd5,
+      driveSize,
+      driveModified,
+      districtId,
+      unit,
+      schoolYear,
+      filename,
+      fileHash,
+      sourceDocId,
+      status: "failed",
+      error: msg.slice(0, 500),
+    });
+    return { driveFileId, status: "failed", sourceDocId, error: msg.slice(0, 500) };
+  }
+
+  await bulkRecordLedger({
+    runId,
+    driveFileId,
+    driveFileName,
+    driveMd5,
+    driveSize,
+    driveModified,
+    districtId,
+    unit,
+    schoolYear,
+    filename,
+    fileHash,
+    sourceDocId,
+    status,
+    error: null,
+  });
+  return { driveFileId, status, sourceDocId, error: null };
+}
+
+// Find and read the mapping spreadsheet inside the Drive folder. Prefers a
+// Google Sheet / CSV; rejects Excel (no xlsx parser) with a clear message.
+async function bulkReadManifest(
+  files: DriveFile[],
+): Promise<
+  | { ok: true; csv: string; manifest: DriveFile; candidates: DriveFile[] }
+  | { ok: false; error: string; candidates: DriveFile[] }
+> {
+  const candidates = files.filter(
+    (f) => f.mimeType === SHEET_MIME || /\.(csv|xlsx|xls)$/i.test(f.name),
+  );
+  if (!candidates.length) {
+    return {
+      ok: false,
+      error: "No mapping spreadsheet found in the folder (expected a Google Sheet or a .csv).",
+      candidates,
+    };
+  }
+  const score = (f: DriveFile) => {
+    const n = f.name.toLowerCase();
+    let s = 0;
+    if (/manifest|mapping|\bmap\b|index|list|districts?/.test(n)) s += 10;
+    if (f.mimeType === SHEET_MIME) s += 2;
+    if (/\.csv$/i.test(n)) s += 1;
+    return s;
+  };
+  const chosen = [...candidates].sort((a, b) => score(b) - score(a))[0];
+  if (/\.(xlsx|xls)$/i.test(chosen.name) && chosen.mimeType !== SHEET_MIME) {
+    return {
+      ok: false,
+      error: `The mapping file "${chosen.name}" is an Excel file, which is not supported. Re-save it as a Google Sheet or export it as CSV.`,
+      candidates,
+    };
+  }
+  try {
+    const csv =
+      chosen.mimeType === SHEET_MIME
+        ? await exportGoogleSheetCsv(chosen.id)
+        : (await downloadDriveFile(chosen.id)).toString("utf8");
+    return { ok: true, csv, manifest: chosen, candidates };
+  } catch (err) {
+    return {
+      ok: false,
+      error: `Could not read mapping file "${chosen.name}": ${(err as Error).message}`,
+      candidates,
+    };
+  }
+}
+
+// GET /admin/bulk-cba/preview?folderId=... — pure dry run, writes nothing.
+router.get(
+  "/admin/bulk-cba/preview",
+  requireAdminToken,
+  heavyAdminLimiter,
+  async (req, res) => {
+    const folderId = parseDriveFolderId(
+      String(req.query.folderId ?? req.query.folder ?? ""),
+    );
+    if (!folderId) {
+      res.status(400).json({ error: "A Google Drive folder id or URL is required" });
+      return;
+    }
+    let tree;
+    try {
+      tree = await listFolderTree(folderId);
+    } catch (err) {
+      if (err instanceof DriveNotConnectedError) {
+        res.status(502).json({
+          error: "Google Drive is not connected. Connect it in the integrations panel and try again.",
+        });
+        return;
+      }
+      console.error("[bulk-cba] folder list failed", err);
+      res.status(502).json({ error: `Could not list the Drive folder: ${(err as Error).message}` });
+      return;
+    }
+    const pdfFiles = tree.files.filter(isPdfFile);
+    const manifest = await bulkReadManifest(tree.files);
+    if (!manifest.ok) {
+      res.json({
+        ok: false,
+        folderId,
+        fileCount: pdfFiles.length,
+        truncated: tree.truncated,
+        error: manifest.error,
+        manifestCandidates: manifest.candidates.map((f) => ({ id: f.id, name: f.name })),
+      });
+      return;
+    }
+    const grid = parseCsv(manifest.csv);
+    if (grid.length < 2) {
+      res.status(400).json({ error: "The mapping spreadsheet has no data rows." });
+      return;
+    }
+    const cols = mapManifestColumns(grid[0]);
+    if (!cols) {
+      res.status(400).json({
+        error: "The mapping spreadsheet is missing required columns. Include a file column plus an RCDTS or district-name column (bargaining_unit and school_year recommended).",
+      });
+      return;
+    }
+    const lookups = await loadDistrictLookups();
+    const { entries, unreferencedFiles } = matchEntries({
+      rows: grid.slice(1),
+      startLine: 2,
+      cols,
+      files: pdfFiles,
+      lookups,
+    });
+    const counts: Record<string, number> = {};
+    for (const e of entries) counts[e.status] = (counts[e.status] ?? 0) + 1;
+    const matched = entries.filter((e) => e.status === "matched");
+    const unmatched = entries.filter((e) => e.status !== "matched");
+    res.json({
+      ok: true,
+      folderId,
+      fileCount: pdfFiles.length,
+      truncated: tree.truncated,
+      manifest: { id: manifest.manifest.id, name: manifest.manifest.name },
+      rowCount: entries.length,
+      counts,
+      matchedCount: matched.length,
+      matched,
+      unmatched,
+      unreferencedFiles,
+      costNote:
+        `Ingesting ${matched.length} contract(s) will enqueue ${matched.length} extraction job(s). ` +
+        "Each runs salary + provisions + contract-meta via Claude Vision and is processed one at a time " +
+        "on the production worker, so a full run takes time and incurs per-document API cost. " +
+        "Start with a small batch to validate quality before releasing all.",
+    });
+  },
+);
+
+// POST /admin/bulk-cba/ingest — body { runId, entries[] } (client batches ≤25).
+router.post(
+  "/admin/bulk-cba/ingest",
+  requireAdminToken,
+  heavyAdminLimiter,
+  async (req, res) => {
+    const body = (req.body ?? {}) as { runId?: unknown; entries?: unknown };
+    const runId = String(body.runId ?? "");
+    if (!BULK_RUN_ID_RE.test(runId)) {
+      res.status(400).json({ error: "A valid runId (<=64 chars; letters, digits, _ : . -) is required" });
+      return;
+    }
+    if (!Array.isArray(body.entries)) {
+      res.status(400).json({ error: "entries[] is required" });
+      return;
+    }
+    if (body.entries.length === 0) {
+      res.json({ ok: true, runId, enqueued: bulkShouldEnqueue(), results: [], counts: {} });
+      return;
+    }
+    if (body.entries.length > BULK_INGEST_BATCH_CAP) {
+      res.status(400).json({
+        error: `Too many entries in one batch (max ${BULK_INGEST_BATCH_CAP}). Split into smaller batches.`,
+      });
+      return;
+    }
+    const requestedBy = requestedByFromReq(req);
+    const entries = body.entries as BulkIngestEntry[];
+    const results = await mapLimit(entries, 4, (e) =>
+      bulkIngestOneFile(runId, e, requestedBy).catch(
+        (err): BulkIngestResult => ({
+          driveFileId: String((e as BulkIngestEntry)?.driveFileId ?? ""),
+          status: "failed",
+          sourceDocId: null,
+          error: String((err as Error).message ?? err).slice(0, 300),
+        }),
+      ),
+    );
+    const counts: Record<string, number> = {};
+    for (const r of results) counts[r.status] = (counts[r.status] ?? 0) + 1;
+    res.json({ ok: true, runId, enqueued: bulkShouldEnqueue(), results, counts });
+  },
+);
+
+// GET /admin/bulk-cba/runs — list recent import runs for the picker.
+router.get("/admin/bulk-cba/runs", requireAdminToken, async (_req, res) => {
+  const rows = await db.execute(sql`
+    SELECT run_id AS "runId",
+           COUNT(*)::int AS total,
+           COUNT(*) FILTER (WHERE status = 'ingested')::int  AS ingested,
+           COUNT(*) FILTER (WHERE status = 'duplicate')::int AS duplicate,
+           COUNT(*) FILTER (WHERE status = 'failed')::int    AS failed,
+           MIN(created_at) AS "startedAt",
+           MAX(updated_at) AS "updatedAt"
+    FROM bulk_cba_imports
+    GROUP BY run_id
+    ORDER BY MAX(updated_at) DESC
+    LIMIT 50
+  `);
+  res.json({ ok: true, runs: rows.rows });
+});
+
+// GET /admin/bulk-cba/progress?runId=... — ledger + extraction job/run rollup.
+router.get("/admin/bulk-cba/progress", requireAdminToken, async (req, res) => {
+  const runId = String(req.query.runId ?? "");
+  if (!BULK_RUN_ID_RE.test(runId)) {
+    res.status(400).json({ error: "runId is required" });
+    return;
+  }
+  const ledger = await db.execute(sql`
+    SELECT status, COUNT(*)::int AS n FROM bulk_cba_imports WHERE run_id = ${runId} GROUP BY status
+  `);
+  const ingest: Record<string, number> = {};
+  let ingestTotal = 0;
+  for (const r of ledger.rows as Array<{ status: string; n: number }>) {
+    ingest[r.status] = r.n;
+    ingestTotal += r.n;
+  }
+  if (ingestTotal === 0) {
+    res.status(404).json({ error: "No bulk import found with that runId" });
+    return;
+  }
+  // Latest extraction job status per ingested doc.
+  const jobRows = await db.execute(sql`
+    SELECT lj.status, COUNT(*)::int AS n FROM (
+      SELECT DISTINCT ON (source_doc_id) source_doc_id, status
+      FROM extraction_jobs
+      WHERE domain = 'cba' AND source_doc_id IN (
+        SELECT DISTINCT source_doc_id FROM bulk_cba_imports
+        WHERE run_id = ${runId} AND source_doc_id IS NOT NULL
+      )
+      ORDER BY source_doc_id, id DESC
+    ) lj GROUP BY lj.status
+  `);
+  const jobs: Record<string, number> = {};
+  for (const r of jobRows.rows as Array<{ status: string; n: number }>) jobs[r.status] = r.n;
+  const extractedRows = await db.execute(sql`
+    SELECT COUNT(DISTINCT er.source_doc_id)::int AS n
+    FROM extraction_runs er
+    WHERE er.status = 'success' AND er.source_doc_id IN (
+      SELECT DISTINCT source_doc_id FROM bulk_cba_imports
+      WHERE run_id = ${runId} AND source_doc_id IS NOT NULL
+    )
+  `);
+  const extracted = (extractedRows.rows[0] as { n: number } | undefined)?.n ?? 0;
+  const failures = await db.execute(sql`
+    SELECT drive_file_name AS "driveFileName", filename, district_id AS "districtId",
+           bargaining_unit AS "bargainingUnit", error
+    FROM bulk_cba_imports WHERE run_id = ${runId} AND status = 'failed'
+    ORDER BY updated_at DESC LIMIT 200
+  `);
+  res.json({
+    ok: true,
+    runId,
+    ingest: { total: ingestTotal, ...ingest },
+    extraction: { jobs, extracted },
+    queue: await getQueueStats(),
+    failures: failures.rows,
+  });
+});
+
+// POST /admin/bulk-cba/retry — body { runId }. Bounded re-enqueue of docs in the
+// run that have neither a successful extraction nor an active/done job.
+router.post(
+  "/admin/bulk-cba/retry",
+  requireAdminToken,
+  heavyAdminLimiter,
+  async (req, res) => {
+    const body = (req.body ?? {}) as { runId?: unknown };
+    const runId = String(body.runId ?? "");
+    if (!BULK_RUN_ID_RE.test(runId)) {
+      res.status(400).json({ error: "runId is required" });
+      return;
+    }
+    if (!bulkShouldEnqueue()) {
+      res.status(409).json({
+        error: "Extraction enqueue is disabled in this environment (set BULK_IMPORT_ALLOW_DEV_ENQUEUE=1 to override in dev).",
+      });
+      return;
+    }
+    const docs = await db.execute(sql`
+      SELECT DISTINCT b.source_doc_id::int AS source_doc_id
+      FROM bulk_cba_imports b
+      WHERE b.run_id = ${runId} AND b.source_doc_id IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM extraction_jobs ej
+          WHERE ej.source_doc_id = b.source_doc_id AND ej.domain = 'cba'
+            AND ej.status IN ('queued', 'running', 'done')
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM extraction_runs er
+          WHERE er.source_doc_id = b.source_doc_id AND er.status = 'success'
+        )
+      LIMIT ${BULK_RETRY_CAP}
+    `);
+    const requestedBy = requestedByFromReq(req);
+    let enqueued = 0;
+    for (const r of docs.rows as Array<{ source_doc_id: number }>) {
+      const out = await enqueueJob({
+        sourceDocId: r.source_doc_id,
+        domain: "cba",
+        requestedBy,
+        requestReason: "bulk-import-retry",
+      });
+      if (!(out as { deduped?: boolean }).deduped) enqueued++;
+    }
+    res.json({
+      ok: true,
+      runId,
+      candidates: docs.rows.length,
+      enqueued,
+      capped: docs.rows.length >= BULK_RETRY_CAP,
+    });
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Extraction engine (Task #175): in-process queue + immutable versions +

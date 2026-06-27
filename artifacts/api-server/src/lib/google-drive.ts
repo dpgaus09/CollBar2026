@@ -203,6 +203,278 @@ async function uploadResumable(
   return JSON.parse(txt);
 }
 
+// ---------------------------------------------------------------------------
+// Bulk CBA import (Task #199): list a Drive folder tree and download file bytes
+// for server-side ingestion. Listing is a control-plane operation (small JSON)
+// and goes through the connector proxy. File DOWNLOADS go DIRECT to
+// *.googleapis.com with a short-lived OAuth access token, because the proxy is
+// OAuth control-plane only and 413s on large bodies (same reason uploads PUT
+// direct to the session URI). The token is fetched from the connector's
+// include_secrets connection endpoint and cached briefly; a 401 forces a
+// refresh. Tokens are never logged.
+// ---------------------------------------------------------------------------
+
+const GOOGLE_DOWNLOAD_HOST = /^https:\/\/[a-z0-9.-]+\.googleapis\.com\//i;
+// A Drive file/folder id is an opaque base64url-ish string. Validate before
+// interpolating into an API path as defense-in-depth (no traversal / injection).
+const DRIVE_ID_RE = /^[A-Za-z0-9_-]{10,}$/;
+// Cap a single downloaded file. Matches the single-upload route's 64 MB ceiling.
+const MAX_DRIVE_FILE_BYTES = 64 * 1024 * 1024;
+// Safety caps for a folder crawl so a pathological tree can't run unbounded.
+const MAX_TREE_FILES = 20000;
+const MAX_TREE_DEPTH = 12;
+
+export const FOLDER_MIME_TYPE = FOLDER_MIME;
+export const SHEET_MIME = "application/vnd.google-apps.spreadsheet";
+
+export interface DriveFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  /** Byte size as reported by Drive (absent for Google-native files). */
+  size: number | null;
+  md5Checksum: string | null;
+  modifiedTime: string | null;
+  /** Names of the ancestor folders under the root, e.g. ["Adams CUSD 1"]. */
+  parentPath: string[];
+}
+
+export interface DriveFolderTree {
+  files: DriveFile[];
+  /** True when the crawl hit MAX_TREE_FILES and stopped early. */
+  truncated: boolean;
+}
+
+/** Accept either a raw Drive id or a full Drive folder URL and return the id. */
+export function parseDriveFolderId(input: string): string | null {
+  const s = String(input ?? "").trim();
+  if (!s) return null;
+  if (DRIVE_ID_RE.test(s)) return s;
+  // https://drive.google.com/drive/folders/<id>?... or .../folders/<id>
+  const m =
+    /\/folders\/([A-Za-z0-9_-]{10,})/.exec(s) ||
+    /[?&]id=([A-Za-z0-9_-]{10,})/.exec(s) ||
+    /\/d\/([A-Za-z0-9_-]{10,})/.exec(s);
+  return m ? m[1] : null;
+}
+
+let cachedToken: { value: string; fetchedAt: number } | null = null;
+// Google OAuth access tokens live ~60 min; refresh ours well before that.
+const TOKEN_SOFT_TTL_MS = 45 * 60 * 1000;
+
+/**
+ * Fetch a Google Drive OAuth access token from the connector's connection
+ * endpoint (include_secrets). Cached in-process with a soft TTL; pass
+ * { force: true } to bypass the cache after a 401. Never log the return value.
+ */
+export async function getDriveAccessToken(
+  connectors: ReplitConnectors,
+  opts: { force?: boolean } = {},
+): Promise<string> {
+  if (
+    !opts.force &&
+    cachedToken &&
+    Date.now() - cachedToken.fetchedAt < TOKEN_SOFT_TTL_MS
+  ) {
+    return cachedToken.value;
+  }
+  const proxyUrl = connectors.getProxyUrl(); // `${baseUrl}/api/v2/proxy`
+  const baseUrl = proxyUrl.replace(/\/api\/v2\/proxy$/, "");
+  const headers = await connectors.getProxyHeaders("google-drive");
+  const url = `${baseUrl}/api/v2/connection?include_secrets=true&connector_names=google-drive`;
+  const res = await fetch(url, { headers });
+  if (!res.ok) {
+    throw new DriveNotConnectedError(
+      `Could not fetch Google Drive credentials (HTTP ${res.status})`,
+    );
+  }
+  const data = (await res.json()) as {
+    items?: Array<{
+      settings?: {
+        access_token?: string;
+        oauth?: { credentials?: { access_token?: string } };
+      };
+    }>;
+  };
+  const s = data.items?.[0]?.settings;
+  const token = s?.access_token || s?.oauth?.credentials?.access_token;
+  if (!token) {
+    throw new DriveNotConnectedError("Google Drive connection has no access token");
+  }
+  cachedToken = { value: token, fetchedAt: Date.now() };
+  return token;
+}
+
+/** List the immediate children (files + folders) of one Drive folder. */
+async function listFolderChildren(
+  connectors: ReplitConnectors,
+  folderId: string,
+): Promise<Array<Omit<DriveFile, "parentPath">>> {
+  const out: Array<Omit<DriveFile, "parentPath">> = [];
+  let pageToken: string | undefined;
+  const q = `'${folderId}' in parents and trashed=false`;
+  do {
+    const params = new URLSearchParams({
+      q,
+      fields:
+        "nextPageToken,files(id,name,mimeType,size,md5Checksum,modifiedTime)",
+      pageSize: "1000",
+      supportsAllDrives: "true",
+      includeItemsFromAllDrives: "true",
+    });
+    if (pageToken) params.set("pageToken", pageToken);
+    const data = await driveApi(
+      connectors,
+      `/drive/v3/files?${params.toString()}`,
+      { method: "GET" },
+    );
+    for (const f of (data.files ?? []) as Array<Record<string, unknown>>) {
+      out.push({
+        id: String(f.id),
+        name: String(f.name ?? ""),
+        mimeType: String(f.mimeType ?? ""),
+        size: f.size != null ? Number(f.size) : null,
+        md5Checksum: f.md5Checksum != null ? String(f.md5Checksum) : null,
+        modifiedTime: f.modifiedTime != null ? String(f.modifiedTime) : null,
+      });
+    }
+    pageToken = data.nextPageToken ? String(data.nextPageToken) : undefined;
+  } while (pageToken);
+  return out;
+}
+
+/**
+ * Recursively list every non-folder file under `rootFolderId`, recording each
+ * file's ancestor folder names (parentPath). Bounded by MAX_TREE_FILES and
+ * MAX_TREE_DEPTH so a pathological tree cannot run unbounded.
+ */
+export async function listFolderTree(rootFolderId: string): Promise<DriveFolderTree> {
+  if (!DRIVE_ID_RE.test(rootFolderId)) {
+    throw new Error("Invalid Drive folder id");
+  }
+  const connectors = new ReplitConnectors();
+  const files: DriveFile[] = [];
+  let truncated = false;
+  const seen = new Set<string>([rootFolderId]);
+  // Process the tree level-by-level, fetching each level's folders with bounded
+  // concurrency. A flat folder is one wave; a folder-per-district layout (~850
+  // folders) drains in a few seconds instead of ~850 serial proxy calls, which
+  // would otherwise risk the deployment's ~300s request cap.
+  let level: Array<{ id: string; path: string[] }> = [{ id: rootFolderId, path: [] }];
+  let depth = 0;
+  while (level.length && depth <= MAX_TREE_DEPTH && !truncated) {
+    const childrenByFolder = await mapWithConcurrency(level, 8, (f) =>
+      listFolderChildren(connectors, f.id),
+    );
+    const nextLevel: Array<{ id: string; path: string[] }> = [];
+    for (let i = 0; i < level.length; i++) {
+      const path = level[i].path;
+      for (const c of childrenByFolder[i]) {
+        if (c.mimeType === FOLDER_MIME) {
+          if (seen.has(c.id)) continue; // guard against shortcut cycles
+          seen.add(c.id);
+          nextLevel.push({ id: c.id, path: [...path, c.name] });
+          continue;
+        }
+        if (files.length >= MAX_TREE_FILES) {
+          truncated = true;
+          break;
+        }
+        files.push({ ...c, parentPath: path });
+      }
+      if (truncated) break;
+    }
+    level = nextLevel;
+    depth++;
+  }
+  return { files, truncated };
+}
+
+/** Run an async mapper over items with bounded concurrency, preserving order. */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const idx = next++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, worker),
+  );
+  return results;
+}
+
+/**
+ * Download a Drive file's bytes DIRECTLY from googleapis (bypassing the proxy).
+ * Refreshes the access token once on a 401. Enforces MAX_DRIVE_FILE_BYTES.
+ */
+export async function downloadDriveFile(fileId: string): Promise<Buffer> {
+  if (!DRIVE_ID_RE.test(fileId)) {
+    throw new Error("Invalid Drive file id");
+  }
+  const connectors = new ReplitConnectors();
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
+  if (!GOOGLE_DOWNLOAD_HOST.test(url)) {
+    throw new Error("Refusing to download from a non-googleapis host");
+  }
+  const fetchOnce = async (token: string): Promise<Response> =>
+    fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+
+  let token = await getDriveAccessToken(connectors);
+  let res = await fetchOnce(token);
+  if (res.status === 401) {
+    token = await getDriveAccessToken(connectors, { force: true });
+    res = await fetchOnce(token);
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    if (res.status === 401 || res.status === 403) {
+      throw new DriveNotConnectedError(`Google Drive download auth failed (HTTP ${res.status})`);
+    }
+    throw new Error(`Google Drive download failed (HTTP ${res.status}): ${body.slice(0, 200)}`);
+  }
+  const lenHeader = res.headers.get("content-length");
+  if (lenHeader && Number(lenHeader) > MAX_DRIVE_FILE_BYTES) {
+    throw new Error(`File exceeds ${MAX_DRIVE_FILE_BYTES} byte limit`);
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length > MAX_DRIVE_FILE_BYTES) {
+    throw new Error(`File exceeds ${MAX_DRIVE_FILE_BYTES} byte limit`);
+  }
+  return buf;
+}
+
+/**
+ * Export a native Google Sheet to CSV bytes (direct googleapis, token auth).
+ * Used to read a mapping spreadsheet that the admin authored as a Google Sheet.
+ */
+export async function exportGoogleSheetCsv(fileId: string): Promise<string> {
+  if (!DRIVE_ID_RE.test(fileId)) {
+    throw new Error("Invalid Drive file id");
+  }
+  const connectors = new ReplitConnectors();
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=${encodeURIComponent("text/csv")}`;
+  const fetchOnce = async (token: string): Promise<Response> =>
+    fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  let token = await getDriveAccessToken(connectors);
+  let res = await fetchOnce(token);
+  if (res.status === 401) {
+    token = await getDriveAccessToken(connectors, { force: true });
+    res = await fetchOnce(token);
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Google Sheet export failed (HTTP ${res.status}): ${body.slice(0, 200)}`);
+  }
+  return res.text();
+}
+
 /**
  * Upload a single customer document into the per-district subfolder of the
  * "CollBar Customer Submissions" Drive folder.

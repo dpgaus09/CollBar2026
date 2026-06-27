@@ -224,6 +224,43 @@ async function runMigrations(): Promise<void> {
 
     logger.info("Migration OK: sync_run_status ensured");
 
+    // Bulk CBA import ledger (Task #199). One row per (run, Drive file) tracking
+    // the ingest of a Google-Drive-hosted CBA PDF: download/validation/storage
+    // outcome, the content hash + resulting source_doc_id, and Drive metadata
+    // (md5/size) so a resumed run can skip re-downloading an unchanged file.
+    // This is the source of truth for bulk-import progress/retry — extraction
+    // job/run rows only cover docs that were successfully ingested first.
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS bulk_cba_imports (
+        id              bigserial PRIMARY KEY,
+        run_id          text NOT NULL,
+        drive_file_id   text NOT NULL,
+        drive_file_name text,
+        drive_md5       text,
+        drive_size      bigint,
+        drive_modified  timestamptz,
+        district_id     integer,
+        bargaining_unit text,
+        school_year     text,
+        filename        text,
+        file_hash       text,
+        source_doc_id   bigint,
+        status          text NOT NULL DEFAULT 'pending',
+        error           text,
+        created_at      timestamptz NOT NULL DEFAULT NOW(),
+        updated_at      timestamptz NOT NULL DEFAULT NOW(),
+        CONSTRAINT bulk_cba_imports_run_file_uniq UNIQUE (run_id, drive_file_id)
+      )
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS bulk_cba_imports_run_idx ON bulk_cba_imports(run_id)
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS bulk_cba_imports_src_idx ON bulk_cba_imports(source_doc_id)
+    `);
+
+    logger.info("Migration OK: bulk_cba_imports ensured");
+
     // -----------------------------------------------------------------------
     // Firm workspaces (multi-seat attorney / labor-consultant accounts).
     // Parallel to the per-district CFO entitlement: firm members are normal

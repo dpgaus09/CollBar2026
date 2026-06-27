@@ -5463,7 +5463,519 @@ function SalaryDataTab() {
 // Page shell with tab routing
 // ---------------------------------------------------------------------------
 
-type TabKey = "overview" | "crawl-report" | "extraction-report" | "extraction" | "review-queue" | "alerts" | "eis-crosscheck" | "customers" | "upload" | "salary-data";
+// ---------------------------------------------------------------------------
+// Bulk CBA Import tab (Task #199) — point at a Google Drive folder of CBA PDFs
+// + mapping spreadsheet, dry-run preview the match, then ingest in client-side
+// batches (≤25/request, under the API's JSON-body + request-time limits) and
+// poll progress. Ingest is idempotent/resumable server-side, so re-running the
+// same folder skips files already imported.
+// ---------------------------------------------------------------------------
+interface BulkMatchedEntry {
+  lineNum: number;
+  status: string;
+  rcdts: string;
+  districtName: string;
+  districtId: number | null;
+  unit: string;
+  unitDefaulted: boolean;
+  schoolYear: string | null;
+  file: string;
+  driveFileId: string | null;
+  driveFileName: string | null;
+  driveMd5: string | null;
+  driveSize: number | null;
+  driveModifiedTime: string | null;
+  reason?: string;
+}
+
+interface BulkPreview {
+  ok: boolean;
+  folderId?: string;
+  fileCount?: number;
+  truncated?: boolean;
+  error?: string;
+  manifestCandidates?: { id: string; name: string }[];
+  manifest?: { id: string; name: string };
+  rowCount?: number;
+  counts?: Record<string, number>;
+  matchedCount?: number;
+  matched?: BulkMatchedEntry[];
+  unmatched?: BulkMatchedEntry[];
+  unreferencedFiles?: { id: string; name: string; path: string }[];
+  costNote?: string;
+}
+
+interface BulkProgress {
+  ok: boolean;
+  runId: string;
+  ingest: Record<string, number> & { total: number };
+  extraction: { jobs: Record<string, number>; extracted: number };
+  queue: Record<string, number>;
+  failures: {
+    driveFileName: string | null;
+    filename: string | null;
+    districtId: number | null;
+    bargainingUnit: string | null;
+    error: string | null;
+  }[];
+}
+
+interface BulkRun {
+  runId: string;
+  total: number;
+  ingested: number;
+  duplicate: number;
+  failed: number;
+  startedAt: string;
+  updatedAt: string;
+}
+
+const BULK_STATUS_LABEL: Record<string, string> = {
+  matched: "Ready to import",
+  invalid_unit: "Invalid bargaining unit",
+  invalid_year: "Invalid school year",
+  unmatched_district: "District not matched",
+  unmatched_file: "File not found",
+  ambiguous_file: "Ambiguous filename",
+};
+
+function chunkArray<T>(arr: T[], n: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+  return out;
+}
+
+function BulkCbaImportTab() {
+  const [folder, setFolder] = useState("");
+  const [preview, setPreview] = useState<BulkPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [ingesting, setIngesting] = useState(false);
+  const [ingestProgress, setIngestProgress] = useState<{
+    done: number;
+    total: number;
+    counts: Record<string, number>;
+    enqueued: boolean | null;
+  } | null>(null);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+
+  const runsQuery = useQuery<{ runs: BulkRun[] }>({
+    queryKey: ["/api/admin/bulk-cba/runs"],
+    queryFn: () =>
+      fetch(apiUrl("/api/admin/bulk-cba/runs"), { credentials: "include" }).then((r) =>
+        r.ok ? r.json() : { runs: [] },
+      ),
+    refetchInterval: 30_000,
+    retry: false,
+  });
+
+  const progressQuery = useQuery<BulkProgress>({
+    queryKey: ["/api/admin/bulk-cba/progress", activeRunId],
+    queryFn: () =>
+      fetch(
+        apiUrl(`/api/admin/bulk-cba/progress?runId=${encodeURIComponent(activeRunId ?? "")}`),
+        { credentials: "include" },
+      ).then((r) => r.json()),
+    enabled: !!activeRunId,
+    refetchInterval: 5_000,
+    retry: false,
+  });
+
+  async function runPreview() {
+    const f = folder.trim();
+    if (!f) return;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    setPreview(null);
+    setIngestProgress(null);
+    try {
+      const r = await fetch(
+        apiUrl(`/api/admin/bulk-cba/preview?folderId=${encodeURIComponent(f)}`),
+        { credentials: "include" },
+      );
+      const data = await r.json();
+      if (!r.ok) setPreviewError(data.error ?? "Preview failed");
+      else setPreview(data);
+    } catch (e) {
+      setPreviewError(String((e as Error).message));
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  async function startIngest() {
+    if (!preview?.matched?.length) return;
+    const matched = preview.matched;
+    const runId = `bulk-${Date.now()}`;
+    const batches = chunkArray(matched, 25);
+    const counts: Record<string, number> = {};
+    let done = 0;
+    let enqueued: boolean | null = null;
+    setIngesting(true);
+    setIngestProgress({ done, total: matched.length, counts: {}, enqueued: null });
+    try {
+      for (const batch of batches) {
+        const entries = batch.map((m) => ({
+          driveFileId: m.driveFileId,
+          districtId: m.districtId,
+          unit: m.unit,
+          schoolYear: m.schoolYear,
+          filename: m.driveFileName ?? m.file,
+          driveFileName: m.driveFileName,
+          driveMd5: m.driveMd5,
+          driveSize: m.driveSize,
+          driveModifiedTime: m.driveModifiedTime,
+        }));
+        try {
+          const r = await fetch(apiUrl("/api/admin/bulk-cba/ingest"), {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ runId, entries }),
+          });
+          const data = await r.json();
+          if (r.ok) {
+            enqueued = data.enqueued ?? enqueued;
+            for (const [k, v] of Object.entries(data.counts ?? {}))
+              counts[k] = (counts[k] ?? 0) + (v as number);
+          } else {
+            counts["failed"] = (counts["failed"] ?? 0) + batch.length;
+          }
+        } catch {
+          counts["failed"] = (counts["failed"] ?? 0) + batch.length;
+        }
+        done += batch.length;
+        setIngestProgress({ done, total: matched.length, counts: { ...counts }, enqueued });
+      }
+      setActiveRunId(runId);
+      runsQuery.refetch();
+    } finally {
+      setIngesting(false);
+    }
+  }
+
+  async function retryRun() {
+    if (!activeRunId) return;
+    await fetch(apiUrl("/api/admin/bulk-cba/retry"), {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runId: activeRunId }),
+    });
+    progressQuery.refetch();
+  }
+
+  const matchedCount = preview?.matchedCount ?? 0;
+  const prog = progressQuery.data;
+
+  return (
+    <div className="space-y-8">
+      <div>
+        <h2 className="text-lg font-semibold text-slate-100">Bulk CBA Import</h2>
+        <p className="text-xs text-slate-500 mt-1 leading-relaxed max-w-2xl">
+          Point at a Google Drive folder containing district CBA PDFs plus a mapping
+          spreadsheet (a Google Sheet or <code className="text-slate-400">.csv</code> with
+          columns: <code className="text-slate-400">file</code>,{" "}
+          <code className="text-slate-400">rcdts</code> or{" "}
+          <code className="text-slate-400">district</code>, plus{" "}
+          <code className="text-slate-400">bargaining_unit</code> and{" "}
+          <code className="text-slate-400">school_year</code>). Preview is a dry run — nothing
+          is written until you start the import.
+        </p>
+      </div>
+
+      {/* Folder input */}
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={folder}
+          onChange={(e) => setFolder(e.target.value)}
+          placeholder="Drive folder URL or ID"
+          className="flex-1 bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:border-blue-600 focus:outline-none font-mono"
+        />
+        <button
+          onClick={runPreview}
+          disabled={previewLoading || !folder.trim()}
+          className="px-4 py-2 rounded bg-blue-700 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed text-sm text-white transition-colors"
+        >
+          {previewLoading ? "Previewing…" : "Preview"}
+        </button>
+      </div>
+
+      {previewError && (
+        <div className="rounded border border-red-800/60 bg-red-950/20 px-4 py-3 text-xs text-red-300">
+          {previewError}
+        </div>
+      )}
+
+      {/* Manifest error */}
+      {preview && !preview.ok && (
+        <div className="rounded border border-amber-800/60 bg-amber-950/20 px-4 py-3 text-xs text-amber-300 space-y-2">
+          <div>{preview.error}</div>
+          <div className="text-amber-400/70">
+            Found {preview.fileCount ?? 0} PDF(s) in the folder.
+            {preview.manifestCandidates && preview.manifestCandidates.length > 0 && (
+              <>
+                {" "}Spreadsheet-like files seen:{" "}
+                {preview.manifestCandidates.map((c) => c.name).join(", ")}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Preview summary */}
+      {preview && preview.ok && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-3 gap-3">
+            <StatCard label="PDFs in folder" value={preview.fileCount ?? 0} />
+            <StatCard label="Manifest rows" value={preview.rowCount ?? 0} />
+            <StatCard label="Ready to import" value={matchedCount} accent />
+          </div>
+
+          {preview.truncated && (
+            <div className="rounded border border-amber-800/60 bg-amber-950/20 px-4 py-2 text-xs text-amber-300">
+              The folder listing was truncated (too many files). Some files may be missing.
+            </div>
+          )}
+
+          {preview.costNote && (
+            <div className="rounded border border-slate-700 bg-slate-900/40 px-4 py-3 text-xs text-slate-400 leading-relaxed">
+              {preview.costNote}
+            </div>
+          )}
+
+          {/* Status breakdown */}
+          {preview.counts && (
+            <div className="flex flex-wrap gap-2">
+              {Object.entries(preview.counts).map(([status, n]) => (
+                <span
+                  key={status}
+                  className={`text-[11px] px-2 py-1 rounded border ${
+                    status === "matched"
+                      ? "border-emerald-800 text-emerald-300 bg-emerald-950/20"
+                      : "border-slate-700 text-slate-400 bg-slate-900/40"
+                  }`}
+                >
+                  {BULK_STATUS_LABEL[status] ?? status}: {n}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Start import */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={startIngest}
+              disabled={ingesting || matchedCount === 0}
+              className="px-4 py-2 rounded bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-sm text-white transition-colors"
+            >
+              {ingesting
+                ? "Importing…"
+                : `Start import (${matchedCount} contract${matchedCount === 1 ? "" : "s"})`}
+            </button>
+            {ingesting && ingestProgress && (
+              <span className="text-xs text-slate-400">
+                {ingestProgress.done} / {ingestProgress.total}
+              </span>
+            )}
+          </div>
+
+          {/* Ingest progress */}
+          {ingestProgress && (
+            <div className="rounded border border-slate-700 bg-slate-900/40 px-4 py-3 space-y-2">
+              <div className="h-2 rounded bg-slate-800 overflow-hidden">
+                <div
+                  className="h-full bg-emerald-600 transition-all"
+                  style={{
+                    width: `${
+                      ingestProgress.total
+                        ? Math.round((ingestProgress.done / ingestProgress.total) * 100)
+                        : 0
+                    }%`,
+                  }}
+                />
+              </div>
+              <div className="flex flex-wrap gap-2 text-[11px] text-slate-400">
+                {Object.entries(ingestProgress.counts).map(([k, v]) => (
+                  <span key={k}>
+                    {k}: {v}
+                  </span>
+                ))}
+              </div>
+              {ingestProgress.enqueued === false && (
+                <div className="text-[11px] text-amber-400">
+                  Extraction was not enqueued (development environment). Documents were recorded
+                  but no Claude jobs ran — this is expected in dev.
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Unmatched rows */}
+          {preview.unmatched && preview.unmatched.length > 0 && (
+            <BulkEntryTable
+              title={`Needs attention (${preview.unmatched.length})`}
+              entries={preview.unmatched}
+            />
+          )}
+
+          {/* Unreferenced files */}
+          {preview.unreferencedFiles && preview.unreferencedFiles.length > 0 && (
+            <details className="rounded border border-slate-800 bg-slate-900/30">
+              <summary className="cursor-pointer px-4 py-2.5 text-xs text-slate-400">
+                {preview.unreferencedFiles.length} PDF(s) in the folder not referenced by any
+                manifest row
+              </summary>
+              <div className="px-4 pb-3 max-h-64 overflow-y-auto">
+                {preview.unreferencedFiles.slice(0, 200).map((f) => (
+                  <div key={f.id} className="text-[11px] text-slate-500 font-mono py-0.5">
+                    {f.path}
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+
+      {/* Active run progress */}
+      {activeRunId && prog && prog.ok && (
+        <div className="space-y-4 border-t border-slate-800 pt-6">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-slate-200">
+              Run progress
+              <span className="ml-2 text-xs text-slate-500 font-mono">{activeRunId}</span>
+            </h3>
+            <button
+              onClick={retryRun}
+              className="text-xs px-3 py-1.5 rounded border border-slate-700 text-slate-300 hover:border-blue-600 hover:text-blue-300 transition-colors"
+            >
+              Retry failed extractions
+            </button>
+          </div>
+          <div className="grid grid-cols-4 gap-3">
+            <StatCard label="Ingested" value={prog.ingest["ingested"] ?? 0} />
+            <StatCard label="Duplicates" value={prog.ingest["duplicate"] ?? 0} />
+            <StatCard label="Failed" value={prog.ingest["failed"] ?? 0} />
+            <StatCard label="Extracted" value={prog.extraction.extracted} accent />
+          </div>
+          <div className="flex flex-wrap gap-2 text-[11px] text-slate-400">
+            <span>Queue: {prog.queue["queued"] ?? 0} queued</span>
+            <span>· {prog.queue["running"] ?? 0} running</span>
+            {Object.entries(prog.extraction.jobs).map(([k, v]) => (
+              <span key={k}>
+                · jobs {k}: {v}
+              </span>
+            ))}
+          </div>
+          {prog.failures.length > 0 && (
+            <details className="rounded border border-red-900/40 bg-red-950/10">
+              <summary className="cursor-pointer px-4 py-2.5 text-xs text-red-300">
+                {prog.failures.length} failure(s)
+              </summary>
+              <div className="px-4 pb-3 max-h-64 overflow-y-auto space-y-1">
+                {prog.failures.map((f, i) => (
+                  <div key={i} className="text-[11px] text-slate-400 py-0.5">
+                    <span className="text-slate-500 font-mono">
+                      {f.driveFileName ?? f.filename ?? "?"}
+                    </span>{" "}
+                    — {f.error}
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+
+      {/* Prior runs */}
+      {runsQuery.data && runsQuery.data.runs.length > 0 && (
+        <div className="border-t border-slate-800 pt-6">
+          <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-3">
+            Recent imports
+          </h3>
+          <div className="space-y-1">
+            {runsQuery.data.runs.map((run) => (
+              <button
+                key={run.runId}
+                onClick={() => setActiveRunId(run.runId)}
+                className={`w-full flex items-center justify-between px-3 py-2 rounded text-xs transition-colors ${
+                  activeRunId === run.runId
+                    ? "bg-slate-800 text-slate-200"
+                    : "bg-slate-950 text-slate-400 hover:bg-slate-900"
+                }`}
+              >
+                <span className="font-mono">{run.runId}</span>
+                <span className="text-slate-500">
+                  {run.total} files · {run.ingested} ingested · {run.duplicate} dup ·{" "}
+                  {run.failed} failed
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatCard({ label, value, accent }: { label: string; value: number; accent?: boolean }) {
+  return (
+    <div className="rounded border border-slate-800 bg-slate-900/40 px-4 py-3">
+      <div className={`text-2xl font-semibold ${accent ? "text-emerald-400" : "text-slate-200"}`}>
+        {value}
+      </div>
+      <div className="text-[11px] text-slate-500 mt-0.5">{label}</div>
+    </div>
+  );
+}
+
+function BulkEntryTable({ title, entries }: { title: string; entries: BulkMatchedEntry[] }) {
+  const shown = entries.slice(0, 100);
+  return (
+    <details className="rounded border border-slate-800 bg-slate-900/30" open>
+      <summary className="cursor-pointer px-4 py-2.5 text-xs text-slate-300 font-medium">
+        {title}
+      </summary>
+      <div className="overflow-x-auto max-h-96 overflow-y-auto">
+        <table className="w-full text-[11px]">
+          <thead className="sticky top-0 bg-slate-900">
+            <tr className="text-slate-500">
+              <th className="text-left px-3 py-2 font-medium">Line</th>
+              <th className="text-left px-3 py-2 font-medium">District</th>
+              <th className="text-left px-3 py-2 font-medium">Unit</th>
+              <th className="text-left px-3 py-2 font-medium">Year</th>
+              <th className="text-left px-3 py-2 font-medium">File</th>
+              <th className="text-left px-3 py-2 font-medium">Issue</th>
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map((e) => (
+              <tr key={e.lineNum} className="border-t border-slate-800/60 text-slate-400">
+                <td className="px-3 py-1.5 text-slate-600">{e.lineNum}</td>
+                <td className="px-3 py-1.5">{e.districtName || e.rcdts || "—"}</td>
+                <td className="px-3 py-1.5">{e.unit}</td>
+                <td className="px-3 py-1.5">{e.schoolYear ?? "—"}</td>
+                <td className="px-3 py-1.5 font-mono text-slate-500">{e.file || "—"}</td>
+                <td className="px-3 py-1.5 text-amber-400">
+                  {e.reason ?? BULK_STATUS_LABEL[e.status] ?? e.status}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {entries.length > shown.length && (
+          <div className="px-3 py-2 text-[11px] text-slate-600">
+            Showing {shown.length} of {entries.length}.
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
+type TabKey = "overview" | "crawl-report" | "extraction-report" | "extraction" | "review-queue" | "alerts" | "eis-crosscheck" | "customers" | "upload" | "salary-data" | "bulk-cba";
 
 function useAlertsPendingCount() {
   return useQuery<{ pendingCount: number }>({
@@ -5487,6 +5999,7 @@ const TABS: { key: TabKey; label: string; path: string }[] = [
   { key: "review-queue", label: "Review Queue", path: "/admin/review-queue" },
   { key: "alerts", label: "Alerts", path: "/admin/alerts" },
   { key: "eis-crosscheck", label: "EIS Cross-Check", path: "/admin/eis-crosscheck" },
+  { key: "bulk-cba", label: "Bulk CBA Import", path: "/admin/bulk-cba" },
   { key: "customers", label: "Customers", path: "/admin/customers" },
 ];
 
@@ -5499,6 +6012,7 @@ function activeTab(location: string): TabKey {
   if (location.includes("/admin/extraction")) return "extraction";
   if (location.includes("crawl-report")) return "crawl-report";
   if (location.includes("eis-crosscheck")) return "eis-crosscheck";
+  if (location.includes("bulk-cba")) return "bulk-cba";
   if (location.includes("customers")) return "customers";
   return "overview";
 }
@@ -5600,6 +6114,7 @@ export default function AdminPage() {
         {tab === "review-queue" && <ReviewQueueTab />}
         {tab === "alerts" && <AlertsTab />}
         {tab === "eis-crosscheck" && <EisXCheckTab />}
+        {tab === "bulk-cba" && <BulkCbaImportTab />}
         {tab === "customers" && <CustomersTab />}
       </main>
     </div>
