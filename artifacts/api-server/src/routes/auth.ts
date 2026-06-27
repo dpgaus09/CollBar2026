@@ -3,6 +3,7 @@ import bcrypt from "bcrypt";
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import { signDocumentAccessToken } from "../lib/documentToken.js";
+import { loginLimiter } from "../lib/rateLimit.js";
 
 // ============================================================================
 // Session type augmentation
@@ -71,7 +72,7 @@ function genericFail(res: Response, reason?: string): void {
 // POST /api/auth/login — email + password sign-in
 // Same endpoint for both admins and customers. Role determines redirect.
 // ============================================================================
-router.post("/auth/login", async (req: Request, res: Response) => {
+router.post("/auth/login", loginLimiter, async (req: Request, res: Response) => {
   const { email, password } = req.body as { email?: string; password?: string };
 
   if (!email || !password) {

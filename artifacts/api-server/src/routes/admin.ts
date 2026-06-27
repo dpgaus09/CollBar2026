@@ -11,6 +11,7 @@ import { VALID_BARGAINING_UNITS, BARGAINING_UNIT_LABELS } from "./bargaining-uni
 import { runPromotion } from "../lib/promote.js";
 import { uploadBuffer, uploadedCbaKey } from "../lib/objectStorage.js";
 import { enqueueJob, listJobs, getQueueStats } from "../extraction/jobs/queue.js";
+import { heavyAdminLimiter } from "../lib/rateLimit.js";
 import {
   getVersionsForDoc,
   getPromotions,
@@ -1269,7 +1270,7 @@ export function spawnIlCrawl(extraArgs: string[] = []): { status: string; pid: n
   return { status: "started", pid: _crawlPid };
 }
 
-router.post("/admin/start-il-crawl", requireAdminToken, (req, res) => {
+router.post("/admin/start-il-crawl", requireAdminToken, heavyAdminLimiter, (req, res) => {
   try {
     const args = (req.body as Record<string, string | boolean>);
     const extraArgs: string[] = [];
@@ -1341,7 +1342,7 @@ export function spawnExtractionCron(): { status: string; pid: number | null } {
   return { status: "started", pid: _extractionCronPid };
 }
 
-router.post("/admin/run-extraction-cron", requireAdminToken, (_req, res) => {
+router.post("/admin/run-extraction-cron", requireAdminToken, heavyAdminLimiter, (_req, res) => {
   try {
     const result = spawnExtractionCron();
     res.json({ ...result, log: EXTRACTION_CRON_LOG });
@@ -1424,7 +1425,7 @@ export function spawnExtractionRetry(
   return { status: "started", pid: _retryPid };
 }
 
-router.post("/admin/retry-extraction", requireAdminToken, (req, res) => {
+router.post("/admin/retry-extraction", requireAdminToken, heavyAdminLimiter, (req, res) => {
   void (async () => {
     try {
       const body = (req.body ?? {}) as { docId?: number | string };
@@ -1732,7 +1733,7 @@ async function handleCbaUpload(req: Request, res: Response): Promise<void> {
   });
 }
 
-router.post("/admin/upload-cba", requireAdminToken, (req, res) => {
+router.post("/admin/upload-cba", requireAdminToken, heavyAdminLimiter, (req, res) => {
   uploadPdfBody(req, res, (err?: unknown) => {
     if (err) {
       const status =
@@ -1815,7 +1816,7 @@ router.get("/admin/extraction/diff", requireAdminToken, async (req, res) => {
   }
 });
 
-router.post("/admin/extraction/promote", requireAdminToken, async (req, res) => {
+router.post("/admin/extraction/promote", requireAdminToken, heavyAdminLimiter, async (req, res) => {
   try {
     const body = (req.body ?? {}) as { versionId?: number | string };
     const versionId = parseInt(String(body.versionId ?? ""), 10);
@@ -1835,7 +1836,7 @@ router.post("/admin/extraction/promote", requireAdminToken, async (req, res) => 
   }
 });
 
-router.post("/admin/extraction/rerun-flagged", requireAdminToken, async (req, res) => {
+router.post("/admin/extraction/rerun-flagged", requireAdminToken, heavyAdminLimiter, async (req, res) => {
   try {
     const requestedBy = requestedByFromReq(req);
     // Docs whose live data is low-confidence (provisions < 0.8 & unverified) or
@@ -1897,7 +1898,7 @@ const ENQUEUE_DOMAINS = new Set([
   "contract_meta",
 ]);
 
-router.post("/admin/extraction/enqueue", requireAdminToken, async (req, res) => {
+router.post("/admin/extraction/enqueue", requireAdminToken, heavyAdminLimiter, async (req, res) => {
   try {
     const body = (req.body ?? {}) as { docId?: number | string; domain?: string };
     const docId = parseInt(String(body.docId ?? ""), 10);
@@ -2200,7 +2201,7 @@ export function spawnDirectoryRefresh(): { status: string; pid: number | null } 
   return { status: "started", pid: _refreshPid };
 }
 
-router.post("/admin/run-directory-refresh", requireAdminToken, (_req, res) => {
+router.post("/admin/run-directory-refresh", requireAdminToken, heavyAdminLimiter, (_req, res) => {
   try {
     const result = spawnDirectoryRefresh();
     res.json(result);
@@ -2320,7 +2321,7 @@ export function spawnMinSalarySync(extraArgs: string[] = []): { status: string; 
   return { status: "started", pid: _minSalaryPid };
 }
 
-router.post("/admin/run-min-salary-sync", requireAdminToken, (_req, res) => {
+router.post("/admin/run-min-salary-sync", requireAdminToken, heavyAdminLimiter, (_req, res) => {
   try {
     const result = spawnMinSalarySync();
     res.json(result);
@@ -2605,7 +2606,7 @@ async function handleDatasetUpload(req: Request, res: Response): Promise<void> {
   res.json({ ok: true, kind, filename, schoolYear, fileBytes: buf.length, status, pid });
 }
 
-router.post("/admin/upload-salary-dataset", requireAdminToken, (req, res) => {
+router.post("/admin/upload-salary-dataset", requireAdminToken, heavyAdminLimiter, (req, res) => {
   uploadPdfBody(req, res, (err?: unknown) => {
     if (err) {
       const status =
@@ -2731,7 +2732,7 @@ router.get("/admin/customers", requireAdminToken, async (_req, res) => {
 });
 
 // POST /admin/customers — create a new district user account
-router.post("/admin/customers", requireAdminToken, async (req, res) => {
+router.post("/admin/customers", requireAdminToken, heavyAdminLimiter, async (req, res) => {
   const { name, email, district_id, password, plan } = req.body as {
     name?: string;
     email?: string;
@@ -3145,7 +3146,7 @@ async function handleBulkImportCustomers(req: Request, res: Response): Promise<v
   });
 }
 
-router.post("/admin/bulk-import-customers", requireAdminToken, (req, res) => {
+router.post("/admin/bulk-import-customers", requireAdminToken, heavyAdminLimiter, (req, res) => {
   // JSON batches (the large-import path) parse as JSON; legacy single-shot CSV
   // uploads parse as a raw buffer.
   const ct = String(req.headers["content-type"] || "");
@@ -3292,6 +3293,7 @@ function requirePromoteAuth(req: Request, res: Response, next: NextFunction): vo
 router.post(
   "/admin/promote",
   requirePromoteAuth,
+  heavyAdminLimiter,
   raw({ type: () => true, limit: "256mb" }),
   async (req: Request, res: Response) => {
     try {
