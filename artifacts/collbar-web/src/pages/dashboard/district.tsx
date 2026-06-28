@@ -1328,7 +1328,7 @@ function BenefitsBaselineCard({ tss }: { tss: BaselineTss | null }) {
 
         <div>
           <div className="mb-1 text-[10px] uppercase tracking-wider text-slate-500">Leave</div>
-          <BaselineKV label="Sick days" value={tss.leave.sickDays?.toLocaleString() ?? null} />
+          <BaselineKV label="Sick days max accrual" value={tss.leave.sickDays?.toLocaleString() ?? null} />
           <BaselineKV
             label="Personal days"
             value={tss.leave.personalDays?.toLocaleString() ?? null}
