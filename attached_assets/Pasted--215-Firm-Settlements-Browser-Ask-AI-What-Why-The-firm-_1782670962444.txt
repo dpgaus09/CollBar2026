@@ -1,0 +1,45 @@
+#215 - Firm Settlements Browser + Ask AI
+What & Why
+The firm workspace (/app) is missing two high-value capabilities that already exist on the district side: (1) a browser to search and view all the settlement data we've loaded, and (2) the "Ask AI" assistant. Firms need both. Add them as two new workspace tabs.
+
+Important: on the district side both features sit behind the per-district paywall (gate()) — the district browser only unlocks full detail for the district you "own," and Ask AI requires a paid district plan. The firm workspace uses a separate access model (firm membership via requireFirmSession, no per-district paywall). So these firm versions must be firm-authed and must NOT use gate(). Per the user's decisions: firms get FULL data for ALL ~971 Illinois districts, the Ask AI answers from ALL Illinois settlement data (same engine as the district assistant), and both features are available to every firm member regardless of the firm's plan tier (State / Regional / National).
+
+Done looks like
+The firm workspace nav has two new tabs (e.g. "Settlements" and "Ask AI") alongside the existing ones.
+"Settlements" opens a browser of all ~971 Illinois districts with a search box (by district name / county). Selecting a district opens its full detail: settlement history, salary schedules, and clauses.
+Any firm member can view full detail for any Illinois district — no per-district paywall, no "locked" upgrade prompts inside the firm workspace.
+"Ask AI" opens the assistant with the same capabilities as the district version: ask a question, get a streamed answer grounded in Illinois settlement data, with result cards and saved conversation history.
+Both tabs work for every firm member regardless of the firm's plan tier.
+Nothing in the existing district experience changes; the per-district paywall remains intact for district users.
+Out of scope
+Changing the district-side experience or its gate() paywall.
+Cross-district analytics that the firm workspace already provides elsewhere (Compare / benchmarks / comparables) — the district detail here is settlement history, salary schedules, and clauses.
+Email/SMS or any new background jobs.
+Per-plan-tier feature gating (explicitly: all firm members get both features).
+Steps
+Firm-scoped settlements API. Add firm-authed endpoints (guarded by requireFirmSession, NOT gate()) that list/search all Illinois districts and return a single district's full detail (settlement history, salary schedules, clauses). Reuse the existing dashboard read logic; only the auth guard and the removal of per-district paywall checks differ.
+Firm-scoped Ask AI API. Add a firm-authed endpoint that reuses the existing Ask AI engine (same Illinois-scoped tools, streaming, and saved-conversation behavior), guarded by requireFirmSession instead of the paid-plan gate. Reuse the engine rather than forking a second copy.
+Settlements browser page. Build a new firm workspace page that reuses the district-browser UI (searchable district list → district detail with settlements, salary schedules, clauses), styled for the firm workspace, calling the new firm endpoints.
+Ask AI page. Build a new firm workspace page that reuses the district Ask AI UI (question box, streamed answer, result cards, conversation history), calling the new firm endpoint.
+Wire nav + routes. Add the two new tabs to the workspace nav and the two new routes to the app router.
+Verify end to end. As a firm member, search the settlements browser, open a district and confirm full settlement/salary/clause detail with no paywall, and ask the AI a question and get a grounded streamed answer. Run API and web typechecks.
+Relevant files
+artifacts/collbar-web/src/components/workspace-shell.tsx:17-24
+artifacts/collbar-web/src/App.tsx:10-18,88-96
+artifacts/collbar-web/src/pages/dashboard/index.tsx
+artifacts/collbar-web/src/pages/dashboard/district.tsx
+artifacts/collbar-web/src/pages/dashboard/ask.tsx
+artifacts/collbar-web/src/pages/app/index.tsx
+artifacts/api-server/src/routes/dashboard.ts:78-110,265-490
+artifacts/api-server/src/routes/ask.ts:194-260
+artifacts/api-server/src/routes/firm-clauses.ts
+artifacts/api-server/src/routes/index.ts:1-30
+artifacts/api-server/src/lib/firm-access.ts:133-157
+Constraints
+Firm endpoints MUST be guarded by requireFirmSession and MUST NOT use gate() / per-district paywall checks. Firm membership is the entitlement.
+Ask AI must stay Illinois-scoped (reuse the existing engine, which already anchors to the customer state) — do not broaden it to other states.
+Reuse the existing Ask AI engine and dashboard read logic; avoid forking divergent copies.
+This task edits the same app router and route-index files as Task #214 (admin firm creation) — it is sequenced after #214 to avoid conflicts.
+Dependencies
+
+Admin-only firm creation (remove public signup)
