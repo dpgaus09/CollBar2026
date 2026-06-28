@@ -1,6 +1,7 @@
 import { useMemo, useState, useEffect } from "react";
 import { useSearchParams } from "wouter";
 import { WorkspaceShell } from "@/components/workspace-shell";
+import { StateBaselineSection } from "@/components/state-baseline";
 import { firmSourceHref } from "@/lib/api";
 import {
   CANONICAL_UNITS,
@@ -622,7 +623,7 @@ function DistrictDetail({
     );
   }
 
-  const { district, settlements, salarySchedules, provisions, availableUnits } =
+  const { district, settlements, salarySchedules, provisions, availableUnits, baseline } =
     detail.data;
   const current = district.currentContract;
 
@@ -744,6 +745,10 @@ function DistrictDetail({
         </h3>
         <ClausesSection provisions={provisions} />
       </section>
+
+      {/* State-reported baseline (ISBE TSS + EIS) — data cards only, no
+          explainer copy in the firm view. */}
+      <StateBaselineSection baseline={baseline} />
     </div>
   );
 }

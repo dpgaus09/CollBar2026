@@ -13,6 +13,7 @@ import {
   queryDistrictSettlements,
   queryDistrictSalarySchedules,
   queryDistrictProvisions,
+  queryDistrictBaseline,
 } from "../lib/district-reads.js";
 
 // ============================================================================
@@ -82,11 +83,14 @@ router.get(
         return;
       }
 
-      const [settlements, salarySchedules, provisions] = await Promise.all([
+      const [settlements, salarySchedules, provisions, baseline] = await Promise.all([
         queryDistrictSettlements(districtId, unit),
         queryDistrictSalarySchedules(districtId, unit),
         // Firms get full data: include the verbatim clause excerpts.
         queryDistrictProvisions(districtId, unit, null, { includeExcerpt: true }),
+        // State-reported baseline (ISBE TSS + EIS) — district-level and
+        // unit-agnostic, so it is fetched once regardless of the selected unit.
+        queryDistrictBaseline(districtId),
       ]);
 
       res.json({
@@ -98,6 +102,7 @@ router.get(
         availableUnits: settlements.availableUnits,
         salarySchedules,
         provisions: provisions.provisions,
+        baseline,
       });
     } catch (err) {
       logger.error({ err, districtId }, "firm settlements district detail failed");

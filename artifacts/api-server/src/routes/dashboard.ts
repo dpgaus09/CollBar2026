@@ -15,6 +15,7 @@ import {
   queryDistrictSettlements,
   queryDistrictSalarySchedules,
   queryDistrictProvisions,
+  queryDistrictBaseline,
 } from "../lib/district-reads.js";
 import { verifyDocumentAccessToken } from "../lib/documentToken.js";
 import { uploadCustomerSubmission, DriveNotConnectedError } from "../lib/google-drive.js";
@@ -332,164 +333,10 @@ router.get("/dashboard/districts/:id/baseline", gate({ ownDistrict: true }), asy
   if (!/^\d+$/.test(idStr)) { res.status(400).json({ error: "Invalid district id" }); return; }
   const districtId = Number(idStr);
 
-  const num = (v: unknown): number | null => (v == null ? null : Number(v));
-  const txt = (v: unknown): string | null => (v == null ? null : String(v));
-
   try {
     if (!(await isCustomerDistrict(districtId))) { res.status(404).json({ error: "District not found" }); return; }
 
-    // Most-recent ISBE Teacher Salary Study snapshot. Both d.state and tss.state
-    // are re-asserted so the query is independently IL-scoped.
-    const tssRows = await db.execute(sql`
-      SELECT tss.school_year, tss.affiliation, tss.enrollment_range,
-             tss.contract_expires, tss.salary_program, tss.education_level_required,
-             tss.ba_begin, tss.ba_max, tss.ba_years_to_max,
-             tss.ma_begin, tss.ma_max, tss.ma_years_to_max,
-             tss.ma30_begin, tss.ma30_max, tss.ma30_years_to_max,
-             tss.highest_scheduled_salary, tss.hss_years_to_max, tss.masters_10th_year_salary,
-             tss.trs_board_paid_pct, tss.trs_included_in_salary,
-             tss.personal_days, tss.sick_days, tss.sick_leave_bank,
-             tss.severance_pay, tss.early_retirement_program, tss.fair_share_provision,
-             tss.longevity_pay_provided, tss.longevity_ba_max, tss.longevity_ma_max,
-             tss.longevity_ma30_max, tss.longevity_hss_max,
-             tss.health_premium_employee, tss.health_pct_employer_employee,
-             tss.health_premium_family, tss.health_pct_employer_family,
-             tss.dental_premium_employee, tss.dental_pct_employer_employee,
-             tss.dental_premium_family, tss.dental_pct_employer_family,
-             tss.vision_premium_employee, tss.vision_pct_employer_employee,
-             tss.vision_premium_family, tss.vision_pct_employer_family,
-             tss.life_premium_employee, tss.life_pct_employer_employee,
-             tss.life_premium_family, tss.life_pct_employer_family,
-             tss.prescription_premium_employee, tss.prescription_pct_employer_employee,
-             tss.prescription_premium_family, tss.prescription_pct_employer_family,
-             tss.disability_premium_employee, tss.disability_pct_employer_employee,
-             tss.disability_premium_family, tss.disability_pct_employer_family
-      FROM districts d
-      JOIN tss_annual tss ON tss.state_district_id = d.state_district_id
-      WHERE d.id = ${districtId} AND d.state = ${CUSTOMER_STATE} AND tss.state = ${CUSTOMER_STATE}
-      ORDER BY tss.school_year DESC
-      LIMIT 1
-    `);
-
-    const coverage = (r: Record<string, unknown>, k: string) => ({
-      premiumEmployee: num(r[`${k}_premium_employee`]),
-      pctEmployerEmployee: num(r[`${k}_pct_employer_employee`]),
-      premiumFamily: num(r[`${k}_premium_family`]),
-      pctEmployerFamily: num(r[`${k}_pct_employer_family`]),
-    });
-
-    const tssRow = tssRows.rows.length ? (tssRows.rows[0] as Record<string, unknown>) : null;
-    const tss =
-      tssRow == null
-        ? null
-        : {
-            schoolYear: txt(tssRow.school_year),
-            affiliation: txt(tssRow.affiliation),
-            enrollmentRange: txt(tssRow.enrollment_range),
-            contractExpires: txt(tssRow.contract_expires),
-            salaryProgram: txt(tssRow.salary_program),
-            educationLevelRequired: txt(tssRow.education_level_required),
-            salarySchedule: {
-              baBegin: num(tssRow.ba_begin), baMax: num(tssRow.ba_max), baYearsToMax: num(tssRow.ba_years_to_max),
-              maBegin: num(tssRow.ma_begin), maMax: num(tssRow.ma_max), maYearsToMax: num(tssRow.ma_years_to_max),
-              ma30Begin: num(tssRow.ma30_begin), ma30Max: num(tssRow.ma30_max), ma30YearsToMax: num(tssRow.ma30_years_to_max),
-              highestScheduledSalary: num(tssRow.highest_scheduled_salary),
-              hssYearsToMax: num(tssRow.hss_years_to_max),
-              masters10thYearSalary: num(tssRow.masters_10th_year_salary),
-            },
-            retirement: {
-              trsBoardPaidPct: num(tssRow.trs_board_paid_pct),
-              trsIncludedInSalary: txt(tssRow.trs_included_in_salary),
-              severancePay: txt(tssRow.severance_pay),
-              earlyRetirementProgram: txt(tssRow.early_retirement_program),
-            },
-            leave: {
-              sickDays: num(tssRow.sick_days),
-              personalDays: num(tssRow.personal_days),
-              sickLeaveBank: txt(tssRow.sick_leave_bank),
-            },
-            longevity: {
-              longevityPayProvided: txt(tssRow.longevity_pay_provided),
-              longevityBaMax: num(tssRow.longevity_ba_max),
-              longevityMaMax: num(tssRow.longevity_ma_max),
-              longevityMa30Max: num(tssRow.longevity_ma30_max),
-              longevityHssMax: num(tssRow.longevity_hss_max),
-            },
-            fairShareProvision: txt(tssRow.fair_share_provision),
-            insurance: {
-              health: coverage(tssRow, "health"),
-              dental: coverage(tssRow, "dental"),
-              vision: coverage(tssRow, "vision"),
-              life: coverage(tssRow, "life"),
-              prescription: coverage(tssRow, "prescription"),
-              disability: coverage(tssRow, "disability"),
-            },
-          };
-
-    // Most-recent ISBE EIS district-level actual-pay statistics. Anchored
-    // through districts d (the EIS tables carry no state column).
-    const eisRows = await db.execute(sql`
-      SELECT eis.school_year, eis.teacher_headcount, eis.teacher_fte,
-             eis.avg_teacher_salary, eis.median_teacher_salary, eis.p25_salary, eis.p75_salary,
-             eis.total_teacher_base_payroll, eis.avg_sick_days,
-             eis.all_staff_headcount, eis.all_staff_fte
-      FROM districts d
-      JOIN il_eis_district eis ON eis.state_district_id = d.state_district_id
-      WHERE d.id = ${districtId} AND d.state = ${CUSTOMER_STATE}
-      ORDER BY eis.school_year DESC
-      LIMIT 1
-    `);
-    const eisRow = eisRows.rows.length ? (eisRows.rows[0] as Record<string, unknown>) : null;
-    const eisDistrict =
-      eisRow == null
-        ? null
-        : {
-            schoolYear: txt(eisRow.school_year),
-            teacherHeadcount: num(eisRow.teacher_headcount),
-            teacherFte: num(eisRow.teacher_fte),
-            avgTeacherSalary: num(eisRow.avg_teacher_salary),
-            medianTeacherSalary: num(eisRow.median_teacher_salary),
-            p25Salary: num(eisRow.p25_salary),
-            p75Salary: num(eisRow.p75_salary),
-            totalTeacherBasePayroll: num(eisRow.total_teacher_base_payroll),
-            avgSickDays: num(eisRow.avg_sick_days),
-            allStaffHeadcount: num(eisRow.all_staff_headcount),
-            allStaffFte: num(eisRow.all_staff_fte),
-          };
-
-    // Per-position aggregates for the latest EIS year present. Aggregates only
-    // (headcount, FTE, salary distribution) — never individual names. Anchored
-    // through districts d on state_district_id + d.state.
-    const posRows = await db.execute(sql`
-      SELECT ps.school_year, ps.position_description, ps.position_group,
-             ps.headcount, ps.total_fte, ps.avg_salary, ps.median_salary,
-             ps.p25_salary, ps.p75_salary
-      FROM districts d
-      JOIN il_eis_position_summary ps ON ps.state_district_id = d.state_district_id
-      WHERE d.id = ${districtId} AND d.state = ${CUSTOMER_STATE}
-        AND ps.school_year = (
-          SELECT MAX(ps2.school_year)
-          FROM il_eis_position_summary ps2
-          JOIN districts d2 ON d2.state_district_id = ps2.state_district_id
-          WHERE d2.id = ${districtId} AND d2.state = ${CUSTOMER_STATE}
-        )
-      ORDER BY ps.headcount DESC NULLS LAST, ps.position_description
-    `);
-    const positions = (posRows.rows as Record<string, unknown>[]).map((r) => ({
-      schoolYear: txt(r.school_year),
-      positionDescription: txt(r.position_description),
-      positionGroup: txt(r.position_group),
-      headcount: num(r.headcount),
-      totalFte: num(r.total_fte),
-      avgSalary: num(r.avg_salary),
-      medianSalary: num(r.median_salary),
-      p25Salary: num(r.p25_salary),
-      p75Salary: num(r.p75_salary),
-    }));
-
-    const eis = eisDistrict || positions.length ? { district: eisDistrict, positions } : null;
-
-    res.json({ tss, eis });
+    res.json(await queryDistrictBaseline(districtId));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Internal server error" });

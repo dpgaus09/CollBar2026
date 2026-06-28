@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiUrl } from "@/lib/api";
+import type { BaselineResponse } from "@/components/state-baseline";
 
 // ===========================================================================
 // Firm workspace data hooks (Phase 2 — roster & matters).
@@ -793,6 +794,8 @@ export interface FirmSettlementDetail {
   availableUnits: { bargaining_unit: string; n: number }[];
   salarySchedules: FirmSalarySchedules;
   provisions: FirmProvision[];
+  // State-reported baseline (ISBE TSS + EIS); null when the state reported none.
+  baseline: BaselineResponse | null;
 }
 
 export const FIRM_SETTLEMENT_DISTRICTS_KEY = ["/api/firm/settlements/districts"];
