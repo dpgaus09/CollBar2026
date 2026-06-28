@@ -8,6 +8,7 @@ import { db, BARGAINING_UNITS } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import { requireFirmSession } from "../lib/firm-access.js";
 import { verifyDocumentAccessToken } from "../lib/documentToken.js";
+import { CUSTOMER_STATE } from "../lib/dashboard-query.js";
 import { streamObjectTo, uploadedCbaKey } from "../lib/objectStorage.js";
 import {
   CATALOG_BY_ID,
@@ -234,9 +235,14 @@ router.get("/firm/document", async (req: Request, res: Response) => {
       return;
     }
 
-    // Firm-scope authorization: the doc's district must be tracked by — or in a
-    // matter of — a firm this user belongs to. Firm membership is the
-    // entitlement (independent of users.plan / gate()).
+    // Firm-scope authorization. The caller must be a firm member, and the doc's
+    // district must be either (a) inside that firm's workspace — tracked or in a
+    // matter — or (b) any district in CUSTOMER_STATE. (b) backs the "Entire
+    // database" clause scope, whose results span the whole IL corpus; without it
+    // the ~9% of IL clauses sourced from upload:// PDFs would 403 when opened.
+    // The CUSTOMER_STATE bound keeps the deliberately-hidden non-IL docs 403,
+    // and firm membership remains required (this never widens access for
+    // non-firm users; the per-district dashboard route stays gate()-governed).
     const authed = await db.execute(sql`
       SELECT 1
       FROM firm_members fm
@@ -250,6 +256,10 @@ router.get("/firm/document", async (req: Request, res: Response) => {
             SELECT 1 FROM matters m
             JOIN matter_districts md ON md.matter_id = m.id
             WHERE m.firm_id = fm.firm_id AND md.district_id = ${docDistrictId}
+          )
+          OR EXISTS (
+            SELECT 1 FROM districts d
+            WHERE d.id = ${docDistrictId} AND d.state = ${CUSTOMER_STATE}
           )
         )
       LIMIT 1

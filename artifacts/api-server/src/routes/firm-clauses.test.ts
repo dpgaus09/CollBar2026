@@ -55,9 +55,18 @@ let peerD: number; // matter peer + roster — sick clause (cited)
 let rosterD: number; // roster only — sick clause (cited)
 let noCiteD: number; // roster — sick clause but NULL source_url (must be hidden)
 let firmBD: number; // firm B only (cross-firm target)
+let ohD: number; // OH (out-of-state) — must stay hidden even in "database" scope
+let espD: number; // IL, support_staff unit — must be hidden when unit=teachers
 
 let matterId: number;
 let citedSrc = "";
+
+// A unique token carried ONLY by the "database"-scope fixtures below. Because
+// the whole-state scope searches the entire live IL corpus, asserting on it
+// requires a term that no real clause contains; this keeps the assertions
+// deterministic regardless of surrounding data. Alphanumeric (no hyphens) so it
+// tokenizes as a single tsvector lexeme.
+const DBWORD = `zdbprobe${Date.now()}`;
 
 const sessionA: Session = {};
 const sessionB: Session = {};
@@ -89,10 +98,10 @@ async function addMember(firmId: number, userId: number): Promise<void> {
   `);
 }
 
-async function createDistrict(name: string): Promise<number> {
+async function createDistrict(name: string, state = "IL"): Promise<number> {
   const r = await db.execute(sql`
     INSERT INTO districts (name, slug, state_district_id, state, county, district_type, enrollment)
-    VALUES (${`${name}-${MARK}`}, ${`${name}-${MARK}`}, ${`${MARK}-${name}`}, 'IL', 'Cook', 'unit', 5000)
+    VALUES (${`${name}-${MARK}`}, ${`${name}-${MARK}`}, ${`${MARK}-${name}`}, ${state}, 'Cook', 'unit', 5000)
     RETURNING id
   `);
   return Number((r.rows[0] as { id: string | number }).id);
@@ -115,11 +124,12 @@ async function createSourceDoc(
 async function createContract(
   districtId: number,
   sourceDocId: number | null,
+  unit = "teachers",
 ): Promise<number> {
   const r = await db.execute(sql`
     INSERT INTO contracts
       (district_id, bargaining_unit, unit_scope, effective_start, effective_end, source_doc_id)
-    VALUES (${districtId}, 'teachers', 'standalone', '2023-08-01', '2026-07-31', ${sourceDocId})
+    VALUES (${districtId}, ${unit}, 'standalone', '2023-08-01', '2026-07-31', ${sourceDocId})
     RETURNING id
   `);
   return Number((r.rows[0] as { id: string | number }).id);
@@ -247,6 +257,40 @@ beforeAll(async () => {
     "Firm B teachers receive nine (9) sick days per year.",
     { humanVerified: true, confidence: 0.9, valueNumeric: 9 },
   );
+
+  // --- "database" (whole-state) scope fixtures -----------------------------
+  // The unique DBWORD token + a dedicated provision_key isolate these rows from
+  // the live IL corpus. We stamp the probe on:
+  //   • clientD  — IL, in firm A's roster (teachers)
+  //   • firmBD   — IL, NOT in firm A's roster (teachers) → proves database scope
+  //                reaches beyond the firm's own workspace
+  //   • ohD      — OH, out-of-state (teachers) → must stay hidden
+  //   • espD     — IL, support_staff unit → must be hidden when unit=teachers
+  const dbProbe = `Whole-state database probe clause ${DBWORD} text.`;
+  await addProvision(clientContract, "database_probe", "leave", dbProbe, {
+    humanVerified: true,
+    confidence: 0.95,
+  });
+  await addProvision(firmBContract, "database_probe", "leave", dbProbe, {
+    humanVerified: true,
+    confidence: 0.9,
+  });
+
+  ohD = await createDistrict("OH District", "OH");
+  const ohDoc = await createSourceDoc(ohD, `upload://${MARK}-oh`);
+  const ohContract = await createContract(ohD, ohDoc);
+  await addProvision(ohContract, "database_probe", "leave", dbProbe, {
+    humanVerified: true,
+    confidence: 0.9,
+  });
+
+  espD = await createDistrict("ESP District");
+  const espDoc = await createSourceDoc(espD, `upload://${MARK}-esp`);
+  const espContract = await createContract(espD, espDoc, "support_staff");
+  await addProvision(espContract, "database_probe", "leave", dbProbe, {
+    humanVerified: true,
+    confidence: 0.9,
+  });
 
   sessionA.userId = userA;
   sessionA.activeFirmId = firmA;
@@ -503,5 +547,67 @@ describe("POST /firm/clause-compare", () => {
     expect(clauses).toHaveLength(1);
     expect(clauses[0].humanVerified).toBe(true);
     expect(clauses[0].clauseExcerpt).toContain("VERIFIED");
+  });
+});
+
+describe('POST /firm/clause-search — "database" (whole-state) scope', () => {
+  it("the tracked roster still EXCLUDES non-roster in-state districts (baseline)", async () => {
+    const res = await request(appA)
+      .post("/firm/clause-search")
+      .send({ query: DBWORD, scope: "tracked", synthesize: false });
+    expect(res.status).toBe(200);
+    const ids = new Set((res.body.clauses as Clause[]).map((c) => c.districtId));
+    expect(ids.has(clientD)).toBe(true); // in firm A roster
+    expect(ids.has(firmBD)).toBe(false); // IL but NOT in firm A roster
+  });
+
+  it("spans ALL in-state districts beyond the firm roster, hides OH and other units", async () => {
+    const res = await request(appA)
+      .post("/firm/clause-search")
+      .send({ query: DBWORD, scope: "database", synthesize: false });
+    expect(res.status).toBe(200);
+    expect(res.body.scope).toBe("database");
+    expect(res.body.matterId).toBeNull();
+    const ids = new Set((res.body.clauses as Clause[]).map((c) => c.districtId));
+    expect(ids.has(clientD)).toBe(true); // IL roster
+    expect(ids.has(firmBD)).toBe(true); // IL, NON-roster → broader than roster
+    expect(ids.has(ohD)).toBe(false); // out-of-state stays hidden
+    expect(ids.has(espD)).toBe(false); // unit-scoped: support_staff filtered out
+  });
+
+  it("is unit-scoped — the same token resolves to the support_staff district under that unit", async () => {
+    const res = await request(appA)
+      .post("/firm/clause-search")
+      .send({
+        query: DBWORD,
+        scope: "database",
+        bargainingUnit: "support_staff",
+        synthesize: false,
+      });
+    expect(res.status).toBe(200);
+    const ids = new Set((res.body.clauses as Clause[]).map((c) => c.districtId));
+    expect(ids.has(espD)).toBe(true); // support_staff contract now in scope
+    expect(ids.has(clientD)).toBe(false); // teachers contract not in this unit
+    expect(ids.has(firmBD)).toBe(false);
+    expect(ids.has(ohD)).toBe(false);
+  });
+});
+
+describe('POST /firm/clause-compare — "database" (whole-state) scope', () => {
+  it("compares a provision across all in-state districts, beyond roster, OH + other units hidden", async () => {
+    const res = await request(appA)
+      .post("/firm/clause-compare")
+      .send({
+        scope: "database",
+        provisionKey: "database_probe",
+        synthesize: false,
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.scope).toBe("database");
+    const ids = new Set((res.body.clauses as Clause[]).map((c) => c.districtId));
+    expect(ids.has(clientD)).toBe(true);
+    expect(ids.has(firmBD)).toBe(true); // beyond firm A's roster
+    expect(ids.has(ohD)).toBe(false); // out-of-state hidden
+    expect(ids.has(espD)).toBe(false); // unit-scoped (teachers default)
   });
 });

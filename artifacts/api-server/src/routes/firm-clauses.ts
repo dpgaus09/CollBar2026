@@ -21,6 +21,7 @@ import {
   resolveScope,
   mapClauseRow,
   latestContractCte,
+  latestContractCteForState,
   buildClauseCompare,
   type ClauseRow,
 } from "../lib/firm-clauses-model.js";
@@ -38,12 +39,14 @@ import {
 // succeeds. Synthesis is best-effort: a model failure yields synthesis=null.
 //
 // ENTITLEMENT: guarded by requireFirmSession (firm membership), like the rest of
-// the firm workspace — NOT gate()/isFree(). Everything stays inside the firm's
-// scope (roster ∪ matter districts) so every returned clause's source PDF is
-// reachable through GET /api/firm/document. There is deliberately NO cross-firm
-// corpus search here (that would require broadened document authorization and a
-// plan-tier geo entitlement that do not exist yet); scope "all" means the entire
-// firm workspace, not the whole database.
+// the firm workspace — NOT gate()/isFree(). The matter/tracked/all/explicit
+// scopes stay inside the firm's own scope (roster ∪ matter districts). The
+// "database" scope deliberately widens retrieval to EVERY district in
+// CUSTOMER_STATE (IL) — the whole in-state corpus, not just this firm's
+// workspace; out-of-state districts (OH) stay hidden. Every returned clause's
+// source PDF remains reachable through GET /api/firm/document, whose firm-scope
+// authorization was correspondingly broadened to allow any firm member to open
+// an in-state (CUSTOMER_STATE) document.
 // ============================================================================
 
 const router: IRouter = Router();
@@ -255,36 +258,48 @@ router.post(
       res.status(outcome.status).json({ error: outcome.error });
       return;
     }
-    const districtIds = outcome.scope.districtIds;
+    const scopeResult = outcome.scope;
 
     const baseResponse = {
       query,
       scope,
       bargainingUnit: unit,
-      matterId: outcome.scope.matterId,
-      matterName: outcome.scope.matterName,
+      matterId: scopeResult.matterId,
+      matterName: scopeResult.matterName,
       category,
       provisionKey,
       clauses: [] as ClauseRow[],
       synthesis: null as string | null,
     };
 
-    if (districtIds.length === 0) {
-      res.json(baseResponse);
-      return;
-    }
-    if (districtIds.length > MAX_DISTRICTS) {
-      res
-        .status(400)
-        .json({ error: `Too many districts in scope (max ${MAX_DISTRICTS}).` });
-      return;
+    // Only the bounded workspace scopes short-circuit on empty / reject over the
+    // MAX_DISTRICTS cap. The whole-state "database" scope skips both and is
+    // bounded by the result LIMIT below.
+    if (scopeResult.kind === "districts") {
+      if (scopeResult.districtIds.length === 0) {
+        res.json(baseResponse);
+        return;
+      }
+      if (scopeResult.districtIds.length > MAX_DISTRICTS) {
+        res.status(400).json({
+          error: `Too many districts in scope (max ${MAX_DISTRICTS}).`,
+        });
+        return;
+      }
     }
 
+    // The cache key must distinguish scope KIND + state from a district list:
+    // "database" carries no ids, so keying only on a (here-absent) id list would
+    // collide with a genuinely-empty workspace scope.
     const cacheKey = JSON.stringify({
       f: firm.firmId,
       s: scope,
-      m: outcome.scope.matterId,
-      d: [...districtIds].sort((a, b) => a - b),
+      m: scopeResult.matterId,
+      st: scopeResult.kind === "state" ? scopeResult.state : null,
+      d:
+        scopeResult.kind === "districts"
+          ? [...scopeResult.districtIds].sort((a, b) => a - b)
+          : null,
       q: query.toLowerCase(),
       c: category,
       k: provisionKey,
@@ -299,10 +314,16 @@ router.post(
     }
 
     try {
-      const idList = sql.join(
-        districtIds.map((id) => sql`${id}`),
-        sql`, `,
-      );
+      const contractCte =
+        scopeResult.kind === "state"
+          ? latestContractCteForState(unit, scopeResult.state)
+          : latestContractCte(
+              sql.join(
+                scopeResult.districtIds.map((id) => sql`${id}`),
+                sql`, `,
+              ),
+              unit,
+            );
       const filters = [
         sql`cp.clause_tsv @@ q.tsq`,
         sql`cp.clause_excerpt IS NOT NULL`,
@@ -313,7 +334,7 @@ router.post(
       if (provisionKey) filters.push(sql`cp.provision_key = ${provisionKey}`);
 
       const r = await db.execute(sql`
-        WITH latest_contract AS (${latestContractCte(idList, unit)}),
+        WITH latest_contract AS (${contractCte}),
         q AS (SELECT websearch_to_tsquery('english', ${query}) AS tsq)
         SELECT
           lc.district_id,

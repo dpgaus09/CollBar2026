@@ -103,6 +103,7 @@ export default function ClauseComparePage() {
               >
                 <option value="all">Entire workspace</option>
                 <option value="tracked">Tracked roster</option>
+                <option value="database">Entire database</option>
                 {(matters.data?.matters ?? []).length > 0 && (
                   <optgroup label="Matters">
                     {(matters.data?.matters ?? []).map((m) => (

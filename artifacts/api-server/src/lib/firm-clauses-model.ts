@@ -1,6 +1,7 @@
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import { firmScopeDistrictIds } from "./firm-scope.js";
+import { CUSTOMER_STATE } from "./dashboard-query.js";
 
 // ============================================================================
 // Shared data model for firm clause retrieval (Phase 4).
@@ -20,10 +21,24 @@ import { firmScopeDistrictIds } from "./firm-scope.js";
 
 export const MAX_DISTRICTS = 60;
 export const MAX_KEY_LEN = 80;
+// Upper bound on districts returned by the whole-state ("database") compare. The
+// CUSTOMER_STATE corpus is well under this today (≈175 IL teacher districts); it
+// exists only as future protection against an unbounded payload, never to
+// silently truncate a realistic comparison.
+export const DATABASE_MAX_CLAUSES = 500;
 
-export type ClauseScope = "matter" | "tracked" | "explicit" | "all";
+export type ClauseScope =
+  | "matter"
+  | "tracked"
+  | "explicit"
+  | "all"
+  | "database";
 export function parseScope(v: unknown): ClauseScope {
-  return v === "matter" || v === "tracked" || v === "explicit" || v === "all"
+  return v === "matter" ||
+    v === "tracked" ||
+    v === "explicit" ||
+    v === "all" ||
+    v === "database"
     ? v
     : "all";
 }
@@ -38,20 +53,32 @@ export function prettyKey(key: string | null): string {
   return key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-export interface ScopeResult {
-  districtIds: number[];
-  matterId: number | null;
-  matterName: string | null;
-}
+// A resolved clause scope is either a bounded set of district ids (matter /
+// tracked / all / explicit — every district inside the firm's own workspace) or
+// the whole customer-state corpus ("database"). The two are queried differently
+// (district IN-list vs. d.state filter), so the discriminant is carried through
+// to query construction; "database" is never represented as districtIds=[].
+export type ScopeResult =
+  | {
+      kind: "districts";
+      districtIds: number[];
+      matterId: number | null;
+      matterName: string | null;
+    }
+  | { kind: "state"; state: string; matterId: null; matterName: null };
 export type ScopeOutcome =
   | { ok: true; scope: ScopeResult }
   | { ok: false; status: number; error: string };
 
-// Resolve + AUTHORIZE the district set for a clause request. Everything stays
-// inside the firm's scope so every returned clause has a reachable source PDF.
-// A cross-firm matter id is a 404 (no existence leak); an explicit id outside
-// the firm scope is a 403; the whole request is rejected rather than silently
-// dropping ids (a silent drop would hide an authorization mistake).
+// Resolve + AUTHORIZE the scope for a clause request. The workspace scopes
+// (matter/tracked/all/explicit) stay inside the firm's own districts so every
+// returned clause has a reachable source PDF. A cross-firm matter id is a 404
+// (no existence leak); an explicit id outside the firm scope is a 403; the whole
+// request is rejected rather than silently dropping ids (a silent drop would
+// hide an authorization mistake). The "database" scope is the entire
+// CUSTOMER_STATE corpus — authorized purely by firm membership (the caller is
+// already past requireFirmSession) and bounded to CUSTOMER_STATE so the
+// deliberately-hidden non-IL rows never surface.
 export async function resolveScope(
   firmId: number,
   scope: ClauseScope,
@@ -82,6 +109,7 @@ export async function resolveScope(
     return {
       ok: true,
       scope: {
+        kind: "districts",
         districtIds: ids,
         matterId: Number(row.id),
         matterName: String(row.name),
@@ -98,7 +126,12 @@ export async function resolveScope(
     );
     return {
       ok: true,
-      scope: { districtIds: ids, matterId: null, matterName: null },
+      scope: {
+        kind: "districts",
+        districtIds: ids,
+        matterId: null,
+        matterName: null,
+      },
     };
   }
 
@@ -106,7 +139,24 @@ export async function resolveScope(
     const all = await firmScopeDistrictIds(firmId);
     return {
       ok: true,
-      scope: { districtIds: [...all], matterId: null, matterName: null },
+      scope: {
+        kind: "districts",
+        districtIds: [...all],
+        matterId: null,
+        matterName: null,
+      },
+    };
+  }
+
+  if (scope === "database") {
+    return {
+      ok: true,
+      scope: {
+        kind: "state",
+        state: CUSTOMER_STATE,
+        matterId: null,
+        matterName: null,
+      },
     };
   }
 
@@ -129,7 +179,12 @@ export async function resolveScope(
   }
   return {
     ok: true,
-    scope: { districtIds, matterId: null, matterName: null },
+    scope: {
+      kind: "districts",
+      districtIds,
+      matterId: null,
+      matterName: null,
+    },
   };
 }
 
@@ -196,6 +251,26 @@ export function latestContractCte(
   `;
 }
 
+// The whole-state variant of latestContractCte for the "database" scope: the
+// latest contract per district across every district in `state`, with the exact
+// same per-district precedence. Used instead of the district IN-list so the
+// "Entire database" scope never has to enumerate (and cap at MAX_DISTRICTS) the
+// full CUSTOMER_STATE corpus.
+export function latestContractCteForState(unit: string, state: string) {
+  return sql`
+    SELECT DISTINCT ON (c.district_id)
+      c.id, c.district_id, c.source_doc_id
+    FROM contracts c
+    JOIN districts d ON d.id = c.district_id
+    WHERE d.state = ${state}
+      AND c.bargaining_unit = ${unit}
+    ORDER BY c.district_id,
+             c.effective_end DESC NULLS LAST,
+             c.effective_start DESC NULLS LAST,
+             c.id DESC
+  `;
+}
+
 export interface AvailableType {
   category: string | null;
   provisionKey: string;
@@ -238,33 +313,45 @@ export async function buildClauseCompare(
   if (!outcome.ok) {
     return { ok: false, status: outcome.status, error: outcome.error };
   }
-  const districtIds = outcome.scope.districtIds;
-  const matterId = outcome.scope.matterId;
-  const matterName = outcome.scope.matterName;
+  const scope = outcome.scope;
+  const matterId = scope.matterId;
+  const matterName = scope.matterName;
 
-  if (districtIds.length === 0) {
-    return {
-      ok: true,
-      data: { matterId, matterName, availableTypes: [], clauses: [] },
-    };
-  }
-  if (districtIds.length > MAX_DISTRICTS) {
-    return {
-      ok: false,
-      status: 400,
-      error: `Too many districts in scope (max ${MAX_DISTRICTS}).`,
-    };
+  // The bounded workspace scopes carry an explicit id set, so they short-circuit
+  // on an empty list and reject anything over MAX_DISTRICTS. The whole-state
+  // "database" scope intentionally skips both: it spans the entire CUSTOMER_STATE
+  // corpus and is bounded by DATABASE_MAX_CLAUSES on the compare query instead.
+  if (scope.kind === "districts") {
+    if (scope.districtIds.length === 0) {
+      return {
+        ok: true,
+        data: { matterId, matterName, availableTypes: [], clauses: [] },
+      };
+    }
+    if (scope.districtIds.length > MAX_DISTRICTS) {
+      return {
+        ok: false,
+        status: 400,
+        error: `Too many districts in scope (max ${MAX_DISTRICTS}).`,
+      };
+    }
   }
 
-  const idList = sql.join(
-    districtIds.map((id) => sql`${id}`),
-    sql`, `,
-  );
+  const contractCte =
+    scope.kind === "state"
+      ? latestContractCteForState(opts.unit, scope.state)
+      : latestContractCte(
+          sql.join(
+            scope.districtIds.map((id) => sql`${id}`),
+            sql`, `,
+          ),
+          opts.unit,
+        );
 
   // The provision types actually present across the scoped districts' latest
   // contracts (drives the picker). Count = districts carrying each type.
   const typesRes = await db.execute(sql`
-    WITH latest_contract AS (${latestContractCte(idList, opts.unit)})
+    WITH latest_contract AS (${contractCte})
     SELECT cp.category, cp.provision_key,
            count(DISTINCT lc.district_id) AS district_count
     FROM latest_contract lc
@@ -288,7 +375,7 @@ export async function buildClauseCompare(
   let clauses: ClauseRow[] = [];
   if (opts.provisionKey) {
     const cmp = await db.execute(sql`
-      WITH latest_contract AS (${latestContractCte(idList, opts.unit)})
+      WITH latest_contract AS (${contractCte})
       SELECT DISTINCT ON (lc.district_id)
         lc.district_id,
         d.name AS district_name,
@@ -318,6 +405,7 @@ export async function buildClauseCompare(
                cp.human_verified DESC NULLS LAST,
                cp.confidence DESC NULLS LAST,
                cp.id DESC
+      ${scope.kind === "state" ? sql`LIMIT ${DATABASE_MAX_CLAUSES}` : sql``}
     `);
     clauses = (cmp.rows as Array<Record<string, unknown>>).map(mapClauseRow);
     // Stable side-by-side order: by district name.

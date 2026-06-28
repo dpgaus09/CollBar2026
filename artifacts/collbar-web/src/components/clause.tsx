@@ -11,13 +11,16 @@ export function prettyClauseKey(s: string | null): string {
 }
 
 // The source picker encodes its choice as one string: a specific matter
-// ("matter:<id>"), the tracked roster ("tracked"), or the entire firm workspace
-// including matter-only districts ("all"). Maps to the server scope + matterId.
+// ("matter:<id>"), the tracked roster ("tracked"), the entire firm workspace
+// including matter-only districts ("all"), or the entire database — every
+// district in the customer state, beyond the firm's own workspace ("database").
+// Maps to the server scope + matterId.
 export function decodeClauseSource(v: string): {
   scope: ClauseScope;
   matterId: number | null;
 } {
-  if (v === "tracked" || v === "all") return { scope: v, matterId: null };
+  if (v === "tracked" || v === "all" || v === "database")
+    return { scope: v, matterId: null };
   if (v.startsWith("matter:")) {
     const id = Number(v.slice("matter:".length));
     return { scope: "matter", matterId: Number.isFinite(id) ? id : null };

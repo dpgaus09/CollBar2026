@@ -358,7 +358,12 @@ export function useCompareMatrix(req: CompareRequest, enabled = true) {
 // clause-compare lines up ONE provision type across districts side by side.
 // ===========================================================================
 
-export type ClauseScope = "matter" | "tracked" | "explicit" | "all";
+export type ClauseScope =
+  | "matter"
+  | "tracked"
+  | "explicit"
+  | "all"
+  | "database";
 
 export interface ClauseRow {
   provisionId: number;

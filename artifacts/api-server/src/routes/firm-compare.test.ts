@@ -44,6 +44,7 @@ let firmA: number;
 let firmB: number;
 let userA: number;
 let userB: number;
+let userNonMember: number; // belongs to no firm — doc access is always 403
 
 // District A: fully cited (settlement + provisions w/ source doc + clause).
 let clientD: number;
@@ -57,9 +58,16 @@ let staleD: number;
 let noExcerptD: number;
 // District in firm B only (cross-firm isolation target).
 let firmBD: number;
+// IL district in NO firm's roster/matter — backs the "Entire database" scope:
+// firm members may open its upload:// doc even though it's outside their workspace.
+let ilNonRosterD: number;
+// OH (out-of-state) district — must stay 403 even for a firm member.
+let ohD: number;
 
 let matterId: number;
 let cited_src = "";
+let ilNonRosterSrc = "";
+let ohSrc = "";
 
 const sessionA: Session = {};
 const sessionB: Session = {};
@@ -91,10 +99,10 @@ async function addMember(firmId: number, userId: number): Promise<void> {
   `);
 }
 
-async function createDistrict(name: string): Promise<number> {
+async function createDistrict(name: string, state = "IL"): Promise<number> {
   const r = await db.execute(sql`
     INSERT INTO districts (name, slug, state_district_id, state, county, district_type, enrollment)
-    VALUES (${`${name}-${MARK}`}, ${`${name}-${MARK}`}, ${`${MARK}-${name}`}, 'IL', 'Cook', 'unit', 5000)
+    VALUES (${`${name}-${MARK}`}, ${`${name}-${MARK}`}, ${`${MARK}-${name}`}, ${state}, 'Cook', 'unit', 5000)
     RETURNING id
   `);
   return Number((r.rows[0] as { id: string | number }).id);
@@ -182,6 +190,7 @@ async function addSettlementYears(
 beforeAll(async () => {
   userA = await createUser("a");
   userB = await createUser("b");
+  userNonMember = await createUser("nomember");
   firmA = await createFirm("Firm A");
   firmB = await createFirm("Firm B");
   await addMember(firmA, userA);
@@ -262,6 +271,17 @@ beforeAll(async () => {
     confidence: 0.95,
     clause: "",
   });
+
+  // "Entire database" doc-auth fixtures: an IL district outside every firm's
+  // workspace, and an OH district. Both carry an upload:// doc. A firm member
+  // may open the IL one (state == CUSTOMER_STATE) but never the OH one.
+  ilNonRosterD = await createDistrict("IL NonRoster District");
+  ilNonRosterSrc = `upload://${MARK}-il-nonroster`;
+  await createSourceDoc(ilNonRosterD, ilNonRosterSrc);
+
+  ohD = await createDistrict("OH District", "OH");
+  ohSrc = `upload://${MARK}-oh`;
+  await createSourceDoc(ohD, ohSrc);
 
   sessionA.userId = userA;
   sessionA.activeFirmId = firmA;
@@ -448,9 +468,10 @@ describe("GET /firm/document — firm-scope authorization", () => {
     expect(res.status).toBe(401);
   });
 
-  it("403s a token for a user whose firm does not have the district in scope", async () => {
-    // userB's firm (firmB) does not track clientD.
-    const token = signDocumentAccessToken(userB);
+  it("403s a token for a user who belongs to no firm", async () => {
+    // Firm membership is the entitlement for the document route. A user in no
+    // firm is denied even for an in-state, otherwise-accessible district.
+    const token = signDocumentAccessToken(userNonMember);
     const res = await request(appAnon)
       .get("/firm/document")
       .query({ src: cited_src, token });
@@ -476,5 +497,26 @@ describe("GET /firm/document — firm-scope authorization", () => {
       .get("/firm/document")
       .query({ src: "https://example.com/x.pdf", token });
     expect(res.status).toBe(400);
+  });
+
+  it("authorizes a firm member for an in-state district OUTSIDE their workspace (Entire database)", async () => {
+    // ilNonRosterD is in no firm's roster/matter, but it's in CUSTOMER_STATE, so
+    // a firm member can open its doc. Passing the firm-scope gate is proven by a
+    // 404 (bytes absent in the test env), not a 403.
+    const token = signDocumentAccessToken(userA);
+    const res = await request(appAnon)
+      .get("/firm/document")
+      .query({ src: ilNonRosterSrc, token });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("Document file missing");
+  });
+
+  it("403s an out-of-state (OH) district even for a firm member", async () => {
+    const token = signDocumentAccessToken(userA);
+    const res = await request(appAnon)
+      .get("/firm/document")
+      .query({ src: ohSrc, token });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("FORBIDDEN_DISTRICT");
   });
 });
