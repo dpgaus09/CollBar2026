@@ -66,7 +66,8 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   const activeId = active.data?.matter?.id ?? "";
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="min-h-screen bg-slate-950 text-slate-100" style={{ overflowX: "clip" }}>
+      <div className="sticky top-0 z-30 bg-slate-950">
       <header className="border-b border-slate-800 px-6 py-3 flex items-center justify-between gap-4">
         <div className="flex items-center gap-3 min-w-0">
           <div className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />
@@ -115,7 +116,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
         </div>
       </header>
 
-      <nav aria-label="Workspace sections" className="border-b border-slate-800 px-6 flex -mb-px">
+      <nav aria-label="Workspace sections" className="border-b border-slate-800 px-6 flex -mb-px overflow-x-auto">
         {NAV_ITEMS.map((item) => {
           const isActive =
             item.href === "/app"
@@ -126,7 +127,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
               key={item.href}
               href={`${base}${item.href.replace(/^\//, "")}`}
               aria-current={isActive ? "page" : undefined}
-              className={`px-4 py-3 text-xs font-medium border-b-2 transition-colors ${
+              className={`shrink-0 whitespace-nowrap px-4 py-3 text-xs font-medium border-b-2 transition-colors ${
                 isActive
                   ? "border-blue-500 text-blue-400"
                   : "border-transparent text-slate-500 hover:text-slate-300"
@@ -137,6 +138,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
           );
         })}
       </nav>
+      </div>
 
       <main id="main-content" className="max-w-5xl mx-auto px-6 py-8">
         {children}
