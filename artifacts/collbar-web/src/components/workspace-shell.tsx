@@ -17,9 +17,11 @@ const NAV_ITEMS = [
   { href: "/app", label: "Workspace" },
   { href: "/app/roster", label: "Roster" },
   { href: "/app/matters", label: "Matters" },
+  { href: "/app/settlements", label: "Settlements" },
   { href: "/app/compare", label: "Compare" },
   { href: "/app/clause-search", label: "Clause search" },
   { href: "/app/clause-compare", label: "Clause compare" },
+  { href: "/app/ask", label: "Ask AI" },
   { href: "/app/exports", label: "Exports" },
   { href: "/app/alerts", label: "Alerts" },
 ];

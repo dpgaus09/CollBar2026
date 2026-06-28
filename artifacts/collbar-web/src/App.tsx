@@ -10,9 +10,11 @@ import AppHomePage from "@/pages/app/index";
 import RosterPage from "@/pages/app/roster";
 import MattersPage from "@/pages/app/matters";
 import MatterDetailPage from "@/pages/app/matter-detail";
+import SettlementsPage from "@/pages/app/settlements";
 import ComparePage from "@/pages/app/compare";
 import ClauseSearchPage from "@/pages/app/clause-search";
 import ClauseComparePage from "@/pages/app/clause-compare";
+import FirmAskPage from "@/pages/app/ask";
 import ExportsPage from "@/pages/app/exports";
 import AlertsPage from "@/pages/app/alerts";
 import DashboardIndexPage from "@/pages/dashboard/index";
@@ -87,9 +89,11 @@ function Router() {
       <Route path="/app/roster" component={RosterPage} />
       <Route path="/app/matters" component={MattersPage} />
       <Route path="/app/matters/:id" component={MatterDetailPage} />
+      <Route path="/app/settlements" component={SettlementsPage} />
       <Route path="/app/compare" component={ComparePage} />
       <Route path="/app/clause-search" component={ClauseSearchPage} />
       <Route path="/app/clause-compare" component={ClauseComparePage} />
+      <Route path="/app/ask" component={FirmAskPage} />
       <Route path="/app/exports" component={ExportsPage} />
       <Route path="/app/alerts" component={AlertsPage} />
 

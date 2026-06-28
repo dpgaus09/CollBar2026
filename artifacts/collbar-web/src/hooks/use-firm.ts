@@ -635,3 +635,191 @@ export function useDeleteAlertSubscription() {
     },
   });
 }
+
+// ===========================================================================
+// Firm workspace — Settlements browser.
+//
+// Browse the FULL settlement / salary / clause record for ALL Illinois
+// districts (not just the firm roster), with no plan paywall. These hooks read
+// the firm-scoped /api/firm/settlements/* endpoints, which reuse the exact same
+// IL-scoped reads as the per-district dashboard. Response field names are the
+// snake_case columns the shared SQL returns, surfaced verbatim.
+// ===========================================================================
+
+// One row in the all-districts picker (name / county search).
+export interface FirmSettlementDistrict {
+  id: number;
+  name: string;
+  county: string | null;
+  district_type: string | null;
+  enrollment: number | null;
+  state: string;
+  updated_at: string | null;
+}
+
+// A contract surfaced on the district overview (most recent first).
+export interface FirmContract {
+  id: number;
+  union_name: string | null;
+  affiliation: string | null;
+  unit_scope: string | null;
+  bargaining_unit: string | null;
+  effective_start: string | null;
+  effective_end: string | null;
+  term_years: string | null;
+  has_reopener: boolean | null;
+  reopener_terms: string | null;
+  source_url: string | null;
+  daysUntilExpiration: number | null;
+  rediscovered: { checkedAt: string; sourceUrl: string | null } | null;
+}
+
+// District overview facts + recent contracts for the selected unit.
+export interface FirmDistrictOverview {
+  id: number;
+  name: string;
+  county: string | null;
+  district_type: string | null;
+  enrollment: number | null;
+  state: string;
+  avg_teacher_salary: string | null;
+  website_url: string | null;
+  updated_at: string | null;
+  state_district_id: string | null;
+  enrollmentBand: string | null;
+  currentContract: FirmContract | null;
+  recentContracts: FirmContract[];
+}
+
+// A settlement history row (with teacher cost-impact + EIS cross-check columns).
+export interface FirmSettlement {
+  id: number;
+  from_year: string;
+  to_year: string;
+  base_increase_pct: string | null;
+  year2_pct: string | null;
+  year3_pct: string | null;
+  off_schedule_payment: string | null;
+  insurance_changed: boolean | null;
+  term_years: string | null;
+  method: string | null;
+  confidence: string | null;
+  human_verified: boolean;
+  verified_by: "district" | "internal" | null;
+  verified_at: string | null;
+  page_ref: number | null;
+  notes: string | null;
+  bargaining_unit: string;
+  source_url: string | null;
+  retrieved_at: string | null;
+  est_annual_cost_impact: string | null;
+  cost_impact_source: "eis" | "tss" | null;
+  eis_observed_change_pct: string | null;
+  eis_flag: boolean;
+}
+
+// One cell in a salary-schedule grid.
+export interface FirmSalaryCell {
+  stepLabel: string;
+  stepOrder: number;
+  laneLabel: string | null;
+  laneOrder: number;
+  salary: number;
+  pageRef: number | null;
+}
+
+// One extracted salary schedule (experience steps × lanes).
+export interface FirmSalarySchedule {
+  id: number;
+  scheduleName: string;
+  schoolYear: string;
+  startYear: number | null;
+  scheduleType: string;
+  laneLabels: string[] | null;
+  laneKind: "education" | "columns" | null;
+  stepCount: number | null;
+  laneCount: number | null;
+  pageStart: number | null;
+  pageEnd: number | null;
+  minSalary: number | null;
+  maxSalary: number | null;
+  confidence: number | null;
+  needsReview: boolean;
+  reviewReason: string | null;
+  extractionMethod: string | null;
+  sourceUrl: string | null;
+  cells: FirmSalaryCell[];
+}
+
+export interface FirmSalarySchedules {
+  bargainingUnit: string;
+  contractId: number | null;
+  schedules: FirmSalarySchedule[];
+  jobFamilies: string[];
+  schoolYears: string[];
+  summary: {
+    scheduleName: string;
+    schoolYear: string;
+    baseSalary: number | null;
+    maBaseSalary: number | null;
+    maxSalary: number | null;
+  } | null;
+  availableUnits: string[];
+}
+
+// A verbatim contract provision (clause excerpt always included for firms).
+export interface FirmProvision {
+  id: number;
+  category: string;
+  provision_key: string;
+  value_numeric: string | null;
+  value_text: string | null;
+  unit: string | null;
+  clause_excerpt: string | null;
+  page_ref: number | null;
+  confidence: string | null;
+  human_verified: boolean;
+  contract_id: number | null;
+  effective_start: string | null;
+  effective_end: string | null;
+  source_url: string | null;
+  retrieved_at: string | null;
+}
+
+export interface FirmSettlementDetail {
+  bargainingUnit: string;
+  district: FirmDistrictOverview;
+  settlements: FirmSettlement[];
+  availableUnits: { bargaining_unit: string; n: number }[];
+  salarySchedules: FirmSalarySchedules;
+  provisions: FirmProvision[];
+}
+
+export const FIRM_SETTLEMENT_DISTRICTS_KEY = ["/api/firm/settlements/districts"];
+
+// All Illinois districts, optionally filtered by a name / county search.
+export function useFirmSettlementDistricts(q: string) {
+  const term = q.trim();
+  return useQuery<{ districts: FirmSettlementDistrict[] }>({
+    queryKey: [...FIRM_SETTLEMENT_DISTRICTS_KEY, term],
+    queryFn: () => {
+      const qs = term ? `?q=${encodeURIComponent(term)}` : "";
+      return firmFetch(`/api/firm/settlements/districts${qs}`);
+    },
+    staleTime: 60_000,
+  });
+}
+
+// One district's full profile (overview, settlements, salary, clauses) for the
+// selected bargaining unit. Disabled until a district is selected.
+export function useFirmSettlementDetail(id: number | null, unit: string) {
+  return useQuery<FirmSettlementDetail>({
+    queryKey: ["/api/firm/settlements/district", id, unit],
+    queryFn: () =>
+      firmFetch(
+        `/api/firm/settlements/districts/${id}?bargainingUnit=${encodeURIComponent(unit)}`,
+      ),
+    enabled: id != null,
+    staleTime: 60_000,
+  });
+}

@@ -2,19 +2,22 @@ import { Router, raw, type IRouter, type Request, type Response, type NextFuncti
 import { db } from "@workspace/db";
 import { sql, type SQL } from "drizzle-orm";
 import { parseUnit } from "./bargaining-units.js";
-import { coerceId, coerceIds } from "../lib/coerce.js";
 import {
   CUSTOMER_STATE,
-  enrollmentBand,
-  daysUntil,
   bandSql,
   buildWhere,
   isCustomerDistrict,
 } from "../lib/dashboard-query.js";
 import { gate, isFree, loadAccess, loadAccessForUser, UPGRADE_MESSAGE, type Access } from "../lib/access.js";
+import {
+  queryDistrictList,
+  queryDistrictDetail,
+  queryDistrictSettlements,
+  queryDistrictSalarySchedules,
+  queryDistrictProvisions,
+} from "../lib/district-reads.js";
 import { verifyDocumentAccessToken } from "../lib/documentToken.js";
 import { uploadCustomerSubmission, DriveNotConnectedError } from "../lib/google-drive.js";
-import { getRediscoveriesForDistrict, rediscoveryKey } from "../lib/crawl-state.js";
 import { uploadedCbaKey, streamObjectTo } from "../lib/objectStorage.js";
 
 const router: IRouter = Router();
@@ -78,26 +81,10 @@ router.get("/dashboard/min-teacher-salary", requireAuth, async (_req: Request, r
 // GET /api/dashboard/districts
 // ---------------------------------------------------------------------------
 router.get("/dashboard/districts", requireAuth, async (req: Request, res: Response) => {
-  const stateFilter = CUSTOMER_STATE;
   const q = req.query.q ? String(req.query.q).trim() : "";
   try {
-    const conditions: Array<SQL | null> = [];
-    if (stateFilter) {
-      conditions.push(sql`state = ${stateFilter}`);
-    }
-    if (q) {
-      const pattern = `%${q}%`;
-      conditions.push(sql`(name ILIKE ${pattern} OR county ILIKE ${pattern})`);
-    }
-    const where = buildWhere(conditions);
-    const rows = await db.execute(sql`
-      SELECT id, name, county, district_type, enrollment, state, updated_at
-      FROM districts
-      WHERE ${where}
-      ORDER BY name
-      LIMIT 5000
-    `);
-    res.json({ districts: coerceIds(rows.rows) });
+    const districts = await queryDistrictList(q);
+    res.json({ districts });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Internal server error" });
@@ -116,62 +103,9 @@ router.get("/dashboard/districts/:id", gate({ ownDistrict: true }), async (req: 
   const unit = parseUnit(req.query.bargainingUnit);
 
   try {
-    const distRows = await db.execute(sql`
-      SELECT id, name, county, district_type, enrollment, state, avg_teacher_salary, valuation, website_url, updated_at, state_district_id
-      FROM districts
-      WHERE id = ${districtId} AND state = ${CUSTOMER_STATE}
-    `);
-    if (!distRows.rows.length) { res.status(404).json({ error: "District not found" }); return; }
-
-    const district = distRows.rows[0] as {
-      id: number; name: string; county: string | null; district_type: string | null;
-      enrollment: number | null; state: string; avg_teacher_salary: string | null; updated_at: string;
-      state_district_id: string | null;
-    };
-
-    const contractRows = await db.execute(sql`
-      SELECT c.id, c.union_name, c.affiliation, c.unit_scope, c.bargaining_unit,
-             c.effective_start, c.effective_end, c.term_years,
-             c.has_reopener, c.reopener_terms,
-             c.source_doc_id, sd.source_url
-      FROM contracts c
-      LEFT JOIN source_documents sd ON c.source_doc_id = sd.id
-      WHERE c.district_id = ${districtId}
-        AND c.bargaining_unit = ${unit}
-      ORDER BY c.effective_start DESC NULLS LAST, c.effective_end DESC NULLS LAST, c.id DESC
-      LIMIT 5
-    `);
-
-    // Surface contracts that were auto-refreshed from a relocated successor URL
-    // (the crawler's "rediscovered_new_version" recheck outcome). Derived purely
-    // from existing crawl-state — no scraping. The rediscovered file is stored as
-    // the newest version, so it becomes the current contract for its unit/scope;
-    // we attach the recheck date and let the existing source_url show the new URL.
-    const rediscoveries = getRediscoveriesForDistrict(district.state_district_id);
-
-    const contracts = (contractRows.rows as {
-      id: number; union_name: string | null; effective_start: string | null;
-      effective_end: string | null; term_years: string | null;
-      has_reopener: boolean | null; source_url: string | null;
-      unit_scope: string | null; affiliation: string | null; bargaining_unit: string | null;
-      source_doc_id: number | null; reopener_terms: string | null;
-    }[]).map((c) => {
-      const rd = rediscoveries[rediscoveryKey(c.bargaining_unit, c.unit_scope)];
-      return {
-        ...c,
-        daysUntilExpiration: daysUntil(c.effective_end),
-        rediscovered: rd
-          ? { checkedAt: rd.checkedAt, sourceUrl: c.source_url }
-          : null,
-      };
-    });
-
-    res.json({
-      ...coerceId(district),
-      enrollmentBand: enrollmentBand(district.enrollment),
-      currentContract: contracts[0] ?? null,
-      recentContracts: contracts,
-    });
+    const detail = await queryDistrictDetail(districtId, unit);
+    if (!detail) { res.status(404).json({ error: "District not found" }); return; }
+    res.json(detail);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Internal server error" });
@@ -198,25 +132,12 @@ router.get("/dashboard/districts/:id/provisions", gate({ ownDistrict: true }), a
 
   try {
     if (!(await isCustomerDistrict(districtId))) { res.status(404).json({ error: "District not found" }); return; }
-    const catCondition = rawCat ? sql`AND cp.category = ${rawCat}` : sql``;
-    const rows = await db.execute(sql`
-      SELECT cp.id, cp.category, cp.provision_key, cp.value_numeric, cp.value_text,
-             cp.unit, cp.clause_excerpt, cp.page_ref, cp.confidence, cp.human_verified,
-             c.id AS contract_id, c.effective_start, c.effective_end,
-             c.source_doc_id, sd.source_url, sd.retrieved_at
-      FROM contract_provisions cp
-      JOIN contracts c ON cp.contract_id = c.id
-      LEFT JOIN source_documents sd ON c.source_doc_id = sd.id
-      WHERE c.district_id = ${districtId}
-        AND c.bargaining_unit = ${unit}
-      ${catCondition}
-      ORDER BY c.effective_start DESC NULLS LAST, cp.category, cp.provision_key
-      LIMIT 200
-    `);
+    // Free customers may read their own Overview, but the verbatim clause
+    // excerpt stays paid-only — strip it for free users (includeExcerpt=false).
     const free = req.access ? isFree(req.access) : false;
-    const provisions = free
-      ? rows.rows.map((r) => ({ ...(r as Record<string, unknown>), clause_excerpt: null }))
-      : rows.rows;
+    const { provisions } = await queryDistrictProvisions(districtId, unit, rawCat || null, {
+      includeExcerpt: !free,
+    });
     res.json({ provisions });
   } catch (err) {
     console.error(err);
@@ -270,118 +191,7 @@ router.get("/dashboard/districts/:id/settlements", gate({ ownDistrict: true }), 
   const unit = parseUnit(req.query.bargainingUnit);
   try {
     if (!(await isCustomerDistrict(districtId))) { res.status(404).json({ error: "District not found" }); return; }
-    // Settlements: compute cost impact using EIS real salary (preferred) or TSS midpoint fallback.
-    // Also include EIS cross-check (YoY salary change vs. our base_increase_pct).
-    // Cost-impact / EIS columns are teacher-specific (FTE, TSS, EIS salary tables
-    // only model teachers), so they are gated to s.bargaining_unit = 'teachers'.
-    const rows = await db.execute(sql`
-      SELECT s.id, s.from_year, s.to_year, s.base_increase_pct, s.year2_pct, s.year3_pct,
-             s.off_schedule_payment, s.insurance_changed, s.term_years,
-             s.method, s.confidence, s.human_verified, s.page_ref, s.notes,
-             s.bargaining_unit, s.verified_by, s.verified_at,
-             sd.source_url, sd.retrieved_at,
-             -- Cost impact: EIS real salary preferred; TSS midpoint as fallback
-             CASE
-               WHEN d.state = 'IL' AND s.bargaining_unit = 'teachers' AND s.base_increase_pct IS NOT NULL
-                    AND fte.teacher_fte IS NOT NULL AND eis.avg_teacher_salary IS NOT NULL
-               THEN ROUND((s.base_increase_pct / 100.0) * fte.teacher_fte * eis.avg_teacher_salary, 0)
-               WHEN d.state = 'IL' AND s.bargaining_unit = 'teachers' AND s.base_increase_pct IS NOT NULL
-                    AND fte.teacher_fte IS NOT NULL
-                    AND tss.ba_begin IS NOT NULL AND tss.highest_scheduled_salary IS NOT NULL
-               THEN ROUND(
-                 (s.base_increase_pct / 100.0) * fte.teacher_fte *
-                 ((tss.ba_begin + tss.highest_scheduled_salary) / 2.0), 0
-               )
-               ELSE NULL
-             END AS est_annual_cost_impact,
-             -- Salary source label for the footnote
-             CASE
-               WHEN d.state = 'IL' AND s.bargaining_unit = 'teachers' AND eis.avg_teacher_salary IS NOT NULL
-                    AND fte.teacher_fte IS NOT NULL THEN 'eis'
-               WHEN d.state = 'IL' AND s.bargaining_unit = 'teachers' AND tss.ba_begin IS NOT NULL
-                    AND fte.teacher_fte IS NOT NULL THEN 'tss'
-               ELSE NULL
-             END AS cost_impact_source,
-             -- EIS cross-check: YoY change in district avg teacher salary from EIS data
-             CASE
-               WHEN d.state = 'IL' AND s.bargaining_unit = 'teachers' AND eis.avg_teacher_salary IS NOT NULL
-                    AND eis_prev.avg_teacher_salary > 0
-               THEN ROUND(
-                 ((eis.avg_teacher_salary - eis_prev.avg_teacher_salary)
-                  / eis_prev.avg_teacher_salary) * 100, 2
-               )
-               ELSE NULL
-             END AS eis_observed_change_pct,
-             -- Flag when settlement pct and EIS-observed change differ by > 2pp
-             CASE
-               WHEN d.state = 'IL' AND s.bargaining_unit = 'teachers' AND s.base_increase_pct IS NOT NULL
-                    AND eis.avg_teacher_salary IS NOT NULL
-                    AND eis_prev.avg_teacher_salary > 0
-                    AND ABS(
-                      s.base_increase_pct -
-                      ROUND(((eis.avg_teacher_salary - eis_prev.avg_teacher_salary)
-                             / eis_prev.avg_teacher_salary) * 100, 2)
-                    ) > 2
-               THEN true
-               ELSE false
-             END AS eis_flag
-      FROM settlements s
-      JOIN districts d ON d.id = s.district_id
-      LEFT JOIN LATERAL (
-        SELECT c2.source_doc_id
-        FROM contracts c2
-        WHERE c2.district_id = s.district_id
-          AND c2.bargaining_unit = s.bargaining_unit
-        ORDER BY c2.effective_end DESC NULLS LAST
-        LIMIT 1
-      ) lc ON true
-      LEFT JOIN source_documents sd ON COALESCE(s.source_doc_id, lc.source_doc_id) = sd.id
-      LEFT JOIN il_district_fte fte
-        ON fte.state_district_id = d.state_district_id
-        AND fte.school_year = s.from_year
-      LEFT JOIN tss_annual tss
-        ON tss.state_district_id = d.state_district_id
-        AND tss.school_year = s.from_year AND tss.state = 'IL'
-      LEFT JOIN il_eis_district eis
-        ON eis.state_district_id = d.state_district_id
-        AND eis.school_year = s.from_year
-      LEFT JOIN il_eis_district eis_prev
-        ON eis_prev.state_district_id = d.state_district_id
-        AND eis_prev.school_year =
-          (CAST(LEFT(s.from_year, 4) AS INT) - 1)::TEXT
-          || '-' ||
-          RIGHT(CAST(LEFT(s.from_year, 4) AS INT)::TEXT, 2)
-      WHERE s.district_id = ${districtId}
-        AND s.bargaining_unit = ${unit}
-      ORDER BY s.from_year DESC
-    `);
-
-    // Which bargaining units does this district have? Drives the unit selector.
-    // Each unit (CBA) is a distinct employee group, so the selector lists every
-    // unit that has EITHER a contract or settlements — a unit with a CBA but no
-    // settlement history must still be selectable. `n` is the settlement count
-    // (0 for contract-only units). Teachers is ordered first so it is the default.
-    const unitRows = await db.execute(sql`
-      WITH units AS (
-        SELECT bargaining_unit FROM settlements
-        WHERE district_id = ${districtId} AND bargaining_unit IS NOT NULL
-        UNION
-        SELECT bargaining_unit FROM contracts
-        WHERE district_id = ${districtId} AND bargaining_unit IS NOT NULL
-      )
-      SELECT u.bargaining_unit,
-             (SELECT COUNT(*)::int FROM settlements s
-              WHERE s.district_id = ${districtId}
-                AND s.bargaining_unit = u.bargaining_unit) AS n
-      FROM units u
-      ORDER BY (u.bargaining_unit = 'teachers') DESC, n DESC, u.bargaining_unit
-    `);
-
-    res.json({
-      settlements: rows.rows,
-      bargainingUnit: unit,
-      availableUnits: unitRows.rows,
-    });
+    res.json(await queryDistrictSettlements(districtId, unit));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Internal server error" });
@@ -494,147 +304,7 @@ router.get("/dashboard/districts/:id/salary-schedules", gate({ ownDistrict: true
 
   try {
     if (!(await isCustomerDistrict(districtId))) { res.status(404).json({ error: "District not found" }); return; }
-
-    // Units that have a CBA, for the selector (teachers first).
-    const availUnits = await db.execute(sql`
-      SELECT bargaining_unit FROM contracts
-      WHERE district_id = ${districtId} AND bargaining_unit IS NOT NULL
-      GROUP BY bargaining_unit
-      ORDER BY (bargaining_unit = 'teachers') DESC, bargaining_unit
-    `);
-    const availableUnits = (availUnits.rows as { bargaining_unit: string }[]).map((r) => r.bargaining_unit);
-
-    // Most recent (district, unit) contract that actually has *display-quality*
-    // schedules. Schedules flagged with an implausible salary magnitude (e.g. a
-    // stipend/differential table mis-parsed as a base grid) are withheld from
-    // the customer view — they remain in the DB for the human-review queue.
-    const targetRows = await db.execute(sql`
-      SELECT s.contract_id
-      FROM contract_salary_schedules s
-      JOIN contracts c ON c.id = s.contract_id
-      WHERE c.district_id = ${districtId} AND c.bargaining_unit = ${unit}
-        AND (s.review_reason IS NULL
-             OR s.review_reason NOT LIKE '%implausible_salary_magnitude%')
-      ORDER BY c.effective_start DESC NULLS LAST, c.id DESC
-      LIMIT 1
-    `);
-    if (!targetRows.rows.length) {
-      res.json({ bargainingUnit: unit, contractId: null, schedules: [], jobFamilies: [], schoolYears: [], summary: null, availableUnits });
-      return;
-    }
-    const contractId = Number((targetRows.rows[0] as { contract_id: number | string }).contract_id);
-
-    // Same implausible-magnitude exclusion as targetRows: a single contract may
-    // hold both good grids and a mis-parsed stipend table, so withhold the bad
-    // ones here too (they stay in the DB for the human-review queue).
-    const schedRows = await db.execute(sql`
-      SELECT s.id, s.schedule_name, s.school_year, s.start_year, s.schedule_type,
-             s.lane_labels, s.step_count, s.lane_count, s.page_start, s.page_end,
-             s.min_salary, s.max_salary, s.confidence, s.needs_review,
-             s.review_reason, s.extraction_method,
-             sd.source_url
-      FROM contract_salary_schedules s
-      LEFT JOIN source_documents sd ON sd.id = s.source_doc_id
-      WHERE s.contract_id = ${contractId}
-        AND (s.review_reason IS NULL
-             OR s.review_reason NOT LIKE '%implausible_salary_magnitude%')
-      ORDER BY s.schedule_name, s.start_year NULLS LAST, s.school_year
-    `);
-
-    // All cells for those schedules, fetched via the contract join (no IN list).
-    const cellRows = await db.execute(sql`
-      SELECT cell.schedule_id, cell.step_label, cell.step_order, cell.lane_label,
-             cell.lane_order, cell.salary_amount, cell.page_ref
-      FROM contract_salary_schedule_cells cell
-      JOIN contract_salary_schedules s ON s.id = cell.schedule_id
-      WHERE s.contract_id = ${contractId}
-        AND (s.review_reason IS NULL
-             OR s.review_reason NOT LIKE '%implausible_salary_magnitude%')
-      ORDER BY cell.step_order, cell.lane_order
-    `);
-
-    type CellOut = { stepLabel: string; stepOrder: number; laneLabel: string | null; laneOrder: number; salary: number; pageRef: number | null };
-    const cellsBySched = new Map<number, CellOut[]>();
-    for (const r of cellRows.rows as Array<Record<string, unknown>>) {
-      const sid = Number(r.schedule_id);
-      const arr = cellsBySched.get(sid) ?? [];
-      arr.push({
-        stepLabel: String(r.step_label),
-        stepOrder: Number(r.step_order),
-        laneLabel: r.lane_label == null ? null : String(r.lane_label),
-        laneOrder: Number(r.lane_order),
-        salary: Number(r.salary_amount),
-        pageRef: r.page_ref == null ? null : Number(r.page_ref),
-      });
-      cellsBySched.set(sid, arr);
-    }
-
-    const schedules = (schedRows.rows as Array<Record<string, unknown>>).map((s) => {
-      const id = Number(s.id);
-      const laneLabels = (s.lane_labels as string[] | null) ?? null;
-      // laneKind tells the UI how to render columns WITHOUT assuming education
-      // lanes: 'education' only when labels look like BA/MA/BS/MS degree lanes,
-      // 'columns' for any other multi-column grid (e.g. custodial job classes),
-      // null for single-column / no-lane schedules. Never show BA/MA chrome for
-      // a non-education unit.
-      const laneKind: "education" | "columns" | null =
-        laneLabels && laneLabels.length
-          ? (laneLabels.some((l) => /^\s*(BA|MA|BS|MS|B\.A|M\.A)\b/i.test(String(l)))
-              ? "education"
-              : "columns")
-          : null;
-      return {
-        id,
-        scheduleName: String(s.schedule_name),
-        schoolYear: String(s.school_year),
-        startYear: s.start_year == null ? null : Number(s.start_year),
-        scheduleType: String(s.schedule_type),
-        laneLabels,
-        laneKind,
-        stepCount: s.step_count == null ? null : Number(s.step_count),
-        laneCount: s.lane_count == null ? null : Number(s.lane_count),
-        pageStart: s.page_start == null ? null : Number(s.page_start),
-        pageEnd: s.page_end == null ? null : Number(s.page_end),
-        minSalary: s.min_salary == null ? null : Number(s.min_salary),
-        maxSalary: s.max_salary == null ? null : Number(s.max_salary),
-        confidence: s.confidence == null ? null : Number(s.confidence),
-        needsReview: Boolean(s.needs_review),
-        reviewReason: (s.review_reason as string | null) ?? null,
-        extractionMethod: (s.extraction_method as string | null) ?? null,
-        sourceUrl: (s.source_url as string | null) ?? null,
-        cells: cellsBySched.get(id) ?? [],
-      };
-    });
-
-    const jobFamilies = [...new Set(schedules.map((s) => s.scheduleName))];
-    const schoolYears = [...new Set(schedules.map((s) => s.schoolYear))].sort();
-
-    // Derived scalar anchors for the default job family's latest year.
-    const defaultFamily = jobFamilies.includes("Teachers") ? "Teachers" : jobFamilies[0];
-    const fam = schedules
-      .filter((s) => s.scheduleName === defaultFamily)
-      .sort((a, b) => (b.startYear ?? 0) - (a.startYear ?? 0));
-    const latest = fam[0] ?? null;
-    let summary: {
-      scheduleName: string; schoolYear: string;
-      baseSalary: number | null; maBaseSalary: number | null; maxSalary: number | null;
-    } | null = null;
-    if (latest && latest.cells.length) {
-      const step0 = Math.min(...latest.cells.map((c) => c.stepOrder));
-      const baCell =
-        latest.cells.find((c) => c.stepOrder === step0 && /^BA\b/i.test(c.laneLabel ?? "")) ??
-        latest.cells.find((c) => c.stepOrder === step0 && c.laneOrder === 0);
-      const maCell = latest.cells.find((c) => c.stepOrder === step0 && /^MA\b/i.test(c.laneLabel ?? ""));
-      summary = {
-        scheduleName: defaultFamily,
-        schoolYear: latest.schoolYear,
-        baseSalary: baCell ? baCell.salary : null,
-        maBaseSalary: maCell ? maCell.salary : null,
-        maxSalary: latest.maxSalary,
-      };
-    }
-
-    res.json({ bargainingUnit: unit, contractId, schedules, jobFamilies, schoolYears, summary, availableUnits });
+    res.json(await queryDistrictSalarySchedules(districtId, unit));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Internal server error" });
