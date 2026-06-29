@@ -366,3 +366,64 @@ describe("GET /api/dashboard/conversations/:id", () => {
     expect(res.status).toBe(400);
   });
 });
+
+// Prompt caching: the engine marks the static system+tools prefix with an
+// ephemeral cache breakpoint to cut input cost, and falls back cleanly to the
+// uncached request shape if the upstream proxy rejects cache_control (HTTP 400).
+// NOTE: the 400-fallback test latches the engine's process-level caching flag
+// off, so it is intentionally the LAST suite in this file.
+describe("POST /api/dashboard/ask — prompt caching", () => {
+  it("marks the system prompt with an ephemeral cache breakpoint on tool-bearing turns", async () => {
+    sessionUserId = 1010;
+    messagesStream.mockReturnValueOnce(
+      finalTextStream("The median teacher raise was 3.5% in 2024-25."),
+    );
+    const res = await request(app)
+      .post("/api/dashboard/ask")
+      .send({ question: "What's the median teacher raise?" });
+    expect(res.status).toBe(200);
+    expect(messagesStream).toHaveBeenCalledTimes(1);
+    const params = messagesStream.mock.calls[0][0] as {
+      system: Array<{ type: string; text: string; cache_control?: unknown }>;
+      tools?: unknown[];
+    };
+    expect(Array.isArray(params.system)).toBe(true);
+    expect(params.system[0]).toMatchObject({
+      type: "text",
+      cache_control: { type: "ephemeral" },
+    });
+    // Tools are present on this turn, so the cached prefix is tools + system.
+    expect(Array.isArray(params.tools)).toBe(true);
+  });
+
+  it("falls back to an uncached request when the proxy rejects cache_control (400)", async () => {
+    sessionUserId = 1011;
+    const badRequestStream = () => ({
+      on() {
+        return this;
+      },
+      finalMessage: async () => {
+        const err = new Error("cache_control not supported") as Error & {
+          status?: number;
+        };
+        err.status = 400;
+        throw err;
+      },
+    });
+    messagesStream
+      .mockReturnValueOnce(badRequestStream())
+      .mockReturnValueOnce(
+        finalTextStream("The median teacher raise was 3.5% in 2024-25."),
+      );
+    const res = await request(app)
+      .post("/api/dashboard/ask")
+      .send({ question: "What's the median teacher raise?" });
+    expect(res.status).toBe(200);
+    const { answer } = parseSse(res.text);
+    expect(answer).toMatch(/3\.5%/);
+    // First attempt carried the cache breakpoint; the retry dropped it.
+    expect(messagesStream).toHaveBeenCalledTimes(2);
+    expect(Array.isArray(messagesStream.mock.calls[0][0].system)).toBe(true);
+    expect(typeof messagesStream.mock.calls[1][0].system).toBe("string");
+  });
+});

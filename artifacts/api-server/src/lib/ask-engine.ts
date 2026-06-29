@@ -41,6 +41,45 @@ const MAX_HISTORY_MESSAGES = 10; // prior turns (user+assistant) carried as cont
 const MAX_TOOL_RESULT_CHARS = 12_000; // cap serialized rows handed back to model
 const FALLBACK_ANSWER = "I couldn't find an answer to that question.";
 
+// --- Prompt caching --------------------------------------------------------
+// The system prompt + the (static) tool definitions are ~4.7k identical input
+// tokens re-sent on every model round-trip (up to MAX_ROUNDS per question) and
+// on back-to-back questions. Anthropic prompt caching stores that prefix and
+// re-reads it at ~1/10th the input price. The cache is matched in the order
+// tools -> system -> messages, so a single ephemeral breakpoint on the system
+// block caches the whole tools+system prefix. (~5 min TTL, so the win lands on
+// a question's own round-trips and rapid follow-ups.) Cached only matters for
+// cost; answers are unchanged.
+//
+// `promptCachingEnabled` is a process-level safety latch: if the upstream proxy
+// ever rejects the cache_control field with a 400, we disable it and fall back
+// to the plain (uncached) request shape for the rest of the process rather than
+// failing the assistant.
+let promptCachingEnabled = true;
+
+// The Anthropic SDK is imported as a type only, so detect a request-validation
+// rejection (HTTP 400) by shape rather than `instanceof`.
+function isBadRequest(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { status?: number }).status === 400
+  );
+}
+
+// Build the `system` field: an array carrying an ephemeral cache breakpoint when
+// caching is on (caches the tools+system prefix), or the plain string otherwise.
+function buildSystem(useCache: boolean): string | Anthropic.TextBlockParam[] {
+  if (!useCache) return SYSTEM_PROMPT;
+  return [
+    {
+      type: "text",
+      text: SYSTEM_PROMPT,
+      cache_control: { type: "ephemeral" },
+    },
+  ];
+}
+
 export type ResultPathMode = "dashboard" | "firm";
 
 // Per-user (IP-fallback) rate limiter for the Ask endpoints. Each route gets its
@@ -317,8 +356,10 @@ export async function handleAskRequest(
   ];
   const collected: AskResult[] = [];
   const toolsUsed: string[] = [];
-  let totalIn = 0;
+  let totalIn = 0; // uncached input tokens (billed at full price)
   let totalOut = 0;
+  let totalCacheCreate = 0; // tokens written to the cache (first use of a prefix)
+  let totalCacheRead = 0; // tokens read from the cache (~1/10th input price)
   let toolCallCount = 0;
 
   const addResults = (results: AskResult[]) => {
@@ -374,6 +415,9 @@ export async function handleAskRequest(
         toolCalls: toolCallCount,
         inputTokens: totalIn,
         outputTokens: totalOut,
+        cacheCreateTokens: totalCacheCreate,
+        cacheReadTokens: totalCacheRead,
+        promptCachingEnabled,
         latencyMs: Date.now() - started,
         resultCount: collected.length,
         questionLen: question.length,
@@ -390,29 +434,66 @@ export async function handleAskRequest(
   const streamTurn = async (
     withTools: boolean,
   ): Promise<Anthropic.Message> => {
-    const ms = anthropic.messages.stream(
-      {
-        model: MODEL,
-        max_tokens: MAX_TOKENS,
-        system: SYSTEM_PROMPT,
-        // Drop tools once the budget is spent so the model is forced to answer
-        // from what it already has.
-        ...(withTools ? { tools: ASK_TOOL_DEFS as Anthropic.Tool[] } : {}),
-        messages,
-      },
-      // Abort the in-flight request if the client disconnects so we stop
-      // consuming (and paying for) model output nobody will see.
-      { signal: abortController.signal },
-    );
-    // A no-op error listener keeps an unhandled 'error' event from crashing the
-    // process; the rejection still surfaces via finalMessage().
-    ms.on("error", () => {});
-    ms.on("text", (delta) => {
-      if (delta) send({ type: "token", text: delta });
-    });
-    const msg = await ms.finalMessage();
+    // One streamed attempt. `useCache` toggles the ephemeral cache breakpoint on
+    // the system+tools prefix. A request-validation 400 (e.g. the proxy rejects
+    // cache_control) lands before any token is streamed, so the caller can
+    // safely retry once without the cache fields.
+    const streamOnce = async (useCache: boolean): Promise<Anthropic.Message> => {
+      const ms = anthropic.messages.stream(
+        {
+          model: MODEL,
+          max_tokens: MAX_TOKENS,
+          system: buildSystem(useCache),
+          // Drop tools once the budget is spent so the model is forced to answer
+          // from what it already has.
+          ...(withTools ? { tools: ASK_TOOL_DEFS as Anthropic.Tool[] } : {}),
+          messages,
+        },
+        // Abort the in-flight request if the client disconnects so we stop
+        // consuming (and paying for) model output nobody will see.
+        { signal: abortController.signal },
+      );
+      // A no-op error listener keeps an unhandled 'error' event from crashing
+      // the process; the rejection still surfaces via finalMessage().
+      ms.on("error", () => {});
+      ms.on("text", (delta) => {
+        if (delta) send({ type: "token", text: delta });
+      });
+      return ms.finalMessage();
+    };
+
+    // Only the tools+system prefix (withTools turns) is large and stable enough
+    // to cache; the forced final answer turn is system-only and below the cache
+    // minimum, so skip the breakpoint there. Snapshot the decision locally so a
+    // *concurrent* request that latches caching off can't make THIS in-flight
+    // request skip its own safe retry.
+    const attemptedCache = promptCachingEnabled && withTools;
+    let msg: Anthropic.Message;
+    try {
+      msg = await streamOnce(attemptedCache);
+    } catch (err) {
+      // A cache_control rejection is a request-validation 400 that lands before
+      // any token streams, so we can latch caching off and retry once with the
+      // plain shape so the assistant still answers. Guard on !streamStarted so
+      // we never re-stream tokens the client already saw, and on attemptedCache
+      // so we only retry a turn that actually used the cache fields. Any other
+      // failure (or a second failure) propagates to the caller's 502 handling.
+      if (attemptedCache && !streamStarted && !clientGone && isBadRequest(err)) {
+        promptCachingEnabled = false;
+        logger.warn(
+          { err, mode: resultPathMode },
+          "ask: prompt caching rejected (HTTP 400); disabling and retrying without it",
+        );
+        msg = await streamOnce(false);
+      } else {
+        throw err;
+      }
+    }
+
     totalIn += msg.usage.input_tokens;
     totalOut += msg.usage.output_tokens;
+    totalCacheCreate += msg.usage.cache_creation_input_tokens ?? 0;
+    totalCacheRead += msg.usage.cache_read_input_tokens ?? 0;
     return msg;
   };
 
