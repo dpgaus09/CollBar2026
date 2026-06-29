@@ -54,6 +54,15 @@ ask-engine buildSystem: process-level latch + one-shot retry-without-cache on a
 synth system prompts are tiny (~150 tokens), below Anthropic's min cacheable
 prefix (1024 opus / 2048 haiku), so real cache writes/reads only materialize if
 those prompts grow — the mechanism is correct and degrades cleanly regardless.
+**VERIFIED (prod, 2026-06):** no cache lands — the "clause synthesis prompt-cache
+usage" log line (only fires when cache_creation/cache_read>0) never appears.
+The breakpoint can only cache the system prefix; the bulk input (retrieved
+clauses) is in the user message AFTER the breakpoint and varies per query, so
+there's no large stable prefix to cache. DECISION: accept negligible per-call
+savings — identical-request reuse is already covered by the in-memory
+`responseCache` (fast ~110ms clause-compare responses in prod logs are cache
+hits; a real model call took ~7.6s). Leave the mechanism in place (harmless,
+auto-realizes a win if the prompts ever grow). Don't pad prompts to force it.
 
 **Response-cache test gotcha:** the in-memory `responseCache` keys on the raw
 query STRING, so a test asserting the model was called must use a query distinct

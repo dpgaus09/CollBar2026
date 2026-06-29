@@ -132,6 +132,19 @@ function cacheSet(key: string, value: unknown): void {
 // ever rejects the cache_control field with a 400, we disable it and fall back
 // to the plain (uncached) request shape for the rest of the process rather than
 // failing synthesis.
+//
+// VERIFIED (prod): no cache currently lands. The breakpoint can only cache the
+// system prefix (cache order is tools -> system -> messages; the bulk input —
+// the retrieved clauses — lives in the user message AFTER the breakpoint and
+// varies per query, so it can never form a stable cacheable prefix). The two
+// SYNTH_SYSTEM prompts are ~150 tokens, far below Anthropic's minimum cacheable
+// prefix (1024 opus / 2048 haiku), so cache_creation/cache_read stay 0 and the
+// "clause synthesis prompt-cache usage" line below never fires in production.
+// DECISION: accept the negligible per-call savings — identical-request reuse is
+// already covered by the in-memory responseCache (it serves repeats with zero
+// model calls). The mechanism is left in place because it is harmless, degrades
+// cleanly, and auto-realizes a real win if these synth prompts ever grow past
+// the minimum cacheable size.
 let promptCachingEnabled = true;
 
 // The Anthropic SDK is imported as a type only, so detect a request-validation
