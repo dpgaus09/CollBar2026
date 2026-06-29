@@ -44,3 +44,19 @@ auto-firing query.
 makes `mock.calls[0][0]` fail `tsc` (calls typed as empty tuple) even though the
 test passes at runtime. Give the mock impl a typed param (e.g.
 `vi.fn(async (_args: { messages: unknown }) => ...)`) when asserting on call args.
+Then to read OTHER fields off that arg (e.g. `system`) cast through `unknown`
+first (`as unknown as {...}`) or `tsc` rejects the non-overlapping conversion.
+
+**Prompt caching:** clause-search/compare synthesis sends its static system
+prompt with an ephemeral `cache_control` breakpoint (same proven pattern as
+ask-engine buildSystem: process-level latch + one-shot retry-without-cache on a
+400). `msg.usage` may be absent (mocked client) → coalesce `?.…?? 0`. NOTE the
+synth system prompts are tiny (~150 tokens), below Anthropic's min cacheable
+prefix (1024 opus / 2048 haiku), so real cache writes/reads only materialize if
+those prompts grow — the mechanism is correct and degrades cleanly regardless.
+
+**Response-cache test gotcha:** the in-memory `responseCache` keys on the raw
+query STRING, so a test asserting the model was called must use a query distinct
+from every prior test's (else it's served from cache, 0 model calls). Stemming
+makes order/plurals equivalent in tsquery, so "sick day" / "days sick" both match
+"sick days per year" yet are distinct cache keys.

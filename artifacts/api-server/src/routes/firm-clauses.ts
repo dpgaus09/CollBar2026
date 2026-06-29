@@ -119,6 +119,41 @@ function cacheSet(key: string, value: unknown): void {
   responseCache.set(key, { expires: Date.now() + CACHE_TTL_MS, value });
 }
 
+// --- Prompt caching --------------------------------------------------------
+// The clause-search / clause-compare synthesis calls re-send a fixed, static
+// system prompt on every request. Anthropic prompt caching stores that prefix
+// and re-reads it at ~1/10th the input price — the exact technique already
+// proven on the Ask engine (see ask-engine.ts buildSystem). The cache is
+// matched in the order system -> messages, so a single ephemeral breakpoint on
+// the system block caches the whole static prefix. Caching only affects cost;
+// the synthesized answer is unchanged.
+//
+// `promptCachingEnabled` is a process-level safety latch: if the upstream proxy
+// ever rejects the cache_control field with a 400, we disable it and fall back
+// to the plain (uncached) request shape for the rest of the process rather than
+// failing synthesis.
+let promptCachingEnabled = true;
+
+// The Anthropic SDK is imported as a type only, so detect a request-validation
+// rejection (HTTP 400) by shape rather than `instanceof`.
+function isBadRequest(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { status?: number }).status === 400
+  );
+}
+
+// Build the `system` field: an array carrying an ephemeral cache breakpoint when
+// caching is on (caches the static system prefix), or the plain string otherwise.
+function buildSynthSystem(
+  system: string,
+  useCache: boolean,
+): string | Anthropic.TextBlockParam[] {
+  if (!useCache) return system;
+  return [{ type: "text", text: system, cache_control: { type: "ephemeral" } }];
+}
+
 // Best-effort grounded synthesis over the retrieved clauses. Never throws;
 // returns null when the model is unavailable so the verbatim clauses (the real
 // deliverable) are always returned. temperature/top_p/top_k are intentionally
@@ -130,16 +165,55 @@ async function synthesize(
 ): Promise<string | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SYNTH_TIMEOUT_MS);
-  try {
-    const msg = await anthropic.messages.create(
+  // Snapshot the latch locally so a *concurrent* request that turns caching off
+  // can't make THIS in-flight request skip its own safe retry.
+  const attemptedCache = promptCachingEnabled;
+  const createOnce = (useCache: boolean) =>
+    anthropic.messages.create(
       {
         model,
         max_tokens: SYNTH_MAX_TOKENS,
-        system,
+        system: buildSynthSystem(system, useCache),
         messages: [{ role: "user", content: userContent }],
       },
       { signal: controller.signal },
     );
+  try {
+    let msg: Anthropic.Message;
+    try {
+      msg = await createOnce(attemptedCache);
+    } catch (err) {
+      // A cache_control rejection is a request-validation 400; latch caching off
+      // and retry once with the plain shape so synthesis still succeeds. Any
+      // other failure (or a second failure) propagates to the catch below, which
+      // degrades to synthesis=null.
+      if (attemptedCache && isBadRequest(err)) {
+        promptCachingEnabled = false;
+        logger.warn(
+          { err, model },
+          "clause synthesis: prompt caching rejected (HTTP 400); disabling and retrying without it",
+        );
+        msg = await createOnce(false);
+      } else {
+        throw err;
+      }
+    }
+    // usage may be absent (e.g. mocked clients); coalesce. When caching is
+    // active, input_tokens is only the UNcached portion, so log the cache counts
+    // separately to confirm cache reads land on rapid repeat searches/compares.
+    const cacheCreate = msg.usage?.cache_creation_input_tokens ?? 0;
+    const cacheRead = msg.usage?.cache_read_input_tokens ?? 0;
+    if (cacheCreate > 0 || cacheRead > 0) {
+      logger.info(
+        {
+          model,
+          inputTokens: msg.usage?.input_tokens ?? 0,
+          cacheCreate,
+          cacheRead,
+        },
+        "clause synthesis prompt-cache usage",
+      );
+    }
     const text = msg.content
       .filter((b): b is Anthropic.TextBlock => b.type === "text")
       .map((b) => b.text)

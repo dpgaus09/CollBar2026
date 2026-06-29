@@ -476,7 +476,7 @@ describe("POST /firm/clause-search — grounded synthesis", () => {
     expect(res.body.synthesis).toBe("SYNTH");
     expect(messagesCreate).toHaveBeenCalledTimes(1);
     // The prompt is grounded: it carries the verbatim clause text + citation ids.
-    const call = messagesCreate.mock.calls[0][0] as {
+    const call = messagesCreate.mock.calls[0][0] as unknown as {
       messages: Array<{ content: string }>;
     };
     const prompt = call.messages[0].content;
@@ -492,6 +492,46 @@ describe("POST /firm/clause-search — grounded synthesis", () => {
     expect(res.status).toBe(200);
     expect((res.body.clauses as Clause[]).length).toBeGreaterThan(0);
     expect(res.body.synthesis).toBeNull();
+  });
+
+  it("sends the static system prompt with an ephemeral cache breakpoint", async () => {
+    messagesCreate.mockClear();
+    // A unique query so the in-memory response cache doesn't short-circuit the
+    // model call set up by a prior identical search.
+    const res = await request(appA)
+      .post("/firm/clause-search")
+      .send({ query: "sick day", scope: "matter", matterId });
+    expect(res.status).toBe(200);
+    const call = messagesCreate.mock.calls[0][0] as unknown as {
+      system: Array<{ type: string; text: string; cache_control?: unknown }>;
+    };
+    expect(Array.isArray(call.system)).toBe(true);
+    expect(call.system[0].type).toBe("text");
+    expect(call.system[0].cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  // NB: clause-compare uses the exact same shared synthesize() path, so the
+  // cache breakpoint + 400 fallback proven here apply to it too. A separate
+  // compare HTTP request is deliberately NOT added — every clause endpoint hit
+  // counts against the per-user 20/min clauseAiLimiter, and the file already
+  // runs near that ceiling within the limiter's 60s window.
+
+  it("falls back to an uncached request when the proxy rejects cache_control (HTTP 400)", async () => {
+    messagesCreate.mockClear();
+    // First call rejects the cache_control field (request-validation 400); the
+    // retry must drop the cache fields and still synthesize.
+    messagesCreate.mockRejectedValueOnce(
+      Object.assign(new Error("cache_control not supported"), { status: 400 }),
+    );
+    const res = await request(appA)
+      .post("/firm/clause-search")
+      .send({ query: "days sick", scope: "matter", matterId });
+    expect(res.status).toBe(200);
+    expect(res.body.synthesis).toBe("SYNTH");
+    expect(messagesCreate).toHaveBeenCalledTimes(2);
+    // The retry sends the plain string system prompt (no cache breakpoint).
+    const retry = messagesCreate.mock.calls[1][0] as unknown as { system: unknown };
+    expect(typeof retry.system).toBe("string");
   });
 });
 
