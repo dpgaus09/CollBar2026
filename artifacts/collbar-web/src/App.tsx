@@ -51,7 +51,7 @@ function Home() {
           <div className="w-2 h-2 rounded-full bg-blue-500" />
         </div>
         <p className="text-slate-400 text-sm font-mono">
-          Collective Bargaining Database
+          Collective Bargaining Intelligence
         </p>
         <p className="text-slate-500 text-xs mt-6">District Dashboard</p>
         <div className="mt-4 flex items-center justify-center gap-3">
@@ -63,8 +63,8 @@ function Home() {
           </a>
         </div>
         <p className="mx-auto mt-6 max-w-sm text-sm leading-relaxed text-slate-400">
-          Districts like yours settled their teacher contracts this spring. See
-          exactly what they paid.
+          Districts like yours settled their contracts this spring. See exactly
+          what they agreed to.
         </p>
       </div>
     </main>
