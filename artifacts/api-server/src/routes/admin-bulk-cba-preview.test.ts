@@ -215,4 +215,118 @@ describe("Bulk CBA preview scan-job lifecycle", () => {
     expect(res.status).toBe(400);
     expect(String(res.body.error)).toMatch(/folder id or url is required/i);
   });
+
+  it("prunes a finished scan after the TTL so its status then returns 404", async () => {
+    vi.mocked(listFolderTree).mockResolvedValue({ files: treeFiles, truncated: false });
+    vi.mocked(downloadDriveFile).mockResolvedValue(Buffer.from(CSV, "utf8"));
+
+    const startRes = await request(app)
+      .post("/admin/bulk-cba/preview/start")
+      .send({ folderId: FOLDER_ID });
+    const scanId = String(startRes.body.scanId);
+    const done = await pollUntilDone(scanId);
+    expect(done.body.status).toBe("done");
+
+    // The job is reachable right after finishing.
+    const fresh = await request(app).get(`/admin/bulk-cba/preview/status?scanId=${scanId}`);
+    expect(fresh.status).toBe(200);
+
+    // Jump Date.now() far past the TTL (currently 30m). Only Date.now is
+    // stubbed, so setTimeout-based I/O keeps working; the next poll prunes the
+    // idle job and 404s. Two hours comfortably exceeds BULK_SCAN_TTL_MS.
+    const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
+    const dateSpy = vi.spyOn(Date, "now").mockReturnValue(Date.now() + TWO_HOURS_MS);
+    try {
+      const expired = await request(app).get(
+        `/admin/bulk-cba/preview/status?scanId=${scanId}`,
+      );
+      expect(expired.status).toBe(404);
+      expect(String(expired.body.error)).toMatch(/no folder scan found|expired/i);
+    } finally {
+      dateSpy.mockRestore();
+    }
+  });
+
+  it("transitions to status 'error' (with a message) when the scan throws unexpectedly", async () => {
+    // listFolderTree resolves a malformed tree (no `files`), so the post-listing
+    // step (tree.files.filter) throws an uncaught error that lands in the job's
+    // outer catch. This is distinct from a Drive listing failure, which the scan
+    // catches and returns as a done-result 502 (covered above).
+    vi.mocked(listFolderTree).mockResolvedValue({ truncated: false } as unknown as {
+      files: DriveFile[];
+      truncated: boolean;
+    });
+
+    const startRes = await request(app)
+      .post("/admin/bulk-cba/preview/start")
+      .send({ folderId: FOLDER_ID });
+    expect(startRes.status).toBe(200);
+    const scanId = String(startRes.body.scanId);
+
+    const done = await pollUntilDone(scanId);
+    expect(done.body.status).toBe("error");
+    expect(String(done.body.error ?? "").length).toBeGreaterThan(0);
+    // An error job carries no finished result payload.
+    expect(done.body.result ?? null).toBeNull();
+  });
+
+  it(
+    "returns 429 once the active-scan cap is reached, and frees a slot when one finishes",
+    async () => {
+      // Each crawl hangs until we resolve it, so started scans stay 'running'
+      // and occupy the concurrency cap (BULK_SCAN_MAX_ACTIVE).
+      const resolvers: Array<(t: { files: DriveFile[]; truncated: boolean }) => void> = [];
+      vi.mocked(listFolderTree).mockReset();
+      vi.mocked(listFolderTree).mockImplementation(
+        () =>
+          new Promise<{ files: DriveFile[]; truncated: boolean }>((resolve) => {
+            resolvers.push(resolve);
+          }),
+      );
+      vi.mocked(downloadDriveFile).mockResolvedValue(Buffer.from(CSV, "utf8"));
+
+      const scanIds: string[] = [];
+      try {
+        // Start scans until the cap rejects one with 429.
+        let capRes: request.Response | undefined;
+        for (let i = 0; i < 12; i++) {
+          const r = await request(app)
+            .post("/admin/bulk-cba/preview/start")
+            .send({ folderId: FOLDER_ID });
+          if (r.status === 429) {
+            capRes = r;
+            break;
+          }
+          expect(r.status).toBe(200);
+          scanIds.push(String(r.body.scanId));
+        }
+        expect(capRes).toBeDefined();
+        expect(String(capRes!.body.error)).toMatch(/too many folder scans/i);
+        // Exactly BULK_SCAN_MAX_ACTIVE (4 in admin.ts) scans are accepted before
+        // the cap kicks in; keep this in lockstep with that constant.
+        expect(scanIds.length).toBe(4);
+
+        // Every accepted scan is still running (occupying the cap).
+        for (const id of scanIds) {
+          const s = await request(app).get(`/admin/bulk-cba/preview/status?scanId=${id}`);
+          expect(s.body.status).toBe("running");
+        }
+
+        // Finish one scan to free a slot, then a new start is accepted again.
+        resolvers[0]({ files: treeFiles, truncated: false });
+        await pollUntilDone(scanIds[0]);
+        const retry = await request(app)
+          .post("/admin/bulk-cba/preview/start")
+          .send({ folderId: FOLDER_ID });
+        expect(retry.status).toBe(200);
+        scanIds.push(String(retry.body.scanId));
+      } finally {
+        // Resolve all crawls and drain so no 'running' jobs leak to other tests,
+        // even if an assertion above failed first.
+        for (const resolve of resolvers) resolve({ files: treeFiles, truncated: false });
+        for (const id of scanIds) await pollUntilDone(id);
+      }
+    },
+    15000,
+  );
 });
