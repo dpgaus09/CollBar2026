@@ -466,15 +466,21 @@ async function listFolderChildren(
 /**
  * Recursively list every non-folder file under `rootFolderId`, recording each
  * file's ancestor folder names (parentPath). Bounded by MAX_TREE_FILES and
- * MAX_TREE_DEPTH so a pathological tree cannot run unbounded.
+ * MAX_TREE_DEPTH so a pathological tree cannot run unbounded. The limits are
+ * injectable (`opts.maxFiles` / `opts.maxDepth`) so tests can trip the caps
+ * without constructing tens of thousands of fake files; production callers omit
+ * them and get the module defaults.
  */
 export async function listFolderTree(
   rootFolderId: string,
   onProgress?: (p: FolderScanProgress) => void,
+  opts: { maxFiles?: number; maxDepth?: number } = {},
 ): Promise<DriveFolderTree> {
   if (!DRIVE_ID_RE.test(rootFolderId)) {
     throw new Error("Invalid Drive folder id");
   }
+  const maxFiles = opts.maxFiles ?? MAX_TREE_FILES;
+  const maxDepth = opts.maxDepth ?? MAX_TREE_DEPTH;
   const connectors = new ReplitConnectors();
   const files: DriveFile[] = [];
   let truncated = false;
@@ -492,7 +498,7 @@ export async function listFolderTree(
   let foldersKnown = 1; // the root folder itself
   const report = () =>
     onProgress?.({ foldersScanned, foldersKnown, filesFound: files.length, depth });
-  while (level.length && depth <= MAX_TREE_DEPTH && !truncated) {
+  while (level.length && depth <= maxDepth && !truncated) {
     // Bounded concurrency caps in-flight requests; the actual request RATE is
     // governed by the proxy rate-limit gate inside driveProxy, so a wide level
     // can't burst past the connector proxy's ~10 RPS-per-repl cap.
@@ -512,7 +518,7 @@ export async function listFolderTree(
           nextLevel.push({ id: c.id, path: [...path, c.name] });
           continue;
         }
-        if (files.length >= MAX_TREE_FILES) {
+        if (files.length >= maxFiles) {
           truncated = true;
           break;
         }

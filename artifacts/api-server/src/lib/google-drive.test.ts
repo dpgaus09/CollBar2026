@@ -213,3 +213,32 @@ describe("listFolderTree onProgress", () => {
     expect(last.filesFound).toBe(4);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The crawl is bounded by a file cap (MAX_TREE_FILES) and a depth cap
+// (MAX_TREE_DEPTH) so a pathological Drive folder can't run unbounded — and,
+// critically, must SIGNAL when it stops early (`truncated: true`) so a giant
+// import never silently drops contracts. The caps are injected here so we trip
+// them against the 4-file/3-level mock tree instead of building 20000 fake
+// files.
+// ---------------------------------------------------------------------------
+describe("listFolderTree limits", () => {
+  it("stops at the file cap and reports truncation", async () => {
+    // The mock tree has 4 files; cap at 2 so the crawl must stop early.
+    const tree = await listFolderTree("rootfolder0", undefined, { maxFiles: 2 });
+
+    expect(tree.truncated).toBe(true);
+    // files.length is bounded at the cap — never more than maxFiles.
+    expect(tree.files.length).toBe(2);
+  });
+
+  it("stops at the depth cap rather than recursing unbounded", async () => {
+    // four.pdf lives at depth 2 (root -> A -> C). Capping depth at 1 must keep
+    // the crawl from descending into C, so four.pdf is never collected.
+    const tree = await listFolderTree("rootfolder0", undefined, { maxDepth: 1 });
+
+    const names = tree.files.map((f) => f.name).sort();
+    expect(names).toEqual(["one.pdf", "three.pdf", "two.pdf"]);
+    expect(names).not.toContain("four.pdf");
+  });
+});
