@@ -353,6 +353,18 @@ export interface DriveFolderTree {
   truncated: boolean;
 }
 
+/** Live progress emitted while listFolderTree crawls a (possibly huge) tree. */
+export interface FolderScanProgress {
+  /** Folders whose immediate children have been listed so far. */
+  foldersScanned: number;
+  /** Total folders discovered so far (scanned + still-pending). */
+  foldersKnown: number;
+  /** Non-folder files collected so far. */
+  filesFound: number;
+  /** Current crawl depth (0 = root). */
+  depth: number;
+}
+
 /** Accept either a raw Drive id or a full Drive folder URL and return the id. */
 export function parseDriveFolderId(input: string): string | null {
   const s = String(input ?? "").trim();
@@ -456,7 +468,10 @@ async function listFolderChildren(
  * file's ancestor folder names (parentPath). Bounded by MAX_TREE_FILES and
  * MAX_TREE_DEPTH so a pathological tree cannot run unbounded.
  */
-export async function listFolderTree(rootFolderId: string): Promise<DriveFolderTree> {
+export async function listFolderTree(
+  rootFolderId: string,
+  onProgress?: (p: FolderScanProgress) => void,
+): Promise<DriveFolderTree> {
   if (!DRIVE_ID_RE.test(rootFolderId)) {
     throw new Error("Invalid Drive folder id");
   }
@@ -470,13 +485,23 @@ export async function listFolderTree(rootFolderId: string): Promise<DriveFolderT
   // would otherwise risk the deployment's ~300s request cap.
   let level: Array<{ id: string; path: string[] }> = [{ id: rootFolderId, path: [] }];
   let depth = 0;
+  // Live counters for the optional progress callback. A very large tree is now
+  // crawled inside a background job, so emit progress per folder listed so the
+  // admin sees movement rather than a frozen request.
+  let foldersScanned = 0;
+  let foldersKnown = 1; // the root folder itself
+  const report = () =>
+    onProgress?.({ foldersScanned, foldersKnown, filesFound: files.length, depth });
   while (level.length && depth <= MAX_TREE_DEPTH && !truncated) {
     // Bounded concurrency caps in-flight requests; the actual request RATE is
     // governed by the proxy rate-limit gate inside driveProxy, so a wide level
     // can't burst past the connector proxy's ~10 RPS-per-repl cap.
-    const childrenByFolder = await mapWithConcurrency(level, 4, (f) =>
-      listFolderChildren(connectors, f.id),
-    );
+    const childrenByFolder = await mapWithConcurrency(level, 4, async (f) => {
+      const children = await listFolderChildren(connectors, f.id);
+      foldersScanned++;
+      report();
+      return children;
+    });
     const nextLevel: Array<{ id: string; path: string[] }> = [];
     for (let i = 0; i < level.length; i++) {
       const path = level[i].path;
@@ -495,8 +520,10 @@ export async function listFolderTree(rootFolderId: string): Promise<DriveFolderT
       }
       if (truncated) break;
     }
+    foldersKnown += nextLevel.length;
     level = nextLevel;
     depth++;
+    report();
   }
   return { files, truncated };
 }

@@ -19,6 +19,7 @@ import {
   SHEET_MIME,
   DriveNotConnectedError,
   type DriveFile,
+  type FolderScanProgress,
 } from "../lib/google-drive.js";
 import {
   mapManifestColumns,
@@ -2144,71 +2145,118 @@ async function bulkReadManifest(
   }
 }
 
-// GET /admin/bulk-cba/preview?folderId=... — pure dry run, writes nothing.
-router.get(
-  "/admin/bulk-cba/preview",
-  requireAdminToken,
-  heavyAdminLimiter,
-  async (req, res) => {
-    const folderId = parseDriveFolderId(
-      String(req.query.folderId ?? req.query.folder ?? ""),
+// ---------------------------------------------------------------------------
+// Folder-scan background jobs (Task #229). Scanning a very large Drive folder
+// tree fans out one listFolderChildren proxy call per subfolder (thousands for
+// a big import), rate-limited to ~7.7 RPS, so the crawl alone can exceed the
+// deployment's ~300s request cap and time the preview out. Instead, the scan
+// runs as an in-process background job (the api-server is an always-on Reserved
+// VM, so a fire-and-forget async task survives) and the admin polls a status
+// endpoint for live progress and, when finished, the same preview payload.
+// ---------------------------------------------------------------------------
+interface BulkScanProgress {
+  foldersScanned: number;
+  foldersKnown: number;
+  filesFound: number;
+  phase: string;
+}
+interface BulkScanJob {
+  scanId: string;
+  folderId: string;
+  status: "running" | "done" | "error";
+  progress: BulkScanProgress;
+  /** Finished preview result: { httpStatus, body } mirroring the old route. */
+  result: { httpStatus: number; body: Record<string, unknown> } | null;
+  error: string | null;
+  updatedAt: number;
+}
+const bulkScanJobs = new Map<string, BulkScanJob>();
+const BULK_SCAN_TTL_MS = 30 * 60 * 1000; // forget finished/stale scans after 30m
+const BULK_SCAN_MAX_ACTIVE = 4; // cap concurrent crawls (each holds proxy budget)
+
+// Drop scans that finished or went idle long enough ago; keeps the map bounded
+// without a timer (called on each start/status request).
+function pruneBulkScans(): void {
+  const now = Date.now();
+  for (const [id, job] of bulkScanJobs) {
+    if (now - job.updatedAt > BULK_SCAN_TTL_MS) bulkScanJobs.delete(id);
+  }
+}
+
+// Run the full dry-run preview (folder crawl → manifest read → row matching)
+// and return the exact HTTP status + body the synchronous route used to send,
+// reporting live progress via the optional callback. Pure: writes nothing.
+async function scanFolderForPreview(
+  folderId: string,
+  report?: (p: Partial<BulkScanProgress>) => void,
+): Promise<{ httpStatus: number; body: Record<string, unknown> }> {
+  let tree;
+  try {
+    tree = await listFolderTree(folderId, (p: FolderScanProgress) =>
+      report?.({ ...p, phase: "listing" }),
     );
-    if (!folderId) {
-      res.status(400).json({ error: "A Google Drive folder id or URL is required" });
-      return;
+  } catch (err) {
+    if (err instanceof DriveNotConnectedError) {
+      return {
+        httpStatus: 502,
+        body: {
+          error:
+            "Google Drive is not connected. Connect it in the integrations panel and try again.",
+        },
+      };
     }
-    let tree;
-    try {
-      tree = await listFolderTree(folderId);
-    } catch (err) {
-      if (err instanceof DriveNotConnectedError) {
-        res.status(502).json({
-          error: "Google Drive is not connected. Connect it in the integrations panel and try again.",
-        });
-        return;
-      }
-      console.error("[bulk-cba] folder list failed", err);
-      res.status(502).json({ error: `Could not list the Drive folder: ${(err as Error).message}` });
-      return;
-    }
-    const pdfFiles = tree.files.filter(isPdfFile);
-    const manifest = await bulkReadManifest(tree.files);
-    if (!manifest.ok) {
-      res.json({
+    console.error("[bulk-cba] folder list failed", err);
+    return {
+      httpStatus: 502,
+      body: { error: `Could not list the Drive folder: ${(err as Error).message}` },
+    };
+  }
+  report?.({ phase: "reading-manifest" });
+  const pdfFiles = tree.files.filter(isPdfFile);
+  const manifest = await bulkReadManifest(tree.files);
+  if (!manifest.ok) {
+    return {
+      httpStatus: 200,
+      body: {
         ok: false,
         folderId,
         fileCount: pdfFiles.length,
         truncated: tree.truncated,
         error: manifest.error,
         manifestCandidates: manifest.candidates.map((f) => ({ id: f.id, name: f.name })),
-      });
-      return;
-    }
-    const grid = parseCsv(manifest.csv);
-    if (grid.length < 2) {
-      res.status(400).json({ error: "The mapping spreadsheet has no data rows." });
-      return;
-    }
-    const cols = mapManifestColumns(grid[0]);
-    if (!cols) {
-      res.status(400).json({
-        error: "The mapping spreadsheet is missing required columns. Include a file column plus an RCDTS or district-name column (bargaining_unit and school_year recommended).",
-      });
-      return;
-    }
-    const lookups = await loadDistrictLookups();
-    const { entries, unreferencedFiles } = matchEntries({
-      rows: grid.slice(1),
-      startLine: 2,
-      cols,
-      files: pdfFiles,
-      lookups,
-    });
-    const counts: Record<string, number> = {};
-    for (const e of entries) counts[e.status] = (counts[e.status] ?? 0) + 1;
-    const matched = entries.filter((e) => e.status === "matched");
-    const unmatched = entries.filter((e) => e.status !== "matched");
-    res.json({
+      },
+    };
+  }
+  const grid = parseCsv(manifest.csv);
+  if (grid.length < 2) {
+    return { httpStatus: 400, body: { error: "The mapping spreadsheet has no data rows." } };
+  }
+  const cols = mapManifestColumns(grid[0]);
+  if (!cols) {
+    return {
+      httpStatus: 400,
+      body: {
+        error:
+          "The mapping spreadsheet is missing required columns. Include a file column plus an RCDTS or district-name column (bargaining_unit and school_year recommended).",
+      },
+    };
+  }
+  report?.({ phase: "matching" });
+  const lookups = await loadDistrictLookups();
+  const { entries, unreferencedFiles } = matchEntries({
+    rows: grid.slice(1),
+    startLine: 2,
+    cols,
+    files: pdfFiles,
+    lookups,
+  });
+  const counts: Record<string, number> = {};
+  for (const e of entries) counts[e.status] = (counts[e.status] ?? 0) + 1;
+  const matched = entries.filter((e) => e.status === "matched");
+  const unmatched = entries.filter((e) => e.status !== "matched");
+  return {
+    httpStatus: 200,
+    body: {
       ok: true,
       folderId,
       fileCount: pdfFiles.length,
@@ -2225,9 +2273,89 @@ router.get(
         "Each runs salary + provisions + contract-meta via Claude Vision and is processed one at a time " +
         "on the production worker, so a full run takes time and incurs per-document API cost. " +
         "Start with a small batch to validate quality before releasing all.",
-    });
+    },
+  };
+}
+
+// POST /admin/bulk-cba/preview/start — body { folderId }. Kicks off the folder
+// scan as a background job and returns a scanId to poll. Writes nothing.
+router.post(
+  "/admin/bulk-cba/preview/start",
+  requireAdminToken,
+  heavyAdminLimiter,
+  async (req, res) => {
+    const body = (req.body ?? {}) as { folderId?: unknown; folder?: unknown };
+    const folderId = parseDriveFolderId(String(body.folderId ?? body.folder ?? ""));
+    if (!folderId) {
+      res.status(400).json({ error: "A Google Drive folder id or URL is required" });
+      return;
+    }
+    pruneBulkScans();
+    const active = [...bulkScanJobs.values()].filter((j) => j.status === "running").length;
+    if (active >= BULK_SCAN_MAX_ACTIVE) {
+      res.status(429).json({
+        error: "Too many folder scans are in progress. Wait for one to finish and try again.",
+      });
+      return;
+    }
+    const scanId = `scan-${Date.now()}-${randomBytes(6).toString("hex")}`;
+    const job: BulkScanJob = {
+      scanId,
+      folderId,
+      status: "running",
+      progress: { foldersScanned: 0, foldersKnown: 1, filesFound: 0, phase: "listing" },
+      result: null,
+      error: null,
+      updatedAt: Date.now(),
+    };
+    bulkScanJobs.set(scanId, job);
+    // Fire-and-forget: the crawl can run for minutes, well past this request.
+    void (async () => {
+      try {
+        const result = await scanFolderForPreview(folderId, (p) => {
+          job.progress = { ...job.progress, ...p };
+          job.updatedAt = Date.now();
+        });
+        job.result = result;
+        job.progress = { ...job.progress, phase: "done" };
+        job.status = "done";
+        job.updatedAt = Date.now();
+      } catch (err) {
+        job.status = "error";
+        job.error = String((err as Error).message ?? err).slice(0, 500);
+        job.updatedAt = Date.now();
+      }
+    })();
+    res.json({ ok: true, scanId });
   },
 );
+
+// GET /admin/bulk-cba/preview/status?scanId=... — poll a background folder scan.
+router.get("/admin/bulk-cba/preview/status", requireAdminToken, async (req, res) => {
+  pruneBulkScans();
+  const scanId = String(req.query.scanId ?? "");
+  const job = bulkScanJobs.get(scanId);
+  if (!job) {
+    res.status(404).json({
+      error: "No folder scan found with that id (it may have expired). Start a new preview.",
+    });
+    return;
+  }
+  if (job.status === "running") {
+    res.json({ ok: true, status: "running", progress: job.progress });
+    return;
+  }
+  if (job.status === "error") {
+    res.json({ ok: true, status: "error", progress: job.progress, error: job.error });
+    return;
+  }
+  res.json({
+    ok: true,
+    status: "done",
+    progress: job.progress,
+    result: job.result,
+  });
+});
 
 // POST /admin/bulk-cba/ingest — body { runId, entries[] } (client batches ≤25).
 router.post(

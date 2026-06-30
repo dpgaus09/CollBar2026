@@ -5545,11 +5545,26 @@ function chunkArray<T>(arr: T[], n: number): T[][] {
   return out;
 }
 
+interface BulkScanProgress {
+  foldersScanned: number;
+  foldersKnown: number;
+  filesFound: number;
+  phase: string;
+}
+
+const BULK_SCAN_PHASE_LABEL: Record<string, string> = {
+  listing: "Scanning Drive folders",
+  "reading-manifest": "Reading mapping spreadsheet",
+  matching: "Matching contracts to districts",
+  done: "Finishing up",
+};
+
 function BulkCbaImportTab() {
   const [folder, setFolder] = useState("");
   const [preview, setPreview] = useState<BulkPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [scanProgress, setScanProgress] = useState<BulkScanProgress | null>(null);
   const [ingesting, setIngesting] = useState(false);
   const [ingestProgress, setIngestProgress] = useState<{
     done: number;
@@ -5588,17 +5603,70 @@ function BulkCbaImportTab() {
     setPreviewError(null);
     setPreview(null);
     setIngestProgress(null);
+    setScanProgress({ foldersScanned: 0, foldersKnown: 1, filesFound: 0, phase: "listing" });
     try {
-      const r = await fetch(
-        apiUrl(`/api/admin/bulk-cba/preview?folderId=${encodeURIComponent(f)}`),
-        { credentials: "include" },
-      );
-      const data = await r.json();
-      if (!r.ok) setPreviewError(data.error ?? "Preview failed");
-      else setPreview(data);
+      // Start the folder scan as a background job, then poll for progress. A
+      // very large tree can take minutes to crawl — well past the deployment's
+      // ~300s single-request cap — so we never block one request on the crawl.
+      const startRes = await fetch(apiUrl("/api/admin/bulk-cba/preview/start"), {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folderId: f }),
+      });
+      const startData = await startRes.json();
+      if (!startRes.ok || !startData.scanId) {
+        setPreviewError(startData.error ?? "Could not start the folder scan");
+        return;
+      }
+      const scanId: string = startData.scanId;
+      // Poll until the scan finishes (or errors). No client timeout — the user
+      // sees live folder/file counts so a long scan reads as progress, not hang.
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 2000));
+        let statusData: {
+          status?: string;
+          progress?: BulkScanProgress;
+          error?: string;
+          result?: { httpStatus: number; body: BulkPreview & { error?: string } };
+        };
+        try {
+          const sr = await fetch(
+            apiUrl(`/api/admin/bulk-cba/preview/status?scanId=${encodeURIComponent(scanId)}`),
+            { credentials: "include" },
+          );
+          statusData = await sr.json();
+          if (!sr.ok) {
+            setPreviewError(statusData.error ?? "Lost track of the folder scan");
+            return;
+          }
+        } catch {
+          // Transient network blip while polling — keep trying.
+          continue;
+        }
+        if (statusData.progress) setScanProgress(statusData.progress);
+        if (statusData.status === "running") continue;
+        if (statusData.status === "error") {
+          setPreviewError(statusData.error ?? "Folder scan failed");
+          return;
+        }
+        // Done — the result carries the same payload the old route returned.
+        const result = statusData.result;
+        if (!result) {
+          setPreviewError("Folder scan finished without a result");
+          return;
+        }
+        if (result.httpStatus !== 200) {
+          setPreviewError(result.body?.error ?? "Preview failed");
+        } else {
+          setPreview(result.body);
+        }
+        return;
+      }
     } catch (e) {
       setPreviewError(String((e as Error).message));
     } finally {
+      setScanProgress(null);
       setPreviewLoading(false);
     }
   }
@@ -5698,9 +5766,29 @@ function BulkCbaImportTab() {
           disabled={previewLoading || !folder.trim()}
           className="px-4 py-2 rounded bg-blue-700 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed text-sm text-white transition-colors"
         >
-          {previewLoading ? "Previewing…" : "Preview"}
+          {previewLoading ? "Scanning…" : "Preview"}
         </button>
       </div>
+
+      {/* Live folder-scan progress (background job) */}
+      {previewLoading && scanProgress && (
+        <div className="rounded border border-slate-700 bg-slate-900/40 px-4 py-3 text-xs text-slate-300 space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="inline-block h-2 w-2 rounded-full bg-blue-500 animate-pulse" />
+            <span>{BULK_SCAN_PHASE_LABEL[scanProgress.phase] ?? "Scanning folder"}…</span>
+          </div>
+          {scanProgress.phase === "listing" && (
+            <div className="text-[11px] text-slate-400">
+              {scanProgress.foldersScanned} of {scanProgress.foldersKnown} folder(s) scanned ·{" "}
+              {scanProgress.filesFound} file(s) found
+            </div>
+          )}
+          <div className="text-[11px] text-slate-500">
+            Large folders can take a few minutes — this keeps running in the background, so you
+            can leave this open.
+          </div>
+        </div>
+      )}
 
       {previewError && (
         <div className="rounded border border-red-800/60 bg-red-950/20 px-4 py-3 text-xs text-red-300">

@@ -29,6 +29,17 @@ filter, a non-cba done/active job distorts the progress rollup and the retry `NO
 guard can wrongly block a needed CBA re-enqueue. `extraction_runs` has NO domain column, so
 its success check stays per-doc (acceptable: a successful cba run is what we want anyway).
 
+**Folder-scan preview is a background job, not one request.** A wide tree fans out one
+rate-limited (~7.7 RPS) `listFolderChildren` proxy call per subfolder, so crawling thousands
+can exceed the deployment's ~300s request cap. The preview therefore runs as an in-process
+fire-and-forget job (`POST .../preview/start` → `scanId`, poll `GET .../preview/status`); the
+finished `result` is `{httpStatus, body}` mirroring the old synchronous payload exactly. The old
+synchronous `GET .../preview` route was removed. **Why:** the always-on Reserved VM keeps the
+async task alive between requests (a forked/detached child would NOT survive — see
+replit-bg-processes); the job store is an in-memory Map (TTL 30m, lost on restart, fine for a
+re-runnable dry run). Ingest never re-scans (client sends matched entries already batched ≤25),
+so only preview needed this.
+
 **Resumability.** Same-run resume keys on the ledger `(run_id, drive_file_id)` + Drive md5;
 a new runId relies on `source_documents` content dedup + `enqueueJob` active-job dedup. Any
 failure AFTER the source doc is created records a `failed` ledger row that still carries the
