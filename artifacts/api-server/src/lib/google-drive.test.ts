@@ -1,5 +1,58 @@
 import { describe, it, expect, vi } from "vitest";
-import { callWithRateLimitRetry, parseRetryAfterMs } from "./google-drive.js";
+import {
+  callWithRateLimitRetry,
+  parseRetryAfterMs,
+  listFolderTree,
+} from "./google-drive.js";
+
+// ---------------------------------------------------------------------------
+// listFolderTree fans out one connector-proxy "list children" call per folder.
+// We mock the connector SDK so the crawl runs against an in-memory folder tree:
+// root -> {A, B, one.pdf}; A -> {two.pdf, C}; B -> {three.pdf}; C -> {four.pdf}.
+// That is 4 folders and 4 files across 3 levels, exercising the level-by-level
+// crawl and the onProgress callback added for the background-scan change.
+// ---------------------------------------------------------------------------
+vi.mock("@replit/connectors-sdk", () => {
+  const PDF = "application/pdf";
+  const tree: Record<string, Array<Record<string, unknown>>> = {
+    rootfolder0: [
+      { id: "folderAAAA1", name: "A", mimeType: "application/vnd.google-apps.folder" },
+      { id: "folderBBBB2", name: "B", mimeType: "application/vnd.google-apps.folder" },
+      { id: "p1", name: "one.pdf", mimeType: PDF, size: "10", md5Checksum: "h1", modifiedTime: "2026-01-01T00:00:00Z" },
+    ],
+    folderAAAA1: [
+      { id: "p2", name: "two.pdf", mimeType: PDF, size: "20", md5Checksum: "h2", modifiedTime: "2026-01-02T00:00:00Z" },
+      { id: "folderCCCC3", name: "C", mimeType: "application/vnd.google-apps.folder" },
+    ],
+    folderBBBB2: [
+      { id: "p3", name: "three.pdf", mimeType: PDF, size: "30", md5Checksum: "h3", modifiedTime: "2026-01-03T00:00:00Z" },
+    ],
+    folderCCCC3: [
+      { id: "p4", name: "four.pdf", mimeType: PDF, size: "40", md5Checksum: "h4", modifiedTime: "2026-01-04T00:00:00Z" },
+    ],
+  };
+  return {
+    ReplitConnectors: class {
+      // Mirrors the subset of the SDK proxy listFolderChildren relies on.
+      async proxy(_name: string, path: string) {
+        // The folder id is the first quoted token of the `q` parameter
+        // (`'<id>' in parents and trashed=false`). URLSearchParams encodes
+        // spaces as "+", so match the quoted token directly after decoding.
+        const decoded = decodeURIComponent(path);
+        const m = /'([^']+)'/.exec(decoded);
+        const folderId = m ? m[1] : "";
+        const files = tree[folderId] ?? [];
+        const text = JSON.stringify({ files });
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => null },
+          text: () => Promise.resolve(text),
+        };
+      }
+    },
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Unit tests for the connector-proxy rate-limit retry (Task #228). The bug:
@@ -118,5 +171,45 @@ describe("callWithRateLimitRetry", () => {
       callWithRateLimitRetry(fn, { gate: noopGate, sleepFn: () => Promise.resolve() }),
     ).rejects.toThrow("not connected");
     expect(fn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("listFolderTree onProgress", () => {
+  it("emits monotonic progress whose final filesFound equals the returned files", async () => {
+    const events: Array<{
+      foldersScanned: number;
+      foldersKnown: number;
+      filesFound: number;
+      depth: number;
+    }> = [];
+
+    const tree = await listFolderTree("rootfolder0", (p) => events.push({ ...p }));
+
+    // All 4 PDFs across the 3 levels are collected (no folders, no truncation).
+    expect(tree.truncated).toBe(false);
+    expect(tree.files.map((f) => f.name).sort()).toEqual([
+      "four.pdf",
+      "one.pdf",
+      "three.pdf",
+      "two.pdf",
+    ]);
+    // The nested file carries its ancestor folder names as parentPath.
+    expect(tree.files.find((f) => f.name === "four.pdf")?.parentPath).toEqual(["A", "C"]);
+
+    // Progress was actually reported and every counter is non-decreasing.
+    expect(events.length).toBeGreaterThan(0);
+    for (let i = 1; i < events.length; i++) {
+      expect(events[i].foldersScanned).toBeGreaterThanOrEqual(events[i - 1].foldersScanned);
+      expect(events[i].foldersKnown).toBeGreaterThanOrEqual(events[i - 1].foldersKnown);
+      expect(events[i].filesFound).toBeGreaterThanOrEqual(events[i - 1].filesFound);
+    }
+
+    // The crawl converges: every folder is scanned/known and the final
+    // filesFound matches the number of files actually returned (no lost files).
+    const last = events[events.length - 1];
+    expect(last.foldersScanned).toBe(4);
+    expect(last.foldersKnown).toBe(4);
+    expect(last.filesFound).toBe(tree.files.length);
+    expect(last.filesFound).toBe(4);
   });
 });
