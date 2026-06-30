@@ -572,3 +572,143 @@ describe("POST /admin/bulk-cba/ingest — failure paths never silently drop a co
     expect(led?.source_doc_id).toBeNull();
   });
 });
+
+// The endpoint processes up to 25 entries per request with concurrency 4
+// (mapLimit). The single-entry failure tests above prove a broken file is
+// recorded 'failed', but NOT that the failure is isolated to its own entry: an
+// admin importing a folder relies on the good contracts landing even when a few
+// files are broken. These tests post a MIXED batch (one broken + one valid
+// entry in the same request) and assert per-entry isolation — the bad entry
+// must not roll back, skip, or poison the sibling that succeeds — plus a
+// recovery case where re-posting the run after fixing the bad file re-drives
+// ONLY the previously-failed entry without duplicating the good one.
+describe("POST /admin/bulk-cba/ingest — one bad file does not block the rest of the batch", () => {
+  // Globally-unique (unit, schoolYear) combos so each good entry creates a
+  // FRESH contract (contracts are unique on (district, unit, unit_scope,
+  // effective_start); earlier tests already used teachers/paraprofessionals at
+  // 2024-25), keeping the districtCounts() deltas an unambiguous +1.
+  const runId = `${MARK}-mixed`;
+  const goodId = `bciMixGood-${MARK}`;
+  const badId = `bciMixBad-${MARK}`;
+  const goodUnit = "teachers";
+  const goodYear = "2030-31";
+  const badUnit = "paraprofessionals";
+  const badYear = "2031-32";
+
+  it("mixed batch (1 broken + 1 valid) → { ingested: 1, failed: 1 }, failure isolated to its own entry", async () => {
+    const goodBuf = pdf(goodId);
+    contentById.set(goodId, goodBuf);
+    // Deliberately leave badId WITHOUT content: the shared download mock throws
+    // "no test content for drive file <id>", deterministically failing only this
+    // entry's download. (mockRejectedValueOnce would be racy here because both
+    // entries download concurrently under the concurrency-4 mapLimit.)
+    const goodHash = hashOf(goodBuf);
+
+    expect(await docCountForHash(goodHash)).toBe(0);
+    const before = await districtCounts();
+
+    const res = await request(app)
+      .post("/admin/bulk-cba/ingest")
+      .send({
+        runId,
+        entries: [
+          entry({ driveFileId: badId, unit: badUnit, schoolYear: badYear }),
+          entry({ driveFileId: goodId, unit: goodUnit, schoolYear: goodYear }),
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toEqual({ ingested: 1, failed: 1 });
+
+    const byId = new Map(
+      (
+        res.body.results as Array<{
+          driveFileId: string;
+          status: string;
+          sourceDocId: number | null;
+          error: string | null;
+        }>
+      ).map((r) => [r.driveFileId, r]),
+    );
+    const good = byId.get(goodId)!;
+    const bad = byId.get(badId)!;
+    expect(good.status).toBe("ingested");
+    expect(typeof good.sourceDocId).toBe("number");
+    expect(bad.status).toBe("failed");
+    expect(bad.sourceDocId).toBeNull();
+    expect(bad.error).toMatch(/download failed/i);
+
+    // The bad entry's failure caused exactly ONE Object-Storage write — the good
+    // entry's — and it carried the good content hash.
+    expect(uploadBuffer).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(uploadBuffer).mock.calls[0][0]).toBe(uploadedCbaKey(goodHash));
+
+    // The good entry produced exactly 1 source doc / 1 contract / 1 active job;
+    // the bad entry left NO writes. The +1/+1/+1 delta proves both at once.
+    const after = await districtCounts();
+    expect(after).toEqual({
+      docs: before.docs + 1,
+      contracts: before.contracts + 1,
+      jobs: before.jobs + 1,
+    });
+    expect(await docCountForHash(goodHash)).toBe(1);
+    expect(await activeJobCountForHash(goodHash)).toBe(1);
+
+    // Ledger: good ingested (with its doc id), bad failed (no doc to attach).
+    const goodLed = await ledgerRow(runId, goodId);
+    expect(goodLed?.status).toBe("ingested");
+    expect(goodLed?.source_doc_id).toBe(good.sourceDocId);
+    const badLed = await ledgerRow(runId, badId);
+    expect(badLed?.status).toBe("failed");
+    expect(badLed?.source_doc_id).toBeNull();
+  });
+
+  it("re-posting the run after fixing the bad file re-drives ONLY the failed entry, no duplicate of the good one", async () => {
+    // "Fix" the previously-broken file: its content is now downloadable.
+    const badBuf = pdf(badId);
+    contentById.set(badId, badBuf);
+    const badHash = hashOf(badBuf);
+    const goodHash = hashOf(contentById.get(goodId)!);
+
+    expect(await docCountForHash(badHash)).toBe(0); // never ingested before
+    expect(await docCountForHash(goodHash)).toBe(1); // already ingested above
+    const before = await districtCounts();
+
+    const res = await request(app)
+      .post("/admin/bulk-cba/ingest")
+      .send({
+        runId,
+        entries: [
+          entry({ driveFileId: badId, unit: badUnit, schoolYear: badYear }),
+          entry({ driveFileId: goodId, unit: goodUnit, schoolYear: goodYear }),
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toEqual({ ingested: 2 });
+
+    // Only the previously-failed entry was re-driven: exactly ONE new upload,
+    // the fixed bad file. The good entry resumes from its 'ingested' ledger row
+    // and short-circuits before any download/upload.
+    expect(uploadBuffer).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(uploadBuffer).mock.calls[0][0]).toBe(uploadedCbaKey(badHash));
+
+    // The good entry is NOT duplicated; the fixed bad entry now lands exactly once.
+    expect(await docCountForHash(goodHash)).toBe(1);
+    expect(await docCountForHash(badHash)).toBe(1);
+    expect(await activeJobCountForHash(badHash)).toBe(1);
+
+    // Net effect is a single new entry's worth of writes (the recovered one).
+    const after = await districtCounts();
+    expect(after).toEqual({
+      docs: before.docs + 1,
+      contracts: before.contracts + 1,
+      jobs: before.jobs + 1,
+    });
+
+    // The bad entry's ledger row flips from failed → ingested with a real doc id.
+    const badLed = await ledgerRow(runId, badId);
+    expect(badLed?.status).toBe("ingested");
+    expect(typeof badLed?.source_doc_id).toBe("number");
+  });
+});
