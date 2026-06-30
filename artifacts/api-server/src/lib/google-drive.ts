@@ -43,23 +43,131 @@ interface ProxyResponse {
   text: () => Promise<string>;
 }
 
+// ---------------------------------------------------------------------------
+// Connector-proxy rate limiting + 429 retry.
+//
+// The Replit connector proxy caps Drive calls at ~10 requests/sec per repl. A
+// wide folder scan (listFolderTree fans out one listFolderChildren call per
+// district subfolder — hundreds of them) otherwise bursts past that cap and the
+// proxy returns HTTP 429 ("Rate limit exceeded: 11/10 RPS for repl"). We (a)
+// space every proxy call at least MIN_PROXY_INTERVAL_MS apart via a global gate,
+// keeping the steady-state rate safely under the cap regardless of caller
+// concurrency, and (b) retry a transient 429 honoring its Retry-After hint.
+// ---------------------------------------------------------------------------
+
+const MIN_PROXY_INTERVAL_MS = 130; // ~7.7 req/s, headroom under the ~10 RPS cap
+const MAX_429_RETRIES = 5;
+const DEFAULT_RETRY_AFTER_MS = 1_000;
+const MAX_RETRY_AFTER_MS = 30_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// A process-global serialized chain so concurrent callers (e.g. a preview and an
+// ingest running at once) share one rate budget rather than each getting their
+// own.
+let proxyGateChain: Promise<void> = Promise.resolve();
+let lastProxyReleaseAt = 0;
+
+/**
+ * Block until at least MIN_PROXY_INTERVAL_MS has elapsed since the previous
+ * proxy call was released. Serializing the gate (not the request) means N
+ * concurrent workers start their requests staggered by the interval, so the
+ * aggregate request rate stays under the proxy cap whatever the concurrency.
+ */
+async function rateLimitGate(): Promise<void> {
+  const run = async (): Promise<void> => {
+    const wait = lastProxyReleaseAt + MIN_PROXY_INTERVAL_MS - Date.now();
+    if (wait > 0) await sleep(wait);
+    lastProxyReleaseAt = Date.now();
+  };
+  const next = proxyGateChain.then(run, run);
+  proxyGateChain = next.catch(() => {});
+  await next;
+}
+
+/**
+ * Parse a Retry-After header value to milliseconds. Supports both the
+ * delta-seconds form ("1") and the HTTP-date form. Returns null when absent or
+ * unparseable so callers fall back to exponential backoff.
+ */
+export function parseRetryAfterMs(
+  value: string | null,
+  now: number = Date.now(),
+): number | null {
+  if (value == null) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (/^\d+$/.test(trimmed)) return Number(trimmed) * 1_000;
+  const when = Date.parse(trimmed);
+  if (!Number.isNaN(when)) return Math.max(0, when - now);
+  return null;
+}
+
+interface RetryableResponse {
+  status: number;
+  headers: { get(name: string): string | null };
+  text?: () => Promise<string>;
+}
+
+/**
+ * Run a proxy call behind the rate-limit gate, retrying a 429 up to maxRetries
+ * times (honoring Retry-After, else exponential backoff). Non-429 responses —
+ * and any thrown error, including DriveNotConnectedError — pass straight
+ * through. The gate/sleep are injectable so the retry logic can be unit-tested
+ * without real timers.
+ */
+export async function callWithRateLimitRetry<T extends RetryableResponse>(
+  fn: () => Promise<T>,
+  opts: {
+    maxRetries?: number;
+    sleepFn?: (ms: number) => Promise<void>;
+    gate?: () => Promise<void>;
+  } = {},
+): Promise<T> {
+  const maxRetries = opts.maxRetries ?? MAX_429_RETRIES;
+  const sleepFn = opts.sleepFn ?? sleep;
+  const gate = opts.gate ?? rateLimitGate;
+  for (let attempt = 0; ; attempt++) {
+    await gate();
+    const res = await fn();
+    if (res.status === 429 && attempt < maxRetries) {
+      const fromHeader = parseRetryAfterMs(res.headers.get("retry-after"));
+      const backoff = Math.min(
+        DEFAULT_RETRY_AFTER_MS * 2 ** attempt,
+        MAX_RETRY_AFTER_MS,
+      );
+      const waitMs = Math.min(fromHeader ?? backoff, MAX_RETRY_AFTER_MS);
+      // Drain the rejected body so the underlying connection can be reused.
+      if (res.text) await res.text().catch(() => undefined);
+      await sleepFn(waitMs);
+      continue;
+    }
+    return res;
+  }
+}
+
 /**
  * Low-level call through the connector proxy. Returns the raw response so
  * callers can inspect status and headers (needed for resumable uploads, which
  * rely on a 308 status and a Location header). Throws DriveNotConnectedError
- * only when the SDK itself can't find usable credentials.
+ * only when the SDK itself can't find usable credentials. Rate-limited and
+ * 429-retried via callWithRateLimitRetry.
  */
 async function driveProxy(
   connectors: ReplitConnectors,
   path: string,
   options: Record<string, unknown> = {},
 ): Promise<ProxyResponse> {
-  try {
-    return (await connectors.proxy("google-drive", path, options as never)) as never;
-  } catch (e) {
-    // The SDK throws when there is no usable connection/credentials.
-    throw new DriveNotConnectedError((e as Error)?.message);
-  }
+  return callWithRateLimitRetry<ProxyResponse>(async () => {
+    try {
+      return (await connectors.proxy("google-drive", path, options as never)) as never;
+    } catch (e) {
+      // The SDK throws when there is no usable connection/credentials.
+      throw new DriveNotConnectedError((e as Error)?.message);
+    }
+  });
 }
 
 /**
@@ -363,7 +471,10 @@ export async function listFolderTree(rootFolderId: string): Promise<DriveFolderT
   let level: Array<{ id: string; path: string[] }> = [{ id: rootFolderId, path: [] }];
   let depth = 0;
   while (level.length && depth <= MAX_TREE_DEPTH && !truncated) {
-    const childrenByFolder = await mapWithConcurrency(level, 8, (f) =>
+    // Bounded concurrency caps in-flight requests; the actual request RATE is
+    // governed by the proxy rate-limit gate inside driveProxy, so a wide level
+    // can't burst past the connector proxy's ~10 RPS-per-repl cap.
+    const childrenByFolder = await mapWithConcurrency(level, 4, (f) =>
       listFolderChildren(connectors, f.id),
     );
     const nextLevel: Array<{ id: string; path: string[] }> = [];

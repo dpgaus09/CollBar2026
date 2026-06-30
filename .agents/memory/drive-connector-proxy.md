@@ -40,3 +40,16 @@ package dir instead (`cd artifacts/api-server && node probe.mjs`). This package 
 `.ts` modules (e.g. exercising the exported upload helper end-to-end).
 
 **Why:** chosen over raw googleapis so no API key/OAuth client is managed in-app; the connector owns credentials.
+
+**Rate limit (~10 RPS per repl):** the connector proxy caps Drive calls at ~10 requests/sec
+*per repl* and returns HTTP **429** "Rate limit exceeded: 11/10 RPS for repl. Retry-After: N"
+when exceeded. A wide folder scan (one `files.list` per district subfolder, hundreds of them,
+fanned out concurrently) trips this and, with no retry, aborts the whole operation. Mitigation in
+`google-drive.ts`: a **process-global** serialized gate spaces every `connectors.proxy` call
+≥130ms apart (~7.7 RPS, shared across concurrent preview+ingest) AND `driveProxy` retries a 429
+honoring `Retry-After` (else exponential backoff, capped). Concurrency is now the in-flight bound,
+NOT the RPS control — the gate is. A 429 means the request was rejected before reaching Google, so
+retrying POSTs (createFolder, resumable-init) is safe. This is RPS-only; direct-to-googleapis
+PUT/GET (downloads, exports, byte PUT) bypass the proxy and have separate Google quotas. Still
+synchronous, so a *very* large tree (>~2k proxy calls) can approach the deployment's ~300s request
+cap — make the crawl a background job if that becomes real.
