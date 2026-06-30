@@ -27,11 +27,14 @@ import { join } from "node:path";
 //   - uploadBuffer (../lib/objectStorage.js) → counts calls instead of hitting
 //     GCS, so we can assert the Object-Storage write happens on BOTH the new
 //     and the duplicate path.
-// enqueueJob is the REAL queue insert (it just writes an extraction_jobs row;
-// the worker is not running in tests), so the "exactly one job per matched
-// entry / no duplicate job" guarantees are asserted against the real table and
-// its partial-unique active-job index — not a mocked stand-in. We opt the dev
-// environment into enqueueing via BULK_IMPORT_ALLOW_DEV_ENQUEUE=1.
+// enqueueJob is wrapped in a PASS-THROUGH mock whose default implementation is
+// the REAL queue insert (it just writes an extraction_jobs row; the worker is
+// not running in tests), so the "exactly one job per matched entry / no
+// duplicate job" guarantees are still asserted against the real table and its
+// partial-unique active-job index. The wrapper lets the failure-path tests
+// override it once (mockRejectedValueOnce) to simulate a post-source-doc step
+// throwing. We opt the dev environment into enqueueing via
+// BULK_IMPORT_ALLOW_DEV_ENQUEUE=1.
 //
 // District matching uses the REAL database, so we seed one throwaway IL
 // district and tear everything down in afterAll.
@@ -57,8 +60,20 @@ vi.mock("../lib/objectStorage.js", async (importActual) => {
   return { ...actual, uploadBuffer: vi.fn(async () => {}) };
 });
 
+vi.mock("../extraction/jobs/queue.js", async (importActual) => {
+  const actual = await importActual<typeof import("../extraction/jobs/queue.js")>();
+  // Default implementation is the REAL enqueueJob so the functional tests above
+  // keep asserting against the real extraction_jobs table + active-doc unique
+  // index. The failure-path tests below override it ONCE
+  // (mockRejectedValueOnce) to simulate a post-source-doc step throwing
+  // mid-import; the override is consumed by the single call and reverts to the
+  // real impl for later tests.
+  return { ...actual, enqueueJob: vi.fn(actual.enqueueJob) };
+});
+
 const { downloadDriveFile } = await import("../lib/google-drive.js");
 const { uploadBuffer, uploadedCbaKey } = await import("../lib/objectStorage.js");
+const { enqueueJob } = await import("../extraction/jobs/queue.js");
 const adminRouter = (await import("./admin.js")).default;
 
 function buildApp(): Express {
@@ -168,6 +183,43 @@ async function ledgerStatus(runId: string, driveFileId: string): Promise<string 
     SELECT status FROM bulk_cba_imports WHERE run_id = ${runId} AND drive_file_id = ${driveFileId} LIMIT 1
   `);
   return r.rows.length ? String((r.rows[0] as { status: string }).status) : null;
+}
+
+// Full ledger row (status + the retained source_doc_id) for a (run, file).
+async function ledgerRow(
+  runId: string,
+  driveFileId: string,
+): Promise<{ status: string; source_doc_id: number | null } | null> {
+  const r = await db.execute(sql`
+    SELECT status, source_doc_id FROM bulk_cba_imports
+    WHERE run_id = ${runId} AND drive_file_id = ${driveFileId} LIMIT 1
+  `);
+  if (!r.rows.length) return null;
+  const row = r.rows[0] as { status: string; source_doc_id: number | string | null };
+  return {
+    status: String(row.status),
+    source_doc_id: row.source_doc_id == null ? null : Number(row.source_doc_id),
+  };
+}
+
+// Snapshot of everything an entry can create, scoped to the throwaway district,
+// so a "no partial writes" assertion can compare before/after.
+async function districtCounts(): Promise<{ docs: number; contracts: number; jobs: number }> {
+  const r = await db.execute(sql`
+    SELECT
+      (SELECT COUNT(*)::int FROM source_documents WHERE district_id = ${districtId}) AS docs,
+      (SELECT COUNT(*)::int FROM contracts WHERE district_id = ${districtId}) AS contracts,
+      (SELECT COUNT(*)::int FROM extraction_jobs ej JOIN source_documents sd ON sd.id = ej.source_doc_id
+         WHERE sd.district_id = ${districtId} AND ej.domain = 'cba' AND ej.status IN ('queued', 'running')) AS jobs
+  `);
+  return r.rows[0] as { docs: number; contracts: number; jobs: number };
+}
+
+async function docCountForHash(fileHash: string): Promise<number> {
+  const r = await db.execute(sql`
+    SELECT COUNT(*)::int AS n FROM source_documents WHERE district_id = ${districtId} AND file_hash = ${fileHash}
+  `);
+  return Number((r.rows[0] as { n: number }).n);
 }
 
 describe("POST /admin/bulk-cba/ingest — enqueue + Object Storage", () => {
@@ -365,5 +417,158 @@ describe("POST /admin/bulk-cba/ingest — enqueue + Object Storage", () => {
       SELECT COUNT(*)::int AS n FROM bulk_cba_imports WHERE run_id = ${runId}
     `);
     expect(Number((ledger.rows[0] as { n: number }).n)).toBe(0);
+  });
+});
+
+// Each entry runs through several side-effecting steps after download (the
+// Object-Storage write, the source_documents insert, ensureContractForUpload,
+// enqueueJob). A failure must never leave a contract silently dropped or a PDF
+// that 404s in prod. bulkIngestOneFile is written to fail-closed BEFORE any DB
+// write if an early step fails, and — once the source doc exists — to record a
+// 'failed' ledger row that RETAINS the source_doc_id so the progress/retry
+// tooling can re-drive it. These tests pin that contract.
+describe("POST /admin/bulk-cba/ingest — failure paths never silently drop a contract", () => {
+  it("Object-Storage write throws → entry 'failed', fail-closed before any DB write", async () => {
+    const runId = `${MARK}-failup`;
+    const id = `bciUp-${MARK}`;
+    const buf = pdf(id);
+    contentById.set(id, buf);
+    const hash = hashOf(buf);
+
+    // Nothing exists for this content yet.
+    expect(await docCountForHash(hash)).toBe(0);
+    const before = await districtCounts();
+
+    // The single upload attempt for this entry rejects.
+    vi.mocked(uploadBuffer).mockRejectedValueOnce(new Error("gcs unavailable"));
+
+    const res = await request(app)
+      .post("/admin/bulk-cba/ingest")
+      .send({ runId, entries: [entry({ driveFileId: id, unit: "teachers" })] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toEqual({ failed: 1 });
+    const r0 = (
+      res.body.results as Array<{ status: string; sourceDocId: number | null; error: string }>
+    )[0];
+    expect(r0.status).toBe("failed");
+    expect(r0.sourceDocId).toBeNull();
+    expect(r0.error).toMatch(/object storage upload failed/i);
+
+    // The write was attempted once, then failed-closed: no source doc, contract,
+    // or job for this content — nothing partially written.
+    expect(uploadBuffer).toHaveBeenCalledTimes(1);
+    expect(await docCountForHash(hash)).toBe(0);
+    expect(await activeJobCountForHash(hash)).toBe(0);
+    expect(await districtCounts()).toEqual(before);
+
+    // The ledger records the failure with no source_doc_id (nothing to attach).
+    const led = await ledgerRow(runId, id);
+    expect(led?.status).toBe("failed");
+    expect(led?.source_doc_id).toBeNull();
+  });
+
+  it("post-source-doc step (enqueue) throws → ledger 'failed' but RETAINS source_doc_id for retry", async () => {
+    const runId = `${MARK}-failpost`;
+    const id = `bciPost-${MARK}`;
+    const buf = pdf(id);
+    contentById.set(id, buf);
+    const hash = hashOf(buf);
+
+    expect(await docCountForHash(hash)).toBe(0);
+    const before = await districtCounts();
+
+    // Download, %PDF check, Object-Storage write, source_documents insert and
+    // ensureContractForUpload all succeed; the LAST post-source-doc side-effect
+    // (enqueueJob) throws.
+    vi.mocked(enqueueJob).mockRejectedValueOnce(new Error("queue down"));
+
+    const res = await request(app)
+      .post("/admin/bulk-cba/ingest")
+      .send({ runId, entries: [entry({ driveFileId: id, unit: "teachers" })] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toEqual({ failed: 1 });
+    const r0 = (
+      res.body.results as Array<{ status: string; sourceDocId: number | null; error: string }>
+    )[0];
+    expect(r0.status).toBe("failed");
+    expect(typeof r0.sourceDocId).toBe("number");
+    expect(r0.error).toMatch(/post-ingest step failed/i);
+
+    // The source document was created and persists (its PDF is in Object
+    // Storage) — it is NOT silently lost.
+    expect(uploadBuffer).toHaveBeenCalledTimes(1);
+    expect(await docCountForHash(hash)).toBe(1);
+    // The enqueue threw, so no active extraction job exists for it.
+    expect(await activeJobCountForHash(hash)).toBe(0);
+
+    // Crucially, the 'failed' ledger row carries the source_doc_id, so the
+    // progress/retry tooling can find and re-drive it instead of losing it.
+    const led = await ledgerRow(runId, id);
+    expect(led?.status).toBe("failed");
+    expect(led?.source_doc_id).toBe(r0.sourceDocId);
+
+    // Exactly one new source doc; no orphaned active job.
+    const after = await districtCounts();
+    expect(after.docs).toBe(before.docs + 1);
+    expect(after.jobs).toBe(before.jobs);
+  });
+
+  it("a not-a-PDF download (missing %PDF header) → 'failed' with no partial writes", async () => {
+    const runId = `${MARK}-nopdf`;
+    const id = `bciNoPdf-${MARK}`;
+    // Bytes that do NOT start with %PDF (e.g. an HTML error page Drive returned).
+    contentById.set(id, Buffer.from("<html>not a pdf</html>", "utf8"));
+    const before = await districtCounts();
+
+    const res = await request(app)
+      .post("/admin/bulk-cba/ingest")
+      .send({ runId, entries: [entry({ driveFileId: id, unit: "teachers" })] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toEqual({ failed: 1 });
+    const r0 = (
+      res.body.results as Array<{ status: string; sourceDocId: number | null; error: string }>
+    )[0];
+    expect(r0.status).toBe("failed");
+    expect(r0.sourceDocId).toBeNull();
+    expect(r0.error).toMatch(/not a valid pdf/i);
+
+    // The %PDF check runs before the Object-Storage write and any DB insert.
+    expect(uploadBuffer).not.toHaveBeenCalled();
+    expect(await districtCounts()).toEqual(before);
+    const led = await ledgerRow(runId, id);
+    expect(led?.status).toBe("failed");
+    expect(led?.source_doc_id).toBeNull();
+  });
+
+  it("a download error → 'failed' with no partial writes", async () => {
+    const runId = `${MARK}-dlerr`;
+    const id = `bciDlErr-${MARK}`;
+    const before = await districtCounts();
+
+    // The download itself rejects (e.g. Drive 5xx / revoked access).
+    vi.mocked(downloadDriveFile).mockRejectedValueOnce(new Error("drive 503"));
+
+    const res = await request(app)
+      .post("/admin/bulk-cba/ingest")
+      .send({ runId, entries: [entry({ driveFileId: id, unit: "teachers" })] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toEqual({ failed: 1 });
+    const r0 = (
+      res.body.results as Array<{ status: string; sourceDocId: number | null; error: string }>
+    )[0];
+    expect(r0.status).toBe("failed");
+    expect(r0.sourceDocId).toBeNull();
+    expect(r0.error).toMatch(/download failed/i);
+
+    // Download is the first side-effect: nothing downstream ran.
+    expect(uploadBuffer).not.toHaveBeenCalled();
+    expect(await districtCounts()).toEqual(before);
+    const led = await ledgerRow(runId, id);
+    expect(led?.status).toBe("failed");
+    expect(led?.source_doc_id).toBeNull();
   });
 });
