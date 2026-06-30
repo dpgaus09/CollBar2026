@@ -2374,7 +2374,7 @@ router.post(
       return;
     }
     if (body.entries.length === 0) {
-      res.json({ ok: true, runId, enqueued: bulkShouldEnqueue(), results: [], counts: {} });
+      res.status(400).json({ error: "entries[] must contain at least one entry" });
       return;
     }
     if (body.entries.length > BULK_INGEST_BATCH_CAP) {
