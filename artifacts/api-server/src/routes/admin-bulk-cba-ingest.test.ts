@@ -712,3 +712,187 @@ describe("POST /admin/bulk-cba/ingest — one bad file does not block the rest o
     expect(typeof badLed?.source_doc_id).toBe("number");
   });
 });
+
+// #238 proved isolation for a minimal 2-entry mixed batch. The endpoint really
+// runs up to 25 entries at concurrency 4 (mapLimit), so the worst realistic
+// case is several broken entries interleaved with several good ones inside one
+// concurrency window. A regression where a rejected promise (or a shared
+// transaction/connection) takes down its siblings in the same mapLimit wave
+// would slip past a 2-entry test. This test posts a wider batch (4 good + 2
+// download failures + 2 non-PDF failures) interleaved so the first window holds
+// both, and uses a deterministic barrier to PROVE a bad and a good entry are in
+// flight together — no timing flakiness — before asserting every good entry
+// landed independently and every bad entry left no writes.
+describe("POST /admin/bulk-cba/ingest — a bad file mid-batch can't poison the concurrent group", () => {
+  it("wide mixed batch (4 good + 2 download-fail + 2 non-PDF) isolates every failure", async () => {
+    const runId = `${MARK}-wide`;
+
+    // Each good entry gets a globally-unique (unit, schoolYear) so it creates a
+    // FRESH contract (contracts are unique on district, unit, unit_scope,
+    // effective_start), keeping each districtCounts() delta an unambiguous +1.
+    const goods = [
+      { id: `bciWideGood1-${MARK}`, unit: "custodial_maintenance", year: "2040-41" },
+      { id: `bciWideGood2-${MARK}`, unit: "transportation", year: "2041-42" },
+      { id: `bciWideGood3-${MARK}`, unit: "secretarial_clerical", year: "2042-43" },
+      { id: `bciWideGood4-${MARK}`, unit: "food_service", year: "2043-44" },
+    ];
+    // Download fails: content left unset → the shared download mock throws.
+    const badDl = [
+      { id: `bciWideDl1-${MARK}`, unit: "nurses", year: "2050-51" },
+      { id: `bciWideDl2-${MARK}`, unit: "administrators", year: "2051-52" },
+    ];
+    // Non-PDF: downloads fine but fails the %PDF header check before any write.
+    const badNoPdf = [
+      { id: `bciWideNoPdf1-${MARK}`, unit: "support_staff", year: "2052-53" },
+      { id: `bciWideNoPdf2-${MARK}`, unit: "other", year: "2053-54" },
+    ];
+
+    for (const g of goods) contentById.set(g.id, pdf(g.id));
+    for (const b of badNoPdf) {
+      contentById.set(b.id, Buffer.from(`<html>not a pdf ${b.id}</html>`, "utf8"));
+    }
+    // badDl ids intentionally have NO content.
+
+    const goodHash = new Map(goods.map((g) => [g.id, hashOf(contentById.get(g.id)!)]));
+    const goodIds = new Set(goods.map((g) => g.id));
+    const badIds = new Set([...badDl, ...badNoPdf].map((b) => b.id));
+
+    // Interleave so the first concurrency-4 window (indices 0-3) is
+    // [badDl1, good1, badNoPdf1, good2] — two bad + two good in the same wave.
+    const ordered = [
+      entry({ driveFileId: badDl[0].id, unit: badDl[0].unit, schoolYear: badDl[0].year }),
+      entry({ driveFileId: goods[0].id, unit: goods[0].unit, schoolYear: goods[0].year }),
+      entry({ driveFileId: badNoPdf[0].id, unit: badNoPdf[0].unit, schoolYear: badNoPdf[0].year }),
+      entry({ driveFileId: goods[1].id, unit: goods[1].unit, schoolYear: goods[1].year }),
+      entry({ driveFileId: badDl[1].id, unit: badDl[1].unit, schoolYear: badDl[1].year }),
+      entry({ driveFileId: goods[2].id, unit: goods[2].unit, schoolYear: goods[2].year }),
+      entry({ driveFileId: badNoPdf[1].id, unit: badNoPdf[1].unit, schoolYear: badNoPdf[1].year }),
+      entry({ driveFileId: goods[3].id, unit: goods[3].unit, schoolYear: goods[3].year }),
+    ];
+
+    // Deterministic concurrency probe: hold every download until CONCURRENCY of
+    // them are simultaneously in flight, then release. Because mapLimit runs
+    // exactly 4 workers and none can free its slot until its download returns,
+    // all 4 first-window downloads reach the barrier — proving (without timing
+    // flakiness) that a good and a bad entry share a window.
+    const CONCURRENCY = 4;
+    const original = vi.mocked(downloadDriveFile).getMockImplementation();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let overlapSeen = false;
+    const live = new Set<string>();
+    let arrived = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let safetyFired = false;
+    vi.mocked(downloadDriveFile).mockImplementation(async (id: string) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      live.add(id);
+      if ([...live].some((x) => goodIds.has(x)) && [...live].some((x) => badIds.has(x))) {
+        overlapSeen = true;
+      }
+      if (++arrived >= CONCURRENCY) release();
+      try {
+        await gate;
+        const buf = contentById.get(id);
+        if (!buf) throw new Error(`no test content for drive file ${id}`);
+        return buf;
+      } finally {
+        inFlight--;
+        live.delete(id);
+      }
+    });
+
+    const before = await districtCounts();
+    // Safety net against a hang if the concurrency model ever changes. Started
+    // only around the request and generously long so it cannot fire on a slow
+    // CI run before the 4 downloads arrive (that would falsely fail the
+    // maxInFlight assertion); safetyFired is asserted below to make any
+    // premature release explicit rather than silent.
+    const safety = setTimeout(() => {
+      safetyFired = true;
+      release();
+    }, 10000);
+    const res = await (async () => {
+      try {
+        return await request(app)
+          .post("/admin/bulk-cba/ingest")
+          .send({ runId, entries: ordered });
+      } finally {
+        clearTimeout(safety);
+        vi.mocked(downloadDriveFile).mockImplementation(original!);
+      }
+    })();
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toEqual({ ingested: 4, failed: 4 });
+
+    // The barrier released because the real concurrency reached 4, not because
+    // the safety timer bailed us out.
+    expect(safetyFired).toBe(false);
+    // The concurrency window genuinely interleaved a bad and a good entry.
+    expect(maxInFlight).toBe(CONCURRENCY);
+    expect(overlapSeen).toBe(true);
+
+    const byId = new Map(
+      (
+        res.body.results as Array<{
+          driveFileId: string;
+          status: string;
+          sourceDocId: number | null;
+          error: string | null;
+        }>
+      ).map((r) => [r.driveFileId, r]),
+    );
+
+    // Every good entry succeeded independently: 1 doc, 1 active job, ledger row.
+    for (const g of goods) {
+      const r = byId.get(g.id)!;
+      expect(r.status).toBe("ingested");
+      expect(typeof r.sourceDocId).toBe("number");
+      expect(await docCountForHash(goodHash.get(g.id)!)).toBe(1);
+      expect(await activeJobCountForHash(goodHash.get(g.id)!)).toBe(1);
+      const led = await ledgerRow(runId, g.id);
+      expect(led?.status).toBe("ingested");
+      expect(led?.source_doc_id).toBe(r.sourceDocId);
+    }
+
+    // Every download-failure entry is isolated: failed, no doc id.
+    for (const b of badDl) {
+      const r = byId.get(b.id)!;
+      expect(r.status).toBe("failed");
+      expect(r.sourceDocId).toBeNull();
+      expect(r.error).toMatch(/download failed/i);
+      const led = await ledgerRow(runId, b.id);
+      expect(led?.status).toBe("failed");
+      expect(led?.source_doc_id).toBeNull();
+    }
+
+    // Every non-PDF entry is isolated the same way (failed at the %PDF check).
+    for (const b of badNoPdf) {
+      const r = byId.get(b.id)!;
+      expect(r.status).toBe("failed");
+      expect(r.sourceDocId).toBeNull();
+      expect(r.error).toMatch(/not a valid pdf/i);
+      const led = await ledgerRow(runId, b.id);
+      expect(led?.status).toBe("failed");
+      expect(led?.source_doc_id).toBeNull();
+    }
+
+    // Only the 4 good entries were uploaded — nothing from the 4 bad ones.
+    expect(uploadBuffer).toHaveBeenCalledTimes(4);
+    const uploadedKeys = new Set(vi.mocked(uploadBuffer).mock.calls.map((c) => c[0]));
+    for (const g of goods) {
+      expect(uploadedKeys.has(uploadedCbaKey(goodHash.get(g.id)!))).toBe(true);
+    }
+
+    // Aggregate: exactly the 4 good entries' worth of writes leaked through.
+    const after = await districtCounts();
+    expect(after).toEqual({
+      docs: before.docs + 4,
+      contracts: before.contracts + 4,
+      jobs: before.jobs + 4,
+    });
+  }, 20000);
+});
