@@ -3007,6 +3007,96 @@ router.get("/admin/extraction/versions", requireAdminToken, async (req, res) => 
   }
 });
 
+// ---------------------------------------------------------------------------
+// GET /admin/extraction/backlog
+// Linked-but-unextracted queue: IL CBA source documents that have a contract
+// attached (via link-pdf) but NO promoted version in any domain yet. With
+// extraction running off-platform, this is the work queue the fleet pulls from
+// and the visibility admins need so linked docs don't sit unextracted forever.
+// Query params: ?format=csv downloads a CSV; otherwise JSON.
+// ---------------------------------------------------------------------------
+router.get("/admin/extraction/backlog", requireAdminToken, async (req, res) => {
+  try {
+    const rows = await db.execute(sql`
+      SELECT
+        sd.id::int          AS source_doc_id,
+        sd.district_id::int AS district_id,
+        d.name              AS district_name,
+        sd.bargaining_unit  AS bargaining_unit,
+        sd.school_year      AS school_year,
+        sd.file_hash        AS file_hash,
+        sd.source_url       AS source_url,
+        sd.retrieved_at     AS linked_at
+      FROM source_documents sd
+      JOIN districts d ON d.id = sd.district_id
+      WHERE d.state = 'IL'
+        AND sd.doc_type = 'cba_pdf'
+        AND EXISTS (SELECT 1 FROM contracts c WHERE c.source_doc_id = sd.id)
+        AND NOT EXISTS (
+          SELECT 1 FROM extraction_promotions ep WHERE ep.source_doc_id = sd.id
+        )
+      ORDER BY sd.retrieved_at DESC NULLS LAST, sd.id DESC
+    `);
+
+    type BacklogRow = {
+      source_doc_id: number;
+      district_id: number;
+      district_name: string;
+      bargaining_unit: string | null;
+      school_year: string | null;
+      file_hash: string | null;
+      source_url: string | null;
+      linked_at: string | null;
+    };
+    const items = (rows.rows as BacklogRow[]).map((r) => ({
+      sourceDocId: r.source_doc_id,
+      districtId: r.district_id,
+      districtName: r.district_name,
+      bargainingUnit: r.bargaining_unit,
+      bargainingUnitLabel: r.bargaining_unit
+        ? (BARGAINING_UNIT_LABELS[r.bargaining_unit] ?? r.bargaining_unit)
+        : null,
+      schoolYear: r.school_year,
+      fileHash: r.file_hash,
+      sourceUrl: r.source_url,
+      linkedAt: r.linked_at,
+    }));
+
+    if (String(req.query.format ?? "").toLowerCase() === "csv") {
+      const esc = (v: string | number | null) =>
+        v == null ? "" : `"${String(v).replace(/"/g, '""')}"`;
+      const header =
+        "source_doc_id,district_id,district_name,bargaining_unit,school_year,linked_at,file_hash,source_url\n";
+      const body = items
+        .map((i) =>
+          [
+            esc(i.sourceDocId),
+            esc(i.districtId),
+            esc(i.districtName),
+            esc(i.bargainingUnit),
+            esc(i.schoolYear),
+            esc(i.linkedAt),
+            esc(i.fileHash),
+            esc(i.sourceUrl),
+          ].join(","),
+        )
+        .join("\n");
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader(
+        "Content-Disposition",
+        'attachment; filename="extraction_backlog.csv"',
+      );
+      res.send(header + body);
+      return;
+    }
+
+    res.json({ count: items.length, items });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 router.get("/admin/extraction/diff", requireAdminToken, async (req, res) => {
   try {
     const versionId = parseInt(String(req.query.versionId ?? req.query.version_id ?? ""), 10);

@@ -4450,6 +4450,18 @@ interface HermesImportResult {
   }>;
 }
 
+interface BacklogItem {
+  sourceDocId: number;
+  districtId: number;
+  districtName: string;
+  bargainingUnit: string | null;
+  bargainingUnitLabel: string | null;
+  schoolYear: string | null;
+  fileHash: string | null;
+  sourceUrl: string | null;
+  linkedAt: string | null;
+}
+
 function HermesImportTab() {
   const { data: session } = useAdminSession();
   const isAuthenticated = session?.authenticated === true;
@@ -4487,6 +4499,24 @@ function HermesImportTab() {
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState("");
   const [importResult, setImportResult] = useState<HermesImportResult | null>(null);
+
+  // --- Backlog (linked but not yet extracted) ---
+  const {
+    data: backlogData,
+    isLoading: backlogLoading,
+    isError: backlogError,
+    refetch: refetchBacklog,
+  } = useQuery<{ count: number; items: BacklogItem[] }>({
+    queryKey: ["/api/admin/extraction/backlog"],
+    queryFn: () =>
+      fetch(apiUrl("/api/admin/extraction/backlog"), { credentials: "include" }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    enabled: isAuthenticated,
+    retry: false,
+  });
+  const backlog = backlogData?.items ?? [];
 
   const linkPdf = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -4533,6 +4563,7 @@ function HermesImportTab() {
         });
         setFile(null);
         if (fileInputRef.current) fileInputRef.current.value = "";
+        void refetchBacklog();
       }
     } catch {
       setLinkError("Network error while linking the PDF.");
@@ -4565,6 +4596,7 @@ function HermesImportTab() {
         setImportError(body.error ?? `Import failed (HTTP ${r.status})`);
       } else {
         setImportResult(body);
+        void refetchBacklog();
       }
     } catch {
       setImportError("Network error during import.");
@@ -4855,6 +4887,89 @@ function HermesImportTab() {
           </div>
         )}
       </form>
+
+      {/* Backlog — linked but not yet extracted */}
+      <section className="rounded-lg border border-slate-800 bg-slate-900 p-5 space-y-4">
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1">
+            <h3 className="text-xs font-semibold text-slate-300">
+              Awaiting extraction
+              {backlogData ? (
+                <span className="ml-2 text-slate-500">({backlogData.count})</span>
+              ) : null}
+            </h3>
+            <p className="text-[11px] text-slate-500 leading-relaxed">
+              IL contracts linked via step 1 that have no promoted extraction yet — the
+              off-platform fleet's work queue. Rows disappear once any domain is imported.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => void refetchBacklog()}
+              className="text-[11px] px-2.5 py-1.5 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 transition-colors"
+            >
+              Refresh
+            </button>
+            <a
+              href={apiUrl("/api/admin/extraction/backlog?format=csv")}
+              className="text-[11px] px-2.5 py-1.5 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 transition-colors"
+            >
+              Export CSV
+            </a>
+          </div>
+        </div>
+
+        {backlogLoading ? (
+          <p className="text-[11px] text-slate-500">Loading…</p>
+        ) : backlogError ? (
+          <p className="text-[11px] text-red-400">Failed to load the backlog.</p>
+        ) : backlog.length === 0 ? (
+          <p className="text-[11px] text-emerald-400">
+            Nothing waiting — every linked contract has a promoted extraction.
+          </p>
+        ) : (
+          <div className="rounded-lg border border-slate-800 overflow-x-auto">
+            <table className="w-full text-[11px]">
+              <thead className="bg-slate-900 text-slate-500">
+                <tr>
+                  <th className="text-left px-3 py-2 font-medium">Doc</th>
+                  <th className="text-left px-3 py-2 font-medium">District</th>
+                  <th className="text-left px-3 py-2 font-medium">Unit</th>
+                  <th className="text-left px-3 py-2 font-medium">School year</th>
+                  <th className="text-left px-3 py-2 font-medium">Linked</th>
+                  <th className="text-left px-3 py-2 font-medium">File hash</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800">
+                {backlog.map((b) => (
+                  <tr key={b.sourceDocId} className="bg-slate-950">
+                    <td className="px-3 py-2 align-top text-slate-500 font-mono">
+                      #{b.sourceDocId}
+                    </td>
+                    <td className="px-3 py-2 align-top text-slate-300">
+                      {b.districtName}
+                      <div className="text-slate-600 font-mono">id {b.districtId}</div>
+                    </td>
+                    <td className="px-3 py-2 align-top text-slate-400">
+                      {b.bargainingUnitLabel ?? b.bargainingUnit ?? "—"}
+                    </td>
+                    <td className="px-3 py-2 align-top text-slate-400">
+                      {b.schoolYear ?? "—"}
+                    </td>
+                    <td className="px-3 py-2 align-top text-slate-400">
+                      {b.linkedAt ? new Date(b.linkedAt).toLocaleDateString() : "—"}
+                    </td>
+                    <td className="px-3 py-2 align-top text-slate-600 font-mono break-all">
+                      {b.fileHash ? b.fileHash.slice(0, 12) + "…" : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
     </div>
   );
 }
