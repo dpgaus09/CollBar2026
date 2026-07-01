@@ -1550,6 +1550,16 @@ function requestedByFromReq(req: Request): string {
  * is derived from the school year when available (better display/sorting; v1
  * extraction does not parse contract dates).
  */
+// Arbitrary namespace for the per-source-doc contract-attach advisory lock. Two
+// bulk-import entries carrying the SAME contract bytes dedup onto ONE source doc
+// and can then race this attach concurrently. The contracts unique index is
+// (district_id, bargaining_unit, unit_scope, effective_start) and unit_scope is
+// NULL for uploads, so Postgres treats the two rows as DISTINCT (NULL != NULL)
+// and ON CONFLICT DO NOTHING would NOT collapse them → two contracts for one
+// doc. Serialise the SELECT+INSERT per source doc so the second caller sees the
+// first's row and reuses it instead of inserting a duplicate.
+const CONTRACT_ATTACH_LOCK_NS = 0x63626161; // "cbaa"
+
 async function ensureContractForUpload(
   sourceDocId: number,
   districtId: number,
@@ -1557,34 +1567,40 @@ async function ensureContractForUpload(
   schoolYear: string | null,
   unitOverride = false,
 ): Promise<{ contractId: string | null }> {
-  const existing = await db.execute(sql`
-    SELECT id::text AS id FROM contracts WHERE source_doc_id = ${sourceDocId} LIMIT 1
-  `);
-  if (existing.rows.length) {
-    return { contractId: (existing.rows[0] as { id: string }).id };
-  }
   let effectiveStart: string | null = null;
   if (schoolYear) {
     const m = /^(\d{4})-\d{2}$/.exec(schoolYear);
     if (m) effectiveStart = `${m[1]}-07-01`;
   }
-  const inserted = await db.execute(sql`
-    INSERT INTO contracts (district_id, bargaining_unit, effective_start, source_doc_id, unit_override)
-    VALUES (${districtId}, ${unit}, ${effectiveStart}, ${sourceDocId}, ${unitOverride})
-    ON CONFLICT (district_id, bargaining_unit, unit_scope, effective_start) DO NOTHING
-    RETURNING id::text AS id
-  `);
-  if (inserted.rows.length) {
-    return { contractId: (inserted.rows[0] as { id: string }).id };
-  }
-  // Conflict: a contract for the same (district, unit, scope, start) already
-  // exists pointing at another doc. The version is still recorded for audit, but
-  // promotion will find zero targets and surface needs_review.
-  console.warn(
-    `[admin] ensureContractForUpload: could not attach a contract for doc ${sourceDocId} ` +
-      `(district ${districtId}, unit ${unit}); promotion will report needs_review.`,
-  );
-  return { contractId: null };
+  return await db.transaction(async (tx) => {
+    // Serialise concurrent attaches for THIS source doc; auto-released at commit.
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(${CONTRACT_ATTACH_LOCK_NS}, ${sourceDocId})`,
+    );
+    const existing = await tx.execute(sql`
+      SELECT id::text AS id FROM contracts WHERE source_doc_id = ${sourceDocId} LIMIT 1
+    `);
+    if (existing.rows.length) {
+      return { contractId: (existing.rows[0] as { id: string }).id };
+    }
+    const inserted = await tx.execute(sql`
+      INSERT INTO contracts (district_id, bargaining_unit, effective_start, source_doc_id, unit_override)
+      VALUES (${districtId}, ${unit}, ${effectiveStart}, ${sourceDocId}, ${unitOverride})
+      ON CONFLICT (district_id, bargaining_unit, unit_scope, effective_start) DO NOTHING
+      RETURNING id::text AS id
+    `);
+    if (inserted.rows.length) {
+      return { contractId: (inserted.rows[0] as { id: string }).id };
+    }
+    // Conflict: a contract for the same (district, unit, scope, start) already
+    // exists pointing at another doc. The version is still recorded for audit, but
+    // promotion will find zero targets and surface needs_review.
+    console.warn(
+      `[admin] ensureContractForUpload: could not attach a contract for doc ${sourceDocId} ` +
+        `(district ${districtId}, unit ${unit}); promotion will report needs_review.`,
+    );
+    return { contractId: null };
+  });
 }
 
 async function handleCbaUpload(req: Request, res: Response): Promise<void> {
@@ -1875,6 +1891,29 @@ async function bulkRecordLedger(p: {
 // already ingested in this run is skipped without re-downloading; content is
 // deduped by (district, unit, hash). Every failure path records a 'failed'
 // ledger row (with the reason) and returns — it never throws.
+// drizzle wraps the driver error in a generic "Failed query: ..." Error, so the
+// pg fields (code/constraint) live on the .cause chain, not the top-level error
+// — and under true co-flight the wrapper message carries NO "unique"/"duplicate"
+// token, so a message-only check misses the conflict. Walk the chain to recover
+// the SQLSTATE (23505 = unique_violation) and constraint name.
+function pgErrorInfo(err: unknown): { code?: string; constraint?: string } {
+  let node: unknown = err;
+  for (let i = 0; i < 5 && node; i++) {
+    const n = node as { code?: string; constraint?: string; cause?: unknown };
+    if (n.code != null || n.constraint != null) {
+      return { code: n.code, constraint: n.constraint };
+    }
+    node = n.cause;
+  }
+  return {};
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  const pg = pgErrorInfo(err);
+  const msg = String((err as { message?: string })?.message ?? err);
+  return pg.code === "23505" || pg.constraint != null || /unique|duplicate/i.test(msg);
+}
+
 async function bulkIngestOneFile(
   runId: string,
   e: BulkIngestEntry,
@@ -2005,7 +2044,7 @@ async function bulkIngestOneFile(
       status = "ingested";
     } catch (err) {
       const msg = String((err as Error).message ?? err);
-      if (/unique|duplicate/i.test(msg)) {
+      if (isUniqueViolation(err)) {
         const r = await db.execute(sql`
           SELECT id FROM source_documents
           WHERE district_id = ${districtId} AND bargaining_unit = ${unit} AND file_hash = ${fileHash}
@@ -2895,22 +2934,8 @@ async function handleReassignUnit(req: Request, res: Response): Promise<void> {
   } catch (err) {
     // drizzle wraps the driver error in a "Failed query" Error, so the pg
     // fields (code/constraint) live on the .cause chain, not the top error.
-    // Walk the chain to find the first node that carries them.
-    let pg: { code?: string; constraint?: string } = {};
-    let node: unknown = err;
-    for (let i = 0; i < 5 && node; i++) {
-      const n = node as { code?: string; constraint?: string; cause?: unknown };
-      if (n.code != null || n.constraint != null) {
-        pg = { code: n.code, constraint: n.constraint };
-        break;
-      }
-      node = n.cause;
-    }
-    const constraint = pg.constraint;
-    const code = pg.code;
-    const msg = String((err as { message?: string })?.message ?? err);
-    const isUnique = code === "23505" || /unique|duplicate/i.test(msg) || constraint != null;
-    if (isUnique) {
+    const { constraint } = pgErrorInfo(err);
+    if (isUniqueViolation(err)) {
       if (constraint === "settlements_district_unit_year_unique") {
         res.status(409).json({
           error:

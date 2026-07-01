@@ -1039,16 +1039,15 @@ describe("POST /admin/bulk-cba/ingest — a stuck file in one batch never blocks
 // that poisons the batch.
 //
 // NOTE ON THE LOSER'S STATUS: whichever INSERT loses the race hits that unique
-// index. The catch (admin.ts ~2006) only re-selects the winner and reports
-// 'duplicate' when the driver's error string matches /unique|duplicate/i; under
-// true co-flight the pg driver instead surfaces a generic "Failed query: ..."
-// message with no such token, so the loser is currently reported 'failed'. Data
-// integrity is unaffected (the DB index still collapses to one row), so this
-// test asserts the invariant that matters — one doc/contract/job — and tolerates
-// EITHER loser status. (Reporting the concurrent loser cleanly as 'duplicate' is
-// a tracked follow-up.) This test forces the race with a barrier (both dup
-// entries provably co-flight in one wave) and asserts the single-doc outcome
-// plus an untouched, independently-ingested sibling.
+// index. Under true co-flight the pg driver surfaces a generic "Failed query:
+// ..." wrapper message with NO "unique"/"duplicate" token, so a message-only
+// check would miss the conflict and misreport the loser as 'failed'. The catch
+// (admin.ts) instead walks the error's .cause chain for the SQLSTATE (23505 =
+// unique_violation) and constraint name, so the concurrent loser is reported
+// cleanly as 'duplicate' — never a scary 'failed' for a contract that actually
+// imported. This test forces the race with a barrier (both dup entries provably
+// co-flight in one wave) and asserts the single-doc outcome, the 'duplicate'
+// loser, plus an untouched, independently-ingested sibling.
 describe("POST /admin/bulk-cba/ingest — the same contract twice in one batch is saved once", () => {
   it("two entries sharing one content hash race in one wave → exactly one doc/contract/job", async () => {
     const runId = `${MARK}-dupbatch`;
@@ -1166,25 +1165,18 @@ describe("POST /admin/bulk-cba/ingest — the same contract twice in one batch i
 
     // Exactly one of the pair wins the INSERT ('ingested'); the other never
     // creates a second document. Under tight co-flight the loser's concurrent
-    // INSERT hits the unique index — today that surfaces as 'failed' (the DB
-    // conflict is genuine, but the driver wraps it in a generic "Failed query"
-    // message that the duplicate-detect regex misses) rather than the clean
-    // 'duplicate' it would get if the two happened to serialize. Either way it
-    // adds no second doc and is never silently dropped, so the test tolerates
-    // both statuses. (Reporting the concurrent loser as 'duplicate' — and the
-    // contract-attach race that change would then expose downstream — is a
-    // tracked follow-up; this test guards the data-integrity invariant, which is
-    // what must never regress.)
+    // INSERT hits the unique index — and because the catch recovers the SQLSTATE
+    // (23505) from the driver error's .cause chain rather than sniffing the
+    // wrapper message, the loser is reported cleanly as 'duplicate' (not a scary
+    // 'failed' for a contract that actually imported), deduped onto the winner's
+    // doc.
     const winner = d1.status === "ingested" ? d1 : d2;
     const loser = d1.status === "ingested" ? d2 : d1;
     expect(winner.status).toBe("ingested");
     expect(typeof winner.sourceDocId).toBe("number");
-    expect(["duplicate", "failed"]).toContain(loser.status);
-    // The loser never references a *different* doc: it either deduped onto the
-    // winner's doc or carries no doc id at all.
-    if (loser.sourceDocId != null) {
-      expect(loser.sourceDocId).toBe(winner.sourceDocId);
-    }
+    expect(loser.status).toBe("duplicate");
+    // The loser deduped onto the winner's doc — same id, never a different one.
+    expect(loser.sourceDocId).toBe(winner.sourceDocId);
 
     // Object Storage is ensured for BOTH duplicate entries (the upload precedes
     // the content-dedup check) plus the good one — yet still only one shared doc
