@@ -39,6 +39,7 @@ import {
   markJobDone,
   markJobFailed,
   recoverStaleJobs,
+  ensureQueueRecoverySchema,
   type ExtractionJob,
 } from "./queue";
 import {
@@ -401,9 +402,13 @@ export async function startWorker(): Promise<void> {
   started = true;
   stopRequested = false;
   try {
-    const recovered = await recoverStaleJobs();
-    if (recovered) {
-      logger.warn({ recovered }, "extraction worker: recovered interrupted jobs at boot");
+    await ensureQueueRecoverySchema();
+    const { requeued, failed } = await recoverStaleJobs();
+    if (requeued || failed) {
+      logger.warn(
+        { requeued, failed },
+        "extraction worker: recovered interrupted jobs at boot (re-queued; failed = exceeded recovery limit)",
+      );
     }
   } catch (err) {
     logger.error({ err }, "extraction worker: stale-job recovery failed");

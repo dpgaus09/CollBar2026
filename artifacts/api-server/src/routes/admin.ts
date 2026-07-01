@@ -26,7 +26,12 @@ import {
   matchEntries,
   isPdfFile,
 } from "../lib/bulk-cba.js";
-import { enqueueJob, listJobs, getQueueStats } from "../extraction/jobs/queue.js";
+import {
+  enqueueJob,
+  listJobs,
+  getQueueStats,
+  requeueInterruptedJobs,
+} from "../extraction/jobs/queue.js";
 import { heavyAdminLimiter } from "../lib/rateLimit.js";
 import {
   getVersionsForDoc,
@@ -2700,6 +2705,31 @@ router.post("/admin/extraction/rerun-flagged", requireAdminToken, heavyAdminLimi
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+// POST /admin/extraction/requeue-interrupted — recover jobs that FAILED for
+// infrastructure reasons, not content reasons: an orphaned in-flight job after a
+// deploy/restart ('recovered from interrupted run') or a transient DB read error
+// during processing ('Failed query: ...'). Both are safe to retry and produced no
+// extraction output. Genuine content/logic failures (descriptive extractor
+// errors) are intentionally left 'failed' so we don't spend paid Vision calls
+// resurrecting deterministically-broken extractions. Re-queues at most ONE failed
+// row per source doc, and only when no active job already exists for that doc
+// (respects the extraction_jobs_active_doc_uniq partial unique index).
+router.post(
+  "/admin/extraction/requeue-interrupted",
+  requireAdminToken,
+  heavyAdminLimiter,
+  async (_req, res) => {
+    try {
+      const requeued = await requeueInterruptedJobs();
+      const stats = await getQueueStats();
+      res.json({ requeued, stats });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
 
 // POST /admin/extraction/enqueue — queue a single-doc extraction job for any
 // domain (Task #176). Lets an admin re-run salary/provisions ("cba" = both),

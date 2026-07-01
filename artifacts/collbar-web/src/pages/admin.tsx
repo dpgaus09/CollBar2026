@@ -4904,6 +4904,28 @@ function ExtractionEngineTab() {
     onError: (e: Error) => setActionMsg(e.message),
   });
 
+  const requeueInterrupted = useMutation({
+    mutationFn: () =>
+      fetch(apiUrl("/api/admin/extraction/requeue-interrupted"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+      }).then(async (r) => {
+        const j = (await r.json()) as { requeued?: number; error?: string };
+        if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
+        return j;
+      }),
+    onSuccess: (j) => {
+      setActionMsg(
+        j.requeued
+          ? `Re-queued ${j.requeued} job(s) that failed from a restart or transient error.`
+          : `No interrupted or transient failures to re-queue.`,
+      );
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/extraction/queue"] });
+    },
+    onError: (e: Error) => setActionMsg(e.message),
+  });
+
   const rerunFlagged = useMutation({
     mutationFn: () =>
       fetch(apiUrl("/api/admin/extraction/rerun-flagged"), {
@@ -4972,13 +4994,23 @@ function ExtractionEngineTab() {
           time to drain:{" "}
           <span className="text-slate-200">{fmtDuration(stats?.estRemainingSec)}</span>
         </span>
-        <button
-          onClick={() => rerunFlagged.mutate()}
-          disabled={rerunFlagged.isPending}
-          className="text-xs px-3 py-1.5 rounded border border-slate-700 text-slate-300 hover:border-blue-600 hover:text-blue-300 transition-colors disabled:opacity-50"
-        >
-          {rerunFlagged.isPending ? "Enqueuing…" : "Re-run flagged docs"}
-        </button>
+        <span className="flex gap-2">
+          <button
+            onClick={() => requeueInterrupted.mutate()}
+            disabled={requeueInterrupted.isPending}
+            title="Re-queue jobs that failed because a deploy/restart or a transient DB error interrupted them (not content failures)."
+            className="text-xs px-3 py-1.5 rounded border border-slate-700 text-slate-300 hover:border-amber-600 hover:text-amber-300 transition-colors disabled:opacity-50"
+          >
+            {requeueInterrupted.isPending ? "Re-queuing…" : "Re-queue interrupted failures"}
+          </button>
+          <button
+            onClick={() => rerunFlagged.mutate()}
+            disabled={rerunFlagged.isPending}
+            className="text-xs px-3 py-1.5 rounded border border-slate-700 text-slate-300 hover:border-blue-600 hover:text-blue-300 transition-colors disabled:opacity-50"
+          >
+            {rerunFlagged.isPending ? "Enqueuing…" : "Re-run flagged docs"}
+          </button>
+        </span>
       </div>
 
       {actionMsg && (

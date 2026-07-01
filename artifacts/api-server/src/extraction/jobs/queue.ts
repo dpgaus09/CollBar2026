@@ -164,19 +164,113 @@ export async function markJobFailed(
   `);
 }
 
+// How many times an orphaned 'running' job may be recovered (re-queued) after a
+// crash/restart before we give up and mark it 'failed'. An interruption is NOT
+// the job's fault — a deploy/SIGKILL killed the in-flight worker (a Vision job
+// runs ~5min, far longer than the platform shutdown grace window) — so it must
+// not consume the genuine processing budget (attempts/max_attempts); recovery
+// refunds the claim-time attempt. We still bound recoveries so a job that
+// repeatedly crashes the whole Node process (e.g. OOM on a huge PDF) cannot loop
+// forever and wedge the single-concurrency queue.
+export const MAX_RECOVERIES = 10;
+
+// Idempotent: ensure the recovery bookkeeping column exists before the worker
+// uses it. app.ts also creates it at boot, but that migration runs un-awaited via
+// setImmediate, so the worker (which calls recoverStaleJobs at startup) ensures it
+// here first to avoid a boot race against an existing DB.
+export async function ensureQueueRecoverySchema(): Promise<void> {
+  await db.execute(sql`
+    ALTER TABLE extraction_jobs
+      ADD COLUMN IF NOT EXISTS recovery_count integer NOT NULL DEFAULT 0
+  `);
+}
+
+export interface RecoverResult {
+  requeued: number;
+  failed: number;
+}
+
 // Boot recovery: any job still 'running' was orphaned by a crash/restart mid-run.
-// Requeue it if attempts remain, otherwise fail it (fail-closed — never silently
-// drop). Returns how many rows were recovered.
-export async function recoverStaleJobs(): Promise<number> {
+// Refund the claim-time attempt (the run never completed a real processing
+// attempt), bump recovery_count, and re-queue while under MAX_RECOVERIES;
+// otherwise fail-closed (never silently drop). Returns how many rows were
+// re-queued vs failed.
+export async function recoverStaleJobs(): Promise<RecoverResult> {
   const res = await db.execute(sql`
-    UPDATE extraction_jobs
-    SET status = CASE WHEN attempts < max_attempts THEN 'queued' ELSE 'failed' END,
-        error = COALESCE(error, 'recovered from interrupted run'),
-        leased_at = NULL,
-        finished_at = CASE WHEN attempts < max_attempts THEN finished_at ELSE NOW() END,
-        updated_at = NOW()
-    WHERE status = 'running'
-    RETURNING id
+    WITH stale AS (
+      SELECT id, recovery_count
+      FROM extraction_jobs
+      WHERE status = 'running'
+      FOR UPDATE
+    )
+    UPDATE extraction_jobs j
+    SET recovery_count = s.recovery_count + 1,
+        attempts       = GREATEST(j.attempts - 1, 0),
+        status         = CASE WHEN s.recovery_count + 1 <= ${MAX_RECOVERIES}
+                              THEN 'queued' ELSE 'failed' END,
+        error          = CASE WHEN s.recovery_count + 1 <= ${MAX_RECOVERIES}
+                              THEN NULL
+                              ELSE COALESCE(j.error, 'exceeded interrupted-run recovery limit') END,
+        leased_at      = NULL,
+        started_at     = CASE WHEN s.recovery_count + 1 <= ${MAX_RECOVERIES}
+                              THEN NULL ELSE j.started_at END,
+        finished_at    = CASE WHEN s.recovery_count + 1 <= ${MAX_RECOVERIES}
+                              THEN NULL ELSE NOW() END,
+        updated_at     = NOW()
+    FROM stale s
+    WHERE j.id = s.id
+    RETURNING j.status
+  `);
+  let requeued = 0;
+  let failed = 0;
+  for (const r of res.rows as Array<{ status: string }>) {
+    if (r.status === "queued") requeued += 1;
+    else failed += 1;
+  }
+  return { requeued, failed };
+}
+
+// Admin recovery: re-queue jobs that FAILED for infrastructure reasons, not
+// content reasons — an in-flight job orphaned by a deploy/restart ('recovered
+// from interrupted run') or a transient DB read error during processing ('Failed
+// query: ...'). Both are safe to retry and produced no extraction output. Genuine
+// content/logic failures (descriptive extractor errors) are left 'failed' so we
+// don't spend paid Vision calls resurrecting deterministically-broken runs.
+// Re-queues at most ONE failed row per source doc, and only when no active job
+// already exists for that doc (respects extraction_jobs_active_doc_uniq). Returns
+// how many rows were re-queued.
+export async function requeueInterruptedJobs(): Promise<number> {
+  const res = await db.execute(sql`
+    WITH candidates AS (
+      SELECT id, source_doc_id,
+             ROW_NUMBER() OVER (PARTITION BY source_doc_id ORDER BY id DESC) AS rn
+      FROM extraction_jobs
+      WHERE status = 'failed'
+        AND (error = 'recovered from interrupted run' OR error LIKE 'Failed query:%')
+    ),
+    eligible AS (
+      SELECT c.id
+      FROM candidates c
+      WHERE c.rn = 1
+        AND NOT EXISTS (
+          SELECT 1 FROM extraction_jobs a
+          WHERE a.source_doc_id = c.source_doc_id
+            AND a.status IN ('queued','running')
+        )
+    )
+    UPDATE extraction_jobs j
+    SET status         = 'queued',
+        attempts       = 0,
+        recovery_count = 0,
+        error          = NULL,
+        result         = NULL,
+        leased_at      = NULL,
+        started_at     = NULL,
+        finished_at    = NULL,
+        updated_at     = NOW()
+    FROM eligible e
+    WHERE j.id = e.id
+    RETURNING j.id
   `);
   return res.rows.length;
 }

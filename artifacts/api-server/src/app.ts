@@ -673,6 +673,7 @@ async function runMigrations(): Promise<void> {
         priority       integer NOT NULL DEFAULT 100,
         attempts       integer NOT NULL DEFAULT 0,
         max_attempts   integer NOT NULL DEFAULT 1,
+        recovery_count integer NOT NULL DEFAULT 0,
         model          text,
         requested_by   text,
         request_reason text,
@@ -686,6 +687,15 @@ async function runMigrations(): Promise<void> {
         CONSTRAINT extraction_jobs_domain_check CHECK (domain IN ('salary','provisions','cba','settlement','final_offer','contract_meta')),
         CONSTRAINT extraction_jobs_status_check CHECK (status IN ('queued','running','done','failed','canceled'))
       )
+    `);
+    // Additive: bookkeeping for how many times an orphaned 'running' job has been
+    // re-queued after a crash/restart. A platform SIGKILL of the in-flight worker
+    // is NOT a genuine processing failure, so it must not consume the attempts
+    // budget — boot recovery refunds the claim and re-queues, bounded by this
+    // counter. Idempotent for tables created before this column existed.
+    await db.execute(sql`
+      ALTER TABLE extraction_jobs
+        ADD COLUMN IF NOT EXISTS recovery_count integer NOT NULL DEFAULT 0
     `);
     // At most one ACTIVE (queued|running) job per source document — enforces the
     // "one job per doc" enqueue dedupe at the DB level (a 'cba' job covers both
