@@ -65,6 +65,12 @@ app.use(
     credentials: true,
   }),
 );
+// HERMES import (Task #248): externally-produced normalized JSON is batched (up
+// to 100 documents per request), so it needs a higher body limit than the app
+// default. This parser MUST be mounted BEFORE the global 100kb express.json()
+// below, or the global one 413s the large payload first (body-parser skips the
+// second parse once req._body is set).
+app.use("/api/admin/extraction/import", express.json({ limit: "25mb" }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 

@@ -9,9 +9,17 @@ Uploaded CBA PDFs (`source_documents` rows with `source_url LIKE 'upload://%'`) 
 served to the customer dashboard via `GET /dashboard/document?src=upload://...`.
 
 **Rule:** the durable copy lives in Replit Object Storage (GCS App Storage, via the
-Replit sidecar), keyed `il_cba/<file_hash>.pdf` (`uploadedCbaKey`). The serving
-route streams from object storage by `file_hash` FIRST; the local `storage_key`
-(`local:<absPath>`) is only a dev fallback.
+Replit sidecar), keyed `il_cba/<file_hash>.pdf` (`uploadedCbaKey`). Once past the
+`storage_key` gate the serving route streams from object storage by `file_hash`
+FIRST; the local `storage_key` (`local:<absPath>`) is only a dev fallback.
+
+**Serving gate (subtle):** the serving routes (`dashboard.ts`, `firm-compare.ts`)
+404 (`"Document not found"`) when `source_documents.storage_key` IS NULL *before*
+they ever try object storage by `file_hash`. So a NULL `storage_key` breaks the
+source link even when the bytes are present in the bucket. Any ingest path that
+writes bytes to object storage MUST also set/backfill a non-NULL `storage_key`
+(e.g. `linkUploadedCba` backfills it on its dedup paths), and an import
+precondition can safely use `storage_key != NULL` as the "servable" signal.
 
 **Why:** the local filesystem under `pipeline/data/il_cba/` is dev-only — it is
 excluded from the deploy image (`.replitignore`) AND ephemeral on autoscale. A row

@@ -4425,6 +4425,441 @@ function UploadCbaTab() {
 }
 
 // ---------------------------------------------------------------------------
+// HERMES off-platform import (Task #248)
+//
+// Extraction runs off-platform on the external HERMES fleet; this panel lets an
+// admin manually (1) link a source PDF to a district WITHOUT queuing extraction,
+// then (2) import externally-produced normalized JSON through the same
+// version+promote pipeline the in-app engine uses. HERMES itself calls the same
+// two endpoints over the API; this UI is for spot checks and one-offs.
+// ---------------------------------------------------------------------------
+
+interface HermesImportResult {
+  ok: boolean;
+  count: number;
+  summary: { ingested: number; updated: number; skipped: number; failed: number; partial: number };
+  results: Array<{
+    index: number;
+    status: string;
+    reason?: string;
+    districtId?: number;
+    districtName?: string;
+    bargainingUnit?: string;
+    sourceDocId?: number;
+    domains: Record<string, { status: string; reason?: string; targets?: number; versionId?: string }>;
+  }>;
+}
+
+function HermesImportTab() {
+  const { data: session } = useAdminSession();
+  const isAuthenticated = session?.authenticated === true;
+
+  const { data: districtsData } = useQuery<{ districts: District[] }>({
+    queryKey: ["/api/dashboard/districts"],
+    queryFn: () =>
+      fetch(apiUrl("/api/dashboard/districts"), { credentials: "include" }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    enabled: isAuthenticated,
+    retry: false,
+  });
+  const districts = districtsData?.districts ?? [];
+
+  // --- Link PDF state ---
+  const [file, setFile] = useState<File | null>(null);
+  const [districtId, setDistrictId] = useState("");
+  const [districtSearch, setDistrictSearch] = useState("");
+  const [unit, setUnit] = useState("teachers");
+  const [schoolYear, setSchoolYear] = useState("");
+  const [linking, setLinking] = useState(false);
+  const [linkError, setLinkError] = useState("");
+  const [linkResult, setLinkResult] = useState<{
+    sourceDocId: number;
+    fileHash: string;
+    districtName: string;
+    created: boolean;
+  } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // --- Import JSON state ---
+  const [json, setJson] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState("");
+  const [importResult, setImportResult] = useState<HermesImportResult | null>(null);
+
+  const linkPdf = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLinkError("");
+    setLinkResult(null);
+    if (!file) {
+      setLinkError("Choose a PDF file to link.");
+      return;
+    }
+    if (!districtId) {
+      setLinkError("Select the district this contract belongs to.");
+      return;
+    }
+    setLinking(true);
+    try {
+      const params = new URLSearchParams({
+        district_id: districtId,
+        bargaining_unit: unit,
+        filename: file.name,
+      });
+      if (schoolYear.trim()) params.set("school_year", schoolYear.trim());
+      const r = await fetch(apiUrl(`/api/admin/extraction/link-pdf?${params}`), {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/pdf" },
+        body: file,
+      });
+      const body = (await r.json()) as {
+        ok?: boolean;
+        sourceDocId?: number;
+        fileHash?: string;
+        districtName?: string;
+        created?: boolean;
+        error?: string;
+      };
+      if (!r.ok || !body.ok) {
+        setLinkError(body.error ?? `Link failed (HTTP ${r.status})`);
+      } else {
+        setLinkResult({
+          sourceDocId: body.sourceDocId ?? 0,
+          fileHash: body.fileHash ?? "",
+          districtName: body.districtName ?? "",
+          created: body.created ?? false,
+        });
+        setFile(null);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+      }
+    } catch {
+      setLinkError("Network error while linking the PDF.");
+    } finally {
+      setLinking(false);
+    }
+  };
+
+  const runImport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setImportError("");
+    setImportResult(null);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(json);
+    } catch {
+      setImportError("Body is not valid JSON.");
+      return;
+    }
+    setImporting(true);
+    try {
+      const r = await fetch(apiUrl("/api/admin/extraction/import"), {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed),
+      });
+      const body = (await r.json()) as HermesImportResult & { error?: string };
+      if (!r.ok || !body.ok) {
+        setImportError(body.error ?? `Import failed (HTTP ${r.status})`);
+      } else {
+        setImportResult(body);
+      }
+    } catch {
+      setImportError("Network error during import.");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  if (!isAuthenticated) {
+    return <LoginRequiredCard onLogin={goToLogin} />;
+  }
+
+  return (
+    <div className="space-y-10">
+      <section className="space-y-2">
+        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
+          HERMES import
+        </h2>
+        <p className="text-xs text-slate-500 leading-relaxed">
+          Extraction runs off-platform on the HERMES fleet. Use step 1 to store a source PDF and
+          attach it to a district <span className="text-slate-300">without</span> running any
+          extraction, then step 2 to import the normalized JSON the fleet produced. Both steps are
+          idempotent and use the same promotion pipeline as the in-app engine.
+        </p>
+      </section>
+
+      {/* Step 1 — link PDF */}
+      <form
+        onSubmit={linkPdf}
+        className="rounded-lg border border-slate-800 bg-slate-900 p-5 space-y-4"
+      >
+        <h3 className="text-xs font-semibold text-slate-300">1 · Link a source PDF (no extraction)</h3>
+
+        <div className="space-y-1.5">
+          <label className="text-xs text-slate-400">PDF file</label>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/pdf,.pdf"
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            className="block w-full text-xs text-slate-300 file:mr-3 file:py-2 file:px-4 file:rounded file:border-0 file:text-xs file:font-medium file:bg-blue-800 file:text-blue-100 hover:file:bg-blue-700 file:cursor-pointer"
+          />
+          {file && (
+            <p className="text-[11px] text-slate-500">
+              {file.name} · {(file.size / 1024 / 1024).toFixed(2)} MB
+            </p>
+          )}
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs text-slate-400">District</label>
+          <input
+            type="text"
+            placeholder="Filter districts by name or county…"
+            value={districtSearch}
+            onChange={(e) => {
+              setDistrictSearch(e.target.value);
+              setDistrictId("");
+            }}
+            className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:border-blue-500"
+          />
+          <select
+            value={districtId}
+            onChange={(e) => setDistrictId(e.target.value)}
+            className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 focus:border-blue-500"
+          >
+            <option value="">— Select a district —</option>
+            {districts
+              .filter(
+                (d) =>
+                  !districtSearch ||
+                  d.name.toLowerCase().includes(districtSearch.toLowerCase()) ||
+                  (d.county ?? "").toLowerCase().includes(districtSearch.toLowerCase()),
+              )
+              .map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                  {d.state ? ` (${d.state})` : ""}
+                </option>
+              ))}
+          </select>
+        </div>
+
+        <div className="flex gap-3">
+          <div className="flex-1 space-y-1.5">
+            <label className="text-xs text-slate-400">Bargaining unit</label>
+            <select
+              value={unit}
+              onChange={(e) => setUnit(e.target.value)}
+              className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 focus:border-blue-500"
+            >
+              {BARGAINING_UNIT_OPTIONS.map((u) => (
+                <option key={u.value} value={u.value}>
+                  {u.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex-1 space-y-1.5">
+            <label className="text-xs text-slate-400">
+              School year <span className="text-slate-600">(optional)</span>
+            </label>
+            <input
+              type="text"
+              placeholder="2026-27"
+              value={schoolYear}
+              onChange={(e) => setSchoolYear(e.target.value)}
+              className="w-full text-xs bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:border-blue-500"
+            />
+          </div>
+        </div>
+
+        {linkError && (
+          <div className="rounded border border-red-800 bg-red-950/30 px-3 py-2 text-xs text-red-300">
+            {linkError}
+          </div>
+        )}
+
+        <button
+          type="submit"
+          disabled={linking || !file || !districtId}
+          className="text-xs px-4 py-2 rounded bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-50 transition-colors"
+        >
+          {linking ? "Linking…" : "Link PDF"}
+        </button>
+
+        {linkResult && (
+          <div className="rounded-lg border border-emerald-800/60 bg-emerald-950/20 px-4 py-3 text-xs text-emerald-300 leading-relaxed space-y-1">
+            <div>
+              <span className="font-semibold text-emerald-200">
+                {linkResult.created ? "Linked." : "Already on file."}
+              </span>{" "}
+              {linkResult.districtName} · source document{" "}
+              <span className="font-mono">#{linkResult.sourceDocId}</span>
+            </div>
+            <div className="text-emerald-400/80 break-all">
+              file hash: <span className="font-mono">{linkResult.fileHash}</span>
+            </div>
+            <div className="text-emerald-400/70">
+              Reference this sourceDocId (or district + fileHash) in the import below.
+            </div>
+          </div>
+        )}
+      </form>
+
+      {/* Step 2 — import JSON */}
+      <form
+        onSubmit={runImport}
+        className="rounded-lg border border-slate-800 bg-slate-900 p-5 space-y-4"
+      >
+        <h3 className="text-xs font-semibold text-slate-300">2 · Import normalized JSON</h3>
+        <p className="text-[11px] text-slate-500 leading-relaxed">
+          Paste a single envelope or a <span className="font-mono">{`{ "documents": [...] }`}</span>{" "}
+          batch (max 100). Each envelope needs a{" "}
+          <span className="font-mono">sourceDocId</span> (or{" "}
+          <span className="font-mono">district</span> + <span className="font-mono">fileHash</span>),{" "}
+          <span className="font-mono">bargainingUnit</span>, and a{" "}
+          <span className="font-mono">domains</span> object with any of{" "}
+          <span className="font-mono">salary</span>, <span className="font-mono">provisions</span>,{" "}
+          <span className="font-mono">contractMeta</span>.
+        </p>
+        <textarea
+          value={json}
+          onChange={(e) => setJson(e.target.value)}
+          rows={12}
+          spellCheck={false}
+          placeholder={
+            '{\n  "sourceDocId": 123,\n  "bargainingUnit": "teachers",\n  "schoolYear": "2026-27",\n  "domains": {\n    "salary": { ... },\n    "provisions": { ... },\n    "contractMeta": { ... }\n  }\n}'
+          }
+          className="w-full text-[11px] font-mono bg-slate-950 border border-slate-700 rounded px-3 py-2 text-slate-200 placeholder-slate-600 focus:border-blue-500"
+        />
+
+        {importError && (
+          <div className="rounded border border-red-800 bg-red-950/30 px-3 py-2 text-xs text-red-300">
+            {importError}
+          </div>
+        )}
+
+        <button
+          type="submit"
+          disabled={importing || !json.trim()}
+          className="text-xs px-4 py-2 rounded bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-50 transition-colors"
+        >
+          {importing ? "Importing…" : "Import"}
+        </button>
+
+        {importResult && (
+          <div className="space-y-3">
+            <div className="flex flex-wrap gap-2 text-[11px]">
+              <span className="px-2 py-1 rounded bg-slate-800 text-slate-300">
+                {importResult.count} document{importResult.count === 1 ? "" : "s"}
+              </span>
+              {importResult.summary.ingested > 0 && (
+                <span className="px-2 py-1 rounded bg-emerald-950/40 text-emerald-300">
+                  {importResult.summary.ingested} ingested
+                </span>
+              )}
+              {importResult.summary.updated > 0 && (
+                <span className="px-2 py-1 rounded bg-blue-950/40 text-blue-300">
+                  {importResult.summary.updated} updated
+                </span>
+              )}
+              {importResult.summary.skipped > 0 && (
+                <span className="px-2 py-1 rounded bg-slate-800 text-slate-400">
+                  {importResult.summary.skipped} skipped
+                </span>
+              )}
+              {importResult.summary.partial > 0 && (
+                <span className="px-2 py-1 rounded bg-amber-950/40 text-amber-300">
+                  {importResult.summary.partial} partial
+                </span>
+              )}
+              {importResult.summary.failed > 0 && (
+                <span className="px-2 py-1 rounded bg-red-950/40 text-red-300">
+                  {importResult.summary.failed} failed
+                </span>
+              )}
+            </div>
+            <div className="rounded-lg border border-slate-800 overflow-hidden">
+              <table className="w-full text-[11px]">
+                <thead className="bg-slate-900 text-slate-500">
+                  <tr>
+                    <th className="text-left px-3 py-2 font-medium">#</th>
+                    <th className="text-left px-3 py-2 font-medium">Status</th>
+                    <th className="text-left px-3 py-2 font-medium">Document</th>
+                    <th className="text-left px-3 py-2 font-medium">Domains</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800">
+                  {importResult.results.map((row) => (
+                    <tr key={row.index} className="bg-slate-950">
+                      <td className="px-3 py-2 text-slate-500 align-top">{row.index}</td>
+                      <td className="px-3 py-2 align-top">
+                        <span
+                          className={
+                            row.status === "ingested" || row.status === "updated"
+                              ? "text-emerald-400"
+                              : row.status === "skipped"
+                                ? "text-slate-400"
+                                : row.status === "partial"
+                                  ? "text-amber-400"
+                                  : "text-red-400"
+                          }
+                        >
+                          {row.status}
+                        </span>
+                        {row.reason && (
+                          <div className="text-slate-600">{row.reason}</div>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 align-top text-slate-400">
+                        {row.districtName ? <div>{row.districtName}</div> : null}
+                        {row.sourceDocId ? (
+                          <div className="text-slate-600 font-mono">doc #{row.sourceDocId}</div>
+                        ) : null}
+                        {row.bargainingUnit ? (
+                          <div className="text-slate-600">{row.bargainingUnit}</div>
+                        ) : null}
+                      </td>
+                      <td className="px-3 py-2 align-top">
+                        {Object.entries(row.domains).map(([name, d]) => (
+                          <div key={name} className="text-slate-500">
+                            <span className="text-slate-400">{name}</span>:{" "}
+                            <span
+                              className={
+                                d.status === "ingested" || d.status === "updated"
+                                  ? "text-emerald-400"
+                                  : d.status === "skipped"
+                                    ? "text-slate-400"
+                                    : "text-red-400"
+                              }
+                            >
+                              {d.status}
+                            </span>
+                            {d.reason ? (
+                              <span className="text-slate-600"> ({d.reason})</span>
+                            ) : d.targets != null ? (
+                              <span className="text-slate-600"> · {d.targets} row(s)</span>
+                            ) : null}
+                          </div>
+                        ))}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </form>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Fix a contract's bargaining unit (Task #158)
 //
 // Look up a district, list its contracts, and reassign any contract to the
@@ -6492,7 +6927,7 @@ function FirmsTab() {
   );
 }
 
-type TabKey = "overview" | "crawl-report" | "extraction-report" | "extraction" | "review-queue" | "alerts" | "eis-crosscheck" | "customers" | "firms" | "upload" | "salary-data" | "bulk-cba";
+type TabKey = "overview" | "crawl-report" | "extraction-report" | "extraction" | "review-queue" | "alerts" | "eis-crosscheck" | "customers" | "firms" | "upload" | "salary-data" | "bulk-cba" | "hermes";
 
 function useAlertsPendingCount() {
   return useQuery<{ pendingCount: number }>({
@@ -6517,6 +6952,7 @@ const TABS: { key: TabKey; label: string; path: string }[] = [
   { key: "alerts", label: "Alerts", path: "/admin/alerts" },
   { key: "eis-crosscheck", label: "EIS Cross-Check", path: "/admin/eis-crosscheck" },
   { key: "bulk-cba", label: "Bulk CBA Import", path: "/admin/bulk-cba" },
+  { key: "hermes", label: "HERMES Import", path: "/admin/hermes" },
   { key: "customers", label: "Customers", path: "/admin/customers" },
   { key: "firms", label: "Firms", path: "/admin/firms" },
 ];
@@ -6531,6 +6967,7 @@ function activeTab(location: string): TabKey {
   if (location.includes("crawl-report")) return "crawl-report";
   if (location.includes("eis-crosscheck")) return "eis-crosscheck";
   if (location.includes("bulk-cba")) return "bulk-cba";
+  if (location.includes("/admin/hermes")) return "hermes";
   if (location.includes("customers")) return "customers";
   if (location.includes("firms")) return "firms";
   return "overview";
@@ -6634,6 +7071,7 @@ export default function AdminPage() {
         {tab === "alerts" && <AlertsTab />}
         {tab === "eis-crosscheck" && <EisXCheckTab />}
         {tab === "bulk-cba" && <BulkCbaImportTab />}
+        {tab === "hermes" && <HermesImportTab />}
         {tab === "customers" && <CustomersTab />}
         {tab === "firms" && <FirmsTab />}
       </main>

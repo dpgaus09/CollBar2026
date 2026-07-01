@@ -40,7 +40,25 @@ import {
   getPromotions,
   diffAgainstPromoted,
   promoteVersion,
+  createVersion,
+  type VersionDomain,
 } from "../extraction/jobs/versions.js";
+import {
+  resolveDistrictDb,
+  linkUploadedCba,
+  ensureContractForUpload,
+  findSourceDoc,
+  getSourceDocById,
+  ObjectStorageWriteError,
+  type DistrictIdentity,
+  type FoundSourceDoc,
+} from "../lib/cba-ingest.js";
+import {
+  validateSalaryNormalized,
+  validateProvisionsNormalized,
+  validateContractMetaNormalized,
+  countProvisions,
+} from "../lib/hermes-normalize.js";
 
 declare module "express-session" {
   interface SessionData {
@@ -1547,68 +1565,8 @@ function requestedByFromReq(req: Request): string {
   return uid != null ? `user:${uid}` : "admin";
 }
 
-/**
- * Ensure a minimal contracts row exists for an uploaded document so a later
- * promotion can ATTACH extracted salary/provisions to it (the store functions
- * match on contracts.source_doc_id). Python used to create this row; the
- * in-process upload path must do it explicitly. unit_scope is left NULL so the
- * (district, unit, scope, start) unique key never collides with a crawled
- * contract — each distinct upload gets its own attachable row. effective_start
- * is derived from the school year when available (better display/sorting; v1
- * extraction does not parse contract dates).
- */
-// Arbitrary namespace for the per-source-doc contract-attach advisory lock. Two
-// bulk-import entries carrying the SAME contract bytes dedup onto ONE source doc
-// and can then race this attach concurrently. The contracts unique index is
-// (district_id, bargaining_unit, unit_scope, effective_start) and unit_scope is
-// NULL for uploads, so Postgres treats the two rows as DISTINCT (NULL != NULL)
-// and ON CONFLICT DO NOTHING would NOT collapse them → two contracts for one
-// doc. Serialise the SELECT+INSERT per source doc so the second caller sees the
-// first's row and reuses it instead of inserting a duplicate.
-const CONTRACT_ATTACH_LOCK_NS = 0x63626161; // "cbaa"
-
-async function ensureContractForUpload(
-  sourceDocId: number,
-  districtId: number,
-  unit: string,
-  schoolYear: string | null,
-  unitOverride = false,
-): Promise<{ contractId: string | null }> {
-  let effectiveStart: string | null = null;
-  if (schoolYear) {
-    const m = /^(\d{4})-\d{2}$/.exec(schoolYear);
-    if (m) effectiveStart = `${m[1]}-07-01`;
-  }
-  return await db.transaction(async (tx) => {
-    // Serialise concurrent attaches for THIS source doc; auto-released at commit.
-    await tx.execute(
-      sql`SELECT pg_advisory_xact_lock(${CONTRACT_ATTACH_LOCK_NS}, ${sourceDocId})`,
-    );
-    const existing = await tx.execute(sql`
-      SELECT id::text AS id FROM contracts WHERE source_doc_id = ${sourceDocId} LIMIT 1
-    `);
-    if (existing.rows.length) {
-      return { contractId: (existing.rows[0] as { id: string }).id };
-    }
-    const inserted = await tx.execute(sql`
-      INSERT INTO contracts (district_id, bargaining_unit, effective_start, source_doc_id, unit_override)
-      VALUES (${districtId}, ${unit}, ${effectiveStart}, ${sourceDocId}, ${unitOverride})
-      ON CONFLICT (district_id, bargaining_unit, unit_scope, effective_start) DO NOTHING
-      RETURNING id::text AS id
-    `);
-    if (inserted.rows.length) {
-      return { contractId: (inserted.rows[0] as { id: string }).id };
-    }
-    // Conflict: a contract for the same (district, unit, scope, start) already
-    // exists pointing at another doc. The version is still recorded for audit, but
-    // promotion will find zero targets and surface needs_review.
-    console.warn(
-      `[admin] ensureContractForUpload: could not attach a contract for doc ${sourceDocId} ` +
-        `(district ${districtId}, unit ${unit}); promotion will report needs_review.`,
-    );
-    return { contractId: null };
-  });
-}
+// ensureContractForUpload + the contract-attach advisory lock now live in
+// ../lib/cba-ingest.js (shared with the HERMES link/import endpoints).
 
 async function handleCbaUpload(req: Request, res: Response): Promise<void> {
   const buf = req.body as Buffer;
@@ -1803,6 +1761,432 @@ router.post("/admin/upload-cba", requireAdminToken, heavyAdminLimiter, (req, res
     });
   });
 });
+
+// ===========================================================================
+// HERMES off-platform pipeline (Task #248)
+//
+// CBA extraction moved OFF-platform to an external agent fleet ("HERMES"); this
+// app remains the system of record. Two admin endpoints let the fleet feed data
+// back in WITHOUT the app running any Claude Vision itself:
+//
+//   POST /admin/extraction/link-pdf : persist a CBA PDF (raw body) and link it
+//     to a district. Object-storage-first (servable in prod), deduped, NO
+//     extraction is queued. Returns the sourceDocId the importer references.
+//
+//   POST /admin/extraction/import : import externally-produced normalized JSON
+//     (salary / provisions / contract_meta) for one or more documents. Each
+//     domain is recorded as an immutable version and IMMEDIATELY promoted
+//     through the SAME pipeline the in-app engine uses, so the live projection,
+//     provenance, and human-verified preservation behave identically.
+// ===========================================================================
+
+// Resolve district identity from link-pdf query params (id | rcdts | name+state).
+function districtIdentityFromQuery(req: Request): DistrictIdentity {
+  return {
+    districtId: req.query.district_id != null ? String(req.query.district_id) : null,
+    rcdts: req.query.rcdts != null ? String(req.query.rcdts) : null,
+    name: req.query.district_name != null ? String(req.query.district_name) : null,
+    state: req.query.state != null ? String(req.query.state) : null,
+  };
+}
+
+// True when a district identity carries at least one resolvable field.
+function hasDistrictIdentity(d: DistrictIdentity | null | undefined): boolean {
+  if (!d) return false;
+  return (
+    (d.districtId != null && String(d.districtId).trim() !== "") ||
+    (d.rcdts != null && String(d.rcdts).trim() !== "") ||
+    (d.name != null && String(d.name).trim() !== "")
+  );
+}
+
+async function handleLinkPdf(req: Request, res: Response): Promise<void> {
+  const buf = req.body as Buffer;
+  if (!Buffer.isBuffer(buf) || buf.length === 0) {
+    res.status(400).json({ error: "No file received" });
+    return;
+  }
+  if (buf.subarray(0, 1024).indexOf(Buffer.from("%PDF")) === -1) {
+    res.status(400).json({ error: "File is not a valid PDF (missing %PDF header)" });
+    return;
+  }
+
+  const unit = req.query.bargaining_unit ? String(req.query.bargaining_unit) : "teachers";
+  if (!VALID_BARGAINING_UNITS.has(unit)) {
+    res.status(400).json({ error: `Invalid bargaining_unit: ${unit}` });
+    return;
+  }
+  const sy = normalizeSchoolYear(req.query.school_year);
+  if (!sy.ok) {
+    res.status(400).json({ error: "school_year must look like 2026-27" });
+    return;
+  }
+  const filename = sanitizeFilename(req.query.filename);
+
+  const district = await resolveDistrictDb(districtIdentityFromQuery(req));
+  if (!district) {
+    res.status(404).json({
+      error:
+        "District not found. Provide district_id, or rcdts, or district_name + state.",
+    });
+    return;
+  }
+
+  try {
+    const result = await linkUploadedCba({
+      buf,
+      district,
+      unit,
+      schoolYear: sy.value,
+      filename,
+      localDir: IL_CBA_PDF_DIR,
+    });
+    res.json({
+      ok: true,
+      created: result.created,
+      sourceDocId: result.sourceDocId,
+      fileHash: result.fileHash,
+      sourceUrl: result.sourceUrl,
+      districtId: district.id,
+      districtName: district.name,
+      bargainingUnit: unit,
+      schoolYear: sy.value,
+      contractId: result.contractId,
+      enqueued: false,
+    });
+  } catch (err) {
+    if (err instanceof ObjectStorageWriteError) {
+      res.status(502).json({
+        error:
+          "Could not save the PDF to durable storage, so it was not linked. Please try again.",
+      });
+      return;
+    }
+    throw err;
+  }
+}
+
+router.post(
+  "/admin/extraction/link-pdf",
+  requireAdminToken,
+  heavyAdminLimiter,
+  (req, res) => {
+    uploadPdfBody(req, res, (err?: unknown) => {
+      if (err) {
+        const status =
+          (err as { status?: number }).status ??
+          (err as { statusCode?: number }).statusCode;
+        if (status === 413) {
+          res.status(413).json({ error: "File too large (max 64 MB)" });
+        } else {
+          res.status(400).json({ error: "Failed to read upload body" });
+        }
+        return;
+      }
+      handleLinkPdf(req, res).catch((e) => {
+        console.error(e);
+        res.status(500).json({ error: "Internal server error" });
+      });
+    });
+  },
+);
+
+// Max documents per import request. The high-limit JSON parser for this route is
+// mounted in app.ts (before the global 100kb express.json()).
+const HERMES_IMPORT_CAP = 100;
+
+// One document envelope from the importer. `district` + `fileHash` resolve an
+// EXISTING source_documents row (created earlier by link-pdf); `sourceDocId` may
+// be given directly instead. `bargainingUnit` is authoritative.
+interface HermesEnvelope {
+  sourceDocId?: number | string | null;
+  district?: DistrictIdentity | null;
+  bargainingUnit?: string | null;
+  schoolYear?: string | null;
+  fileHash?: string | null;
+  allowClear?: boolean | null;
+  model?: string | null;
+  domains?: {
+    salary?: unknown;
+    provisions?: unknown;
+    contractMeta?: unknown;
+    contract_meta?: unknown;
+  } | null;
+}
+
+type DomainStatus = "ingested" | "updated" | "skipped" | "failed";
+interface DomainResult {
+  status: DomainStatus;
+  versionId?: string;
+  targets?: number;
+  reason?: string;
+}
+type DocStatus = DomainStatus | "partial";
+interface DocResult {
+  index: number;
+  status: DocStatus;
+  reason?: string;
+  districtId?: number;
+  districtName?: string;
+  bargainingUnit?: string;
+  sourceDocId?: number;
+  domains: Record<string, DomainResult>;
+}
+
+// Record one domain: create an immutable version, skip re-promote when the live
+// projection is already identical, else promote through the shared pipeline.
+async function importOneDomain(
+  domain: VersionDomain,
+  normalized: unknown,
+  summary: unknown,
+  ctx: { sourceDocId: number; fileHash: string | null; createdBy: string; promotedBy: string },
+): Promise<DomainResult> {
+  const { version } = await createVersion({
+    sourceDocId: ctx.sourceDocId,
+    domain,
+    fileHash: ctx.fileHash,
+    model: "hermes",
+    modelVersion: "hermes",
+    normalized,
+    summary,
+    createdBy: ctx.createdBy,
+  });
+  const diff = await diffAgainstPromoted(version.id);
+  if (diff?.identical) {
+    return { status: "skipped", versionId: version.id, reason: "already_promoted_identical" };
+  }
+  const promo = await promoteVersion(version.id, { promotedBy: ctx.promotedBy });
+  if (!promo.ok) {
+    return { status: "failed", versionId: version.id, reason: promo.reason ?? "promote_failed" };
+  }
+  if (promo.targets === 0) {
+    return { status: "failed", versionId: version.id, targets: 0, reason: "no_contract_targets" };
+  }
+  return {
+    status: promo.previousVersionId ? "updated" : "ingested",
+    versionId: version.id,
+    targets: promo.targets,
+  };
+}
+
+// Roll a document's per-domain statuses into one document status.
+function rollUpDocStatus(domains: Record<string, DomainResult>): DocStatus {
+  const statuses = Object.values(domains).map((d) => d.status);
+  if (statuses.length === 0) return "failed";
+  if (statuses.every((s) => s === "skipped")) return "skipped";
+  if (statuses.every((s) => s === "failed")) return "failed";
+  if (statuses.some((s) => s === "failed")) return "partial";
+  if (statuses.some((s) => s === "updated")) return "updated";
+  return "ingested";
+}
+
+async function processImportEnvelope(
+  env: HermesEnvelope,
+  index: number,
+  who: string,
+): Promise<DocResult> {
+  const result: DocResult = { index, status: "failed", domains: {} };
+
+  const unit = env.bargainingUnit ? String(env.bargainingUnit) : "";
+  if (!unit || !VALID_BARGAINING_UNITS.has(unit)) {
+    result.reason = `invalid_bargaining_unit: ${unit || "(missing)"}`;
+    return result;
+  }
+  result.bargainingUnit = unit;
+
+  const sy = normalizeSchoolYear(env.schoolYear);
+  if (!sy.ok) {
+    result.reason = "invalid_school_year";
+    return result;
+  }
+
+  // Resolve the (existing) source document. We never create a byte-less doc here
+  // — the PDF must already have been linked via /admin/extraction/link-pdf.
+  let doc: FoundSourceDoc | null = null;
+  if (env.sourceDocId != null && String(env.sourceDocId).trim() !== "") {
+    const id = parseInt(String(env.sourceDocId), 10);
+    if (Number.isNaN(id) || id < 1) {
+      result.reason = "invalid_source_doc_id";
+      return result;
+    }
+    doc = await getSourceDocById(id);
+  } else {
+    if (!env.fileHash || !/^[0-9a-f]{64}$/i.test(String(env.fileHash))) {
+      result.reason = "missing_file_hash";
+      return result;
+    }
+    const district = await resolveDistrictDb(env.district ?? {});
+    if (!district) {
+      result.reason = "district_not_found";
+      return result;
+    }
+    result.districtId = district.id;
+    result.districtName = district.name;
+    doc = await findSourceDoc({ districtId: district.id, unit, fileHash: String(env.fileHash) });
+  }
+  if (!doc) {
+    result.reason = "missing_source_document";
+    return result;
+  }
+  result.sourceDocId = doc.id;
+  if (result.districtId == null) result.districtId = doc.districtId;
+  // Identity consistency: the supplied bargaining unit drives contract attach, so
+  // it must match the referenced document's unit — otherwise data would be
+  // promoted onto the wrong unit. Reject a mismatched unit or (when supplied)
+  // file hash rather than silently mis-filing.
+  if (doc.unit && doc.unit !== unit) {
+    result.reason = `unit_mismatch: document is ${doc.unit}, got ${unit}`;
+    return result;
+  }
+  if (
+    env.fileHash &&
+    doc.fileHash &&
+    String(env.fileHash).toLowerCase() !== doc.fileHash.toLowerCase()
+  ) {
+    result.reason = "file_hash_mismatch";
+    return result;
+  }
+  // When the caller referenced the doc by id but ALSO supplied a district, that
+  // district must resolve (under CUSTOMER_STATE) to the SAME district the doc
+  // belongs to. This binds the importer's identity fields together and blocks a
+  // wrong-district import by id.
+  if (
+    env.sourceDocId != null &&
+    String(env.sourceDocId).trim() !== "" &&
+    hasDistrictIdentity(env.district)
+  ) {
+    const supplied = await resolveDistrictDb(env.district ?? {});
+    if (!supplied || supplied.id !== doc.districtId) {
+      result.reason = "district_mismatch";
+      return result;
+    }
+  }
+  // The PDF bytes must be persisted (non-NULL storage_key), or its source link
+  // would 404 in production. link-pdf guarantees this; guard defensively.
+  if (!doc.storageKey) {
+    result.reason = "missing_object";
+    return result;
+  }
+
+  // Ensure a contract exists so promotion has an attach target (idempotent).
+  await ensureContractForUpload(doc.id, doc.districtId, unit, sy.value, true);
+
+  const domains = env.domains ?? {};
+  const allowClear = env.allowClear === true;
+  const ctx = {
+    sourceDocId: doc.id,
+    fileHash: doc.fileHash,
+    createdBy: `hermes:${who}`,
+    promotedBy: `hermes:${who}`,
+  };
+
+  if (domains.salary !== undefined) {
+    const v = validateSalaryNormalized(domains.salary);
+    if (!v.ok) {
+      result.domains.salary = { status: "failed", reason: v.error };
+    } else if (v.value.schedules.length === 0 && !allowClear) {
+      result.domains.salary = { status: "failed", reason: "empty_not_allowed" };
+    } else {
+      result.domains.salary = await importOneDomain(
+        "salary",
+        v.value,
+        { source: "hermes", schedules: v.value.schedules.length },
+        ctx,
+      );
+    }
+  }
+
+  if (domains.provisions !== undefined) {
+    const v = validateProvisionsNormalized(domains.provisions);
+    if (!v.ok) {
+      result.domains.provisions = { status: "failed", reason: v.error };
+    } else if (countProvisions(v.value.contracts) === 0 && !allowClear) {
+      result.domains.provisions = { status: "failed", reason: "empty_not_allowed" };
+    } else {
+      result.domains.provisions = await importOneDomain(
+        "provisions",
+        v.value,
+        { source: "hermes", provisions: countProvisions(v.value.contracts) },
+        ctx,
+      );
+    }
+  }
+
+  const metaInput = domains.contractMeta ?? domains.contract_meta;
+  if (metaInput !== undefined) {
+    const v = validateContractMetaNormalized(metaInput);
+    if (!v.ok) {
+      result.domains.contract_meta = { status: "failed", reason: v.error };
+    } else {
+      result.domains.contract_meta = await importOneDomain(
+        "contract_meta",
+        v.value,
+        { source: "hermes", ...v.value.meta },
+        ctx,
+      );
+    }
+  }
+
+  if (Object.keys(result.domains).length === 0) {
+    result.reason = "no_domains";
+    return result;
+  }
+  result.status = rollUpDocStatus(result.domains);
+  return result;
+}
+
+async function handleHermesImport(req: Request, res: Response): Promise<void> {
+  const body = req.body as
+    | { documents?: unknown }
+    | HermesEnvelope
+    | undefined;
+  let envelopes: HermesEnvelope[];
+  if (body && Array.isArray((body as { documents?: unknown }).documents)) {
+    envelopes = (body as { documents: HermesEnvelope[] }).documents;
+  } else if (body && typeof body === "object" && ("domains" in body || "bargainingUnit" in body)) {
+    envelopes = [body as HermesEnvelope];
+  } else {
+    res.status(400).json({ error: "Expected { documents: [...] } or a single envelope" });
+    return;
+  }
+  if (envelopes.length === 0) {
+    res.status(400).json({ error: "No documents to import" });
+    return;
+  }
+  if (envelopes.length > HERMES_IMPORT_CAP) {
+    res.status(400).json({ error: `Too many documents (max ${HERMES_IMPORT_CAP} per request)` });
+    return;
+  }
+
+  const who = requestedByFromReq(req);
+  const results: DocResult[] = [];
+  // Per-envelope isolation: one bad document never aborts the batch.
+  for (let i = 0; i < envelopes.length; i++) {
+    try {
+      results.push(await processImportEnvelope(envelopes[i], i, who));
+    } catch (err) {
+      console.error("[hermes-import] envelope failed", i, err);
+      results.push({ index: i, status: "failed", reason: "internal_error", domains: {} });
+    }
+  }
+
+  const summary = { ingested: 0, updated: 0, skipped: 0, failed: 0, partial: 0 };
+  for (const r of results) summary[r.status] += 1;
+
+  res.json({ ok: true, count: results.length, summary, results });
+}
+
+router.post(
+  "/admin/extraction/import",
+  requireAdminToken,
+  heavyAdminLimiter,
+  (req, res) => {
+    handleHermesImport(req, res).catch((e) => {
+      console.error(e);
+      res.status(500).json({ error: "Internal server error" });
+    });
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Bulk CBA import from Google Drive (Task #199). An admin points the panel at a
