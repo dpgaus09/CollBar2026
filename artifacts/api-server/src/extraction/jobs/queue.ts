@@ -210,9 +210,15 @@ export async function ensureExtractionControlSchema(): Promise<void> {
       id         boolean PRIMARY KEY DEFAULT true,
       paused     boolean NOT NULL DEFAULT false,
       updated_at timestamptz NOT NULL DEFAULT NOW(),
-      updated_by text,
-      CONSTRAINT extraction_worker_control_singleton CHECK (id)
+      updated_by text
     )
+  `);
+  // See app.ts runMigrations: drop the legacy singleton CHECK constraint if
+  // present — Replit's dev→prod publish diff turns `CHECK (id)` into an invalid
+  // `CHECK (CHECK (id))`. The boolean primary key already guarantees one row.
+  await db.execute(sql`
+    ALTER TABLE extraction_worker_control
+      DROP CONSTRAINT IF EXISTS extraction_worker_control_singleton
   `);
   await db.execute(sql`
     INSERT INTO extraction_worker_control (id, paused)

@@ -728,9 +728,17 @@ async function runMigrations(): Promise<void> {
         id         boolean PRIMARY KEY DEFAULT true,
         paused     boolean NOT NULL DEFAULT false,
         updated_at timestamptz NOT NULL DEFAULT NOW(),
-        updated_by text,
-        CONSTRAINT extraction_worker_control_singleton CHECK (id)
+        updated_by text
       )
+    `);
+    // Drop the legacy singleton CHECK constraint if it exists. Replit's
+    // dev→prod publish diff introspects `CHECK (id)` and re-wraps it into an
+    // invalid `CHECK (CHECK (id))`, which fails deployment validation. The
+    // single-row invariant is already provided by the boolean primary key
+    // (the app only ever writes id=true), so the constraint is redundant.
+    await db.execute(sql`
+      ALTER TABLE extraction_worker_control
+        DROP CONSTRAINT IF EXISTS extraction_worker_control_singleton
     `);
     await db.execute(sql`
       INSERT INTO extraction_worker_control (id, paused)
