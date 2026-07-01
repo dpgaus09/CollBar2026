@@ -1,0 +1,122 @@
+Export unit: one JSON envelope per CBA PDF
+Each PDF HERMES processes produces one envelope. Structure:
+
+{
+  "schemaVersion": 1,
+  // ---- DOCUMENT IDENTITY (required) ----
+  "districtId": 12345,           // internal CollBar district id (preferred).
+                                 // If HERMES doesn't have it, send "districtRcdts"
+                                 // (11-digit RCDTS) or "districtName" + "state":"IL" instead.
+  "bargainingUnit": "teachers",  // AUTHORITATIVE. Must be one of the enum below.
+  "fileHash": "<sha256-hex>",    // SHA-256 of the EXACT PDF bytes. Dedup + source-link key.
+  "fileName": "naperville_teachers_2024-2027.pdf",
+  "pageCount": 34,
+  // ---- PROVENANCE (recommended) ----
+  "model": "claude-haiku-4-5",
+  "extractionMethod": "hermes_claude_vision",
+  // ---- DOMAIN PAYLOADS (include any/all; omit a key if not extracted) ----
+  "contractMeta": { "meta": { /* see §3 */ } },
+  "salary":       { "schedules": [ /* see §1 */ ] },
+  "provisions":   { "contracts": [ /* see §2 */ ] }
+}
+
+Critical identity rules
+
+fileHash must be the SHA-256 of the actual PDF bytes. It's how the app dedupes and attaches the source document. Re-uploading the same hash + domain updates in place (idempotent), so your "hundreds of agents" can retry safely without double-writing.
+The PDF bytes themselves still need to reach us (for source-link viewing). Either (a) include a fetchable sourceUrl, or (b) plan to upload the PDF alongside the JSON. Extracted data without the PDF loads, but "view source" links will 404.
+bargainingUnit from HERMES is treated as authoritative (it pins the contract's unit). Must be from this whitelist:
+teachers, paraprofessionals, custodial_maintenance, transportation, secretarial_clerical, food_service, nurses, administrators, support_staff, other
+§1 — salary payload
+{
+  "schedules": [
+    {
+      "scheduleName": "Teacher Salary Schedule",     // verbatim
+      "schoolYear": "2024-2025",                     // "YYYY-YYYY" or null
+      "startYear": 2024,                             // number or null
+      "scheduleType": "lane_grid",                   // enum ↓
+      "laneLabels": ["BA", "BA+15", "MA", "MA+30"],  // string[] or null
+      "stepCount": 25,
+      "laneCount": 4,
+      "pageStart": 12,
+      "pageEnd": 13,
+      "minSalary": 41000,
+      "maxSalary": 98500,
+      "confidence": 0.94,                            // 0.0–1.0
+      "needsReview": false,
+      "reviewReason": null,                          // e.g. "salary_below_floor" (semicolon-joined)
+      "extractionMethod": "hermes_claude_vision",
+      "cells": [
+        {
+          "stepLabel": "1",        // row id, string ("1", "Step 12")
+          "stepOrder": 1,          // sort index (number)
+          "laneLabel": "BA",       // column header, or null for single-column
+          "laneOrder": 0,          // column index (number)
+          "salaryAmount": 41000,   // numeric(12,2) — keep cents for hourly wages
+          "pageRef": 12            // page this cell appears on
+        }
+        // ... one object per grid cell
+      ]
+    }
+  ]
+}
+
+scheduleType enum: lane_grid | single_column | hourly | stipend | unknown
+One schedule per school year. A 3-year contract with escalating pay = 3 schedule objects (each with its own schoolYear/startYear/cells).
+salaryAmount: dollars for annual, hourly rate (with cents) for hourly tables. The app applies a magnitude sanity check — a teacher grid below the IL statutory minimum gets auto-flagged needsReview, so keep amounts truthful.
+cells is the source of truth; stepCount/laneCount/min/max should be consistent with it.
+§2 — provisions payload
+{
+  "contracts": [
+    {
+      "bargainingUnit": "teachers",       // canonical enum (same whitelist)
+      "unitScope": "All full-time certified teaching staff",  // verbatim, or null
+      "provisions": [
+        {
+          "category": "compensation",     // enum ↓
+          "provisionKey": "base_salary_increase_yr1",  // snake_case
+          "valueNumeric": 3.5,
+          "valueText": "3.5% across-the-board",
+          "unit": "%",                    // "$", "%", "days", "hours", ...
+          "clauseExcerpt": "Effective July 1, 2024, all salaries shall increase by 3.5%.", // ≤80 words, verbatim
+          "pageRef": 4,
+          "confidence": 0.9
+        }
+      ]
+    }
+  ]
+}
+
+category enum: compensation | insurance | retirement | leave | workday | evaluation | rif | grievance | other
+Group provisions by bargainingUnit as they appear in the doc.
+provisionKey is a snake_case identifier — keep it consistent across districts (e.g., sick_days_annual, personal_days_annual, insurance_board_contribution) so cross-district comparisons line up. Consistency here is what makes the Comparables feature useful.
+On import, existing human-verified rows are never overwritten; unverified rows are replaced.
+§3 — contractMeta payload
+{
+  "meta": {
+    "unionName": "Naperville Unit Education Association",
+    "affiliation": "IEA-NEA",
+    "effectiveStart": "2024-07-01",   // ISO YYYY-MM-DD
+    "effectiveEnd":   "2027-06-30",
+    "termYears": 3
+  }
+}
+
+All fields nullable. On import these coalesce — a null never wipes an existing value.
+effectiveStart participates in the contract identity tuple (district_id, bargaining_unit, unit_scope, effective_start), so get it right when known; a wrong/blank start can create a duplicate contract row.
+Global rules to give HERMES
+Rule	Requirement
+Casing	camelCase exactly as above (fields map 1:1 to the internal normalized types)
+Dates	ISO YYYY-MM-DD; school years YYYY-YYYY
+Numbers	Real JSON numbers, not strings; no $/%/commas inside numeric fields (units go in unit)
+Confidence	float 0.0–1.0 on every schedule/provision
+Nullability	Use explicit null, never "" or 0, for "not found"
+Idempotency key	(fileHash, domain) — safe to re-emit
+Excerpts	clauseExcerpt ≤ 80 words, verbatim
+To actually load it
+When you switch me to Build mode, I'll add one admin route (POST /admin/extraction/import) that:
+
+accepts this envelope (single or batched — good for hundreds of agents),
+resolves/creates the source_document + contract from the identity block,
+writes each domain payload as an extraction_versions row and calls the existing promoteVersion → same store* functions,
+is idempotent on (fileHash, domain) and returns a per-document result ledger.
+That reuses the exact promotion path, so HERMES data is indistinguishable from in-app extraction. Want me to spec that importer as a task (including whether to also accept the PDF bytes for source links, and batch size limits)?
