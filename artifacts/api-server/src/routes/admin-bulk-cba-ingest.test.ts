@@ -907,6 +907,127 @@ describe("POST /admin/bulk-cba/ingest — a bad file mid-batch can't poison the 
   }, 20000);
 });
 
+// A real folder import is split client-side into several sequential requests
+// (<=25 entries each) that all share ONE runId. The tests above cover isolation
+// WITHIN a request and recovery on re-post of the SAME entries; this one covers
+// the cross-request case an admin actually hits: a file that failed in batch 1
+// must NOT prevent fresh, never-seen entries in batch 2 (same runId) from
+// ingesting, the failed ledger row from batch 1 must persist, and the run's
+// GET /admin/bulk-cba/progress rollup must reflect BOTH batches combined.
+describe("POST /admin/bulk-cba/ingest — a stuck file in one batch never blocks the next batch of the same run", () => {
+  const runId = `${MARK}-multibatch`;
+  // Fresh (unit, schoolYear) combos so every good entry creates a brand-new
+  // contract (unique on district, unit, unit_scope, effective_start) and gives
+  // an unambiguous +1 districtCounts() delta.
+  const badId = `bciMB-bad-${MARK}`;
+  const good1Id = `bciMB-good1-${MARK}`;
+  const good2Id = `bciMB-good2-${MARK}`;
+  const good3Id = `bciMB-good3-${MARK}`;
+  const good1 = { unit: "teachers", year: "2040-41" };
+  const good2 = { unit: "teachers", year: "2041-42" };
+  const good3 = { unit: "teachers", year: "2042-43" };
+
+  it("batch 1 (broken + valid) records the failure but ingests the valid entry", async () => {
+    const good1Buf = pdf(good1Id);
+    contentById.set(good1Id, good1Buf);
+    // badId is left WITHOUT content so the shared download mock throws for it
+    // (deterministic per-entry failure under the concurrency-4 mapLimit).
+    const good1Hash = hashOf(good1Buf);
+    const before = await districtCounts();
+
+    const res = await request(app)
+      .post("/admin/bulk-cba/ingest")
+      .send({
+        runId,
+        entries: [
+          entry({ driveFileId: badId, unit: good1.unit, schoolYear: "2039-40" }),
+          entry({ driveFileId: good1Id, unit: good1.unit, schoolYear: good1.year }),
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toEqual({ ingested: 1, failed: 1 });
+
+    // The valid entry landed exactly once; the broken one wrote nothing.
+    const after = await districtCounts();
+    expect(after).toEqual({
+      docs: before.docs + 1,
+      contracts: before.contracts + 1,
+      jobs: before.jobs + 1,
+    });
+    expect(await docCountForHash(good1Hash)).toBe(1);
+    expect(await ledgerStatus(runId, good1Id)).toBe("ingested");
+    expect(await ledgerRow(runId, badId)).toMatchObject({
+      status: "failed",
+      source_doc_id: null,
+    });
+  });
+
+  it("batch 2 (entirely new valid entries, same runId) all ingest despite batch 1's stuck file", async () => {
+    const good2Buf = pdf(good2Id);
+    const good3Buf = pdf(good3Id);
+    contentById.set(good2Id, good2Buf);
+    contentById.set(good3Id, good3Buf);
+    const good2Hash = hashOf(good2Buf);
+    const good3Hash = hashOf(good3Buf);
+
+    // These are brand-new entries never seen by this run.
+    expect(await docCountForHash(good2Hash)).toBe(0);
+    expect(await docCountForHash(good3Hash)).toBe(0);
+    const before = await districtCounts();
+
+    const res = await request(app)
+      .post("/admin/bulk-cba/ingest")
+      .send({
+        runId,
+        entries: [
+          entry({ driveFileId: good2Id, unit: good2.unit, schoolYear: good2.year }),
+          entry({ driveFileId: good3Id, unit: good3.unit, schoolYear: good3.year }),
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    // Batch 1's failure is irrelevant here: both fresh entries ingest.
+    expect(res.body.counts).toEqual({ ingested: 2 });
+    for (const r of res.body.results as Array<{ status: string; sourceDocId: number | null }>) {
+      expect(r.status).toBe("ingested");
+      expect(typeof r.sourceDocId).toBe("number");
+    }
+
+    // Both new entries landed exactly once each (+2 across the board).
+    const after = await districtCounts();
+    expect(after).toEqual({
+      docs: before.docs + 2,
+      contracts: before.contracts + 2,
+      jobs: before.jobs + 2,
+    });
+    expect(await docCountForHash(good2Hash)).toBe(1);
+    expect(await docCountForHash(good3Hash)).toBe(1);
+    expect(await activeJobCountForHash(good2Hash)).toBe(1);
+    expect(await activeJobCountForHash(good3Hash)).toBe(1);
+    expect(await ledgerStatus(runId, good2Id)).toBe("ingested");
+    expect(await ledgerStatus(runId, good3Id)).toBe("ingested");
+
+    // Batch 1's failed ledger row STILL persists after batch 2 ran.
+    expect(await ledgerRow(runId, badId)).toMatchObject({
+      status: "failed",
+      source_doc_id: null,
+    });
+  });
+
+  it("GET /admin/bulk-cba/progress rolls up both batches combined", async () => {
+    const res = await request(app)
+      .get("/admin/bulk-cba/progress")
+      .query({ runId });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.runId).toBe(runId);
+    // 3 good entries (1 in batch 1, 2 in batch 2) ingested; 1 stuck file failed.
+    expect(res.body.ingest).toEqual({ total: 4, ingested: 3, failed: 1 });
+  });
+});
+
 // A folder an admin bulk-imports can contain the SAME contract PDF under two
 // DIFFERENT Drive file IDs. Existing coverage dedups ACROSS requests and
 // isolates DISTINCT-hash entries within one batch, but not the case where two
