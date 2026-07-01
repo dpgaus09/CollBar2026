@@ -40,6 +40,8 @@ import {
   markJobFailed,
   recoverStaleJobs,
   ensureQueueRecoverySchema,
+  ensureExtractionControlSchema,
+  isExtractionPaused,
   type ExtractionJob,
 } from "./queue";
 import {
@@ -363,7 +365,30 @@ export async function processJob(job: ExtractionJob): Promise<void> {
 }
 
 async function runLoop(): Promise<void> {
+  let pausedLogged = false;
   while (!stopRequested) {
+    // Pause switch (Task #247): when paused, stop CLAIMING new jobs. Queued jobs
+    // stay queued (never failed); an in-flight job already finished before we
+    // loop back here (single concurrency). Log only on transition to avoid spam.
+    let paused = false;
+    try {
+      paused = await isExtractionPaused();
+    } catch (err) {
+      logger.error({ err }, "extraction worker: pause-state check failed");
+    }
+    if (paused) {
+      if (!pausedLogged) {
+        logger.info("extraction worker: paused — not claiming new jobs");
+        pausedLogged = true;
+      }
+      await sleep(POLL_INTERVAL_MS);
+      continue;
+    }
+    if (pausedLogged) {
+      logger.info("extraction worker: resumed — claiming jobs again");
+      pausedLogged = false;
+    }
+
     let job: ExtractionJob | null = null;
     try {
       job = await claimNextJob();
@@ -403,6 +428,7 @@ export async function startWorker(): Promise<void> {
   stopRequested = false;
   try {
     await ensureQueueRecoverySchema();
+    await ensureExtractionControlSchema();
     const { requeued, failed } = await recoverStaleJobs();
     if (requeued || failed) {
       logger.warn(

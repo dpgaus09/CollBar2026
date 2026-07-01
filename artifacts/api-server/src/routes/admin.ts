@@ -31,6 +31,8 @@ import {
   listJobs,
   getQueueStats,
   requeueInterruptedJobs,
+  isExtractionPaused,
+  setExtractionPaused,
 } from "../extraction/jobs/queue.js";
 import { heavyAdminLimiter } from "../lib/rateLimit.js";
 import {
@@ -2730,6 +2732,39 @@ router.post(
     }
   },
 );
+
+// GET /admin/extraction/pause-state — current worker pause switch + live queue
+// counts (Task #247). Drives the Pause/Resume control on the admin extraction
+// page. Cheap: one flag read + the shared queue-stats query.
+router.get("/admin/extraction/pause-state", requireAdminToken, async (_req, res) => {
+  try {
+    const [paused, stats] = await Promise.all([isExtractionPaused(), getQueueStats()]);
+    res.json({ paused, queued: stats.queued, running: stats.running });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /admin/extraction/pause-state — pause or resume the in-process worker.
+// Body: { paused: boolean }. DB-backed so the state survives VM restarts. Pausing
+// only stops CLAIMING new jobs — queued jobs stay queued (never failed) and any
+// in-flight job finishes; the worker picks up the change within one poll (~3s).
+router.post("/admin/extraction/pause-state", requireAdminToken, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { paused?: unknown };
+    if (typeof body.paused !== "boolean") {
+      res.status(400).json({ error: "paused is required and must be a boolean" });
+      return;
+    }
+    const paused = await setExtractionPaused(body.paused, requestedByFromReq(req));
+    const stats = await getQueueStats();
+    res.json({ paused, queued: stats.queued, running: stats.running });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
 
 // POST /admin/extraction/enqueue — queue a single-doc extraction job for any
 // domain (Task #176). Lets an admin re-run salary/provisions ("cba" = both),

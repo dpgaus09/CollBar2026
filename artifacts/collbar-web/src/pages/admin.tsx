@@ -4814,6 +4814,18 @@ function ExtractionEngineTab() {
     retry: false,
   });
 
+  const { data: pauseState } = useQuery<{ paused: boolean; queued: number; running: number }>({
+    queryKey: ["/api/admin/extraction/pause-state"],
+    queryFn: () =>
+      fetch(apiUrl("/api/admin/extraction/pause-state"), { credentials: "include" }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+    enabled: isAuthenticated,
+    refetchInterval: 5000,
+    retry: false,
+  });
+
   const { data: versionsData } = useQuery<{
     docId: number;
     versions: VersionRowT[];
@@ -4926,6 +4938,29 @@ function ExtractionEngineTab() {
     onError: (e: Error) => setActionMsg(e.message),
   });
 
+  const togglePause = useMutation({
+    mutationFn: (paused: boolean) =>
+      fetch(apiUrl("/api/admin/extraction/pause-state"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ paused }),
+      }).then(async (r) => {
+        const j = (await r.json()) as { paused?: boolean; error?: string };
+        if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
+        return j;
+      }),
+    onSuccess: (j) => {
+      setActionMsg(
+        j.paused
+          ? "Extraction paused — the worker will stop claiming new jobs within a few seconds. Queued jobs stay queued."
+          : "Extraction resumed — the worker will start claiming jobs again.",
+      );
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/extraction/pause-state"] });
+    },
+    onError: (e: Error) => setActionMsg(e.message),
+  });
+
   const rerunFlagged = useMutation({
     mutationFn: () =>
       fetch(apiUrl("/api/admin/extraction/rerun-flagged"), {
@@ -4964,9 +4999,25 @@ function ExtractionEngineTab() {
   return (
     <div className="space-y-8">
       <section className="space-y-2">
-        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
-          Extraction Engine
-        </h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
+            Extraction Engine
+          </h2>
+          <span
+            className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-widest ${
+              pauseState?.paused
+                ? "bg-amber-500/10 text-amber-300 border border-amber-600/40"
+                : "bg-emerald-500/10 text-emerald-300 border border-emerald-600/40"
+            }`}
+          >
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${
+                pauseState?.paused ? "bg-amber-400" : "bg-emerald-400 animate-pulse"
+              }`}
+            />
+            {pauseState?.paused ? "Paused" : "Running"}
+          </span>
+        </div>
         <p className="text-xs text-slate-500 leading-relaxed">
           Uploads and re-runs are queued and processed in-process, one at a time. Every run is saved
           as an immutable version; customer-facing data only changes when you promote a version.
@@ -4995,6 +5046,28 @@ function ExtractionEngineTab() {
           <span className="text-slate-200">{fmtDuration(stats?.estRemainingSec)}</span>
         </span>
         <span className="flex gap-2">
+          <button
+            onClick={() => togglePause.mutate(!pauseState?.paused)}
+            disabled={togglePause.isPending || pauseState === undefined}
+            title={
+              pauseState?.paused
+                ? "Resume the in-process worker so it starts claiming queued jobs again."
+                : "Pause the in-process worker: it stops claiming new jobs within a few seconds. Queued jobs stay queued; any in-flight job finishes."
+            }
+            className={`text-xs px-3 py-1.5 rounded border transition-colors disabled:opacity-50 ${
+              pauseState?.paused
+                ? "border-emerald-700 text-emerald-300 hover:border-emerald-500 hover:text-emerald-200"
+                : "border-amber-700 text-amber-300 hover:border-amber-500 hover:text-amber-200"
+            }`}
+          >
+            {togglePause.isPending
+              ? pauseState?.paused
+                ? "Resuming…"
+                : "Pausing…"
+              : pauseState?.paused
+                ? "Resume extraction"
+                : "Pause extraction"}
+          </button>
           <button
             onClick={() => requeueInterrupted.mutate()}
             disabled={requeueInterrupted.isPending}

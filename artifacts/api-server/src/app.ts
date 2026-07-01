@@ -712,6 +712,26 @@ async function runMigrations(): Promise<void> {
         WHERE status = 'queued'
     `);
 
+    // Single-row control switch for the in-process extraction worker (Task #247).
+    // When paused=true the worker stops CLAIMING new jobs (queued jobs stay
+    // queued; the in-flight job, if any, finishes). DB-backed so the state
+    // survives the always-on VM restarting/redeploying. worker.ts also ensures
+    // this at boot to avoid a race, but seed it here for a warm DB.
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS extraction_worker_control (
+        id         boolean PRIMARY KEY DEFAULT true,
+        paused     boolean NOT NULL DEFAULT false,
+        updated_at timestamptz NOT NULL DEFAULT NOW(),
+        updated_by text,
+        CONSTRAINT extraction_worker_control_singleton CHECK (id)
+      )
+    `);
+    await db.execute(sql`
+      INSERT INTO extraction_worker_control (id, paused)
+      VALUES (true, false)
+      ON CONFLICT (id) DO NOTHING
+    `);
+
     // Immutable per-(doc,domain) extraction results. One row per successful job
     // (audit trail). normalized = the domain payload ({schedules:[...]} or
     // {contracts:[...]}); summary = counts/confidence/cost. duplicate_of_version_id

@@ -108,7 +108,11 @@ export async function enqueueJob(p: EnqueueParams): Promise<EnqueueResult> {
 }
 
 // Atomically claim the next queued job (lowest priority value, then oldest) and
-// flip it to 'running'. Returns null when the queue is empty.
+// flip it to 'running'. Returns null when the queue is empty. The pause switch
+// (Task #247) is evaluated INSIDE this statement so that once an admin's
+// paused=true commits, no further job is claimed — closing the race where the
+// worker's separate pre-claim pause check reads 'running' just before a pause.
+// Queued jobs are only skipped, never mutated, so pausing never fails them.
 export async function claimNextJob(): Promise<ExtractionJob | null> {
   const res = await db.execute(sql`
     UPDATE extraction_jobs
@@ -120,6 +124,9 @@ export async function claimNextJob(): Promise<ExtractionJob | null> {
     WHERE id = (
       SELECT id FROM extraction_jobs
       WHERE status = 'queued'
+        AND NOT EXISTS (
+          SELECT 1 FROM extraction_worker_control WHERE id = true AND paused = true
+        )
       ORDER BY priority, id
       FOR UPDATE SKIP LOCKED
       LIMIT 1
@@ -183,6 +190,63 @@ export async function ensureQueueRecoverySchema(): Promise<void> {
     ALTER TABLE extraction_jobs
       ADD COLUMN IF NOT EXISTS recovery_count integer NOT NULL DEFAULT 0
   `);
+}
+
+// ---------------------------------------------------------------------------
+// Extraction worker pause switch (Task #247)
+//
+// A single-row control table lets an admin pause/resume the in-process worker
+// on demand. When paused the worker stops CLAIMING new jobs — queued jobs stay
+// queued (never failed) and any in-flight job finishes normally. DB-backed so
+// the state survives the always-on VM restarting/redeploying.
+// ---------------------------------------------------------------------------
+
+// Idempotent: ensure the control table exists (mirrors ensureQueueRecoverySchema).
+// app.ts also creates it at boot, but that migration runs un-awaited, so the
+// worker ensures it here before its first pause check to avoid a boot race.
+export async function ensureExtractionControlSchema(): Promise<void> {
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS extraction_worker_control (
+      id         boolean PRIMARY KEY DEFAULT true,
+      paused     boolean NOT NULL DEFAULT false,
+      updated_at timestamptz NOT NULL DEFAULT NOW(),
+      updated_by text,
+      CONSTRAINT extraction_worker_control_singleton CHECK (id)
+    )
+  `);
+  await db.execute(sql`
+    INSERT INTO extraction_worker_control (id, paused)
+    VALUES (true, false)
+    ON CONFLICT (id) DO NOTHING
+  `);
+}
+
+// Read the pause flag. Defaults to false (running) when the row is absent so a
+// missing/uninitialized table never wedges the worker.
+export async function isExtractionPaused(): Promise<boolean> {
+  const res = await db.execute(sql`
+    SELECT paused FROM extraction_worker_control WHERE id = true
+  `);
+  const row = res.rows[0] as { paused: boolean } | undefined;
+  return row?.paused === true;
+}
+
+// Set the pause flag. Upserts the singleton row so it works even if the table
+// was never seeded. Returns the value that is now stored.
+export async function setExtractionPaused(
+  paused: boolean,
+  updatedBy?: string | null,
+): Promise<boolean> {
+  await ensureExtractionControlSchema();
+  await db.execute(sql`
+    INSERT INTO extraction_worker_control (id, paused, updated_at, updated_by)
+    VALUES (true, ${paused}, NOW(), ${updatedBy ?? null})
+    ON CONFLICT (id) DO UPDATE
+      SET paused = EXCLUDED.paused,
+          updated_at = NOW(),
+          updated_by = EXCLUDED.updated_by
+  `);
+  return paused;
 }
 
 export interface RecoverResult {
