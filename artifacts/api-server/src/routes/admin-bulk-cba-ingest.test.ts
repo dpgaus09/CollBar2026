@@ -1225,3 +1225,184 @@ describe("POST /admin/bulk-cba/ingest — the same contract twice in one batch i
     // racy without adding any coverage the per-hash checks don't already give.
   }, 20000);
 });
+
+// A folder import is one runId split into many sequential <=25-entry requests.
+// If the server restarts (or the admin's browser reloads) mid-run, the client
+// re-drives the run by re-posting the remaining batches — typically a SUPERSET
+// of what already landed (some already-ingested entries plus the ones that
+// never got to run) under the SAME runId. The per-(run,file) ledger is the
+// source of truth, so re-posting must short-circuit every entry that already
+// has an 'ingested'/'duplicate' ledger row (no re-download, no re-upload, no new
+// doc/contract/job) while driving only the genuinely-new ones exactly once —
+// and GET /admin/bulk-cba/progress must report totals consistent with the union
+// of everything ever posted under the run, not double-counted. These tests pin
+// that recovery flow.
+describe("POST /admin/bulk-cba/ingest — a run resumes cleanly after a mid-run restart", () => {
+  const runId = `${MARK}-resume`;
+  // Distinct (unit, schoolYear) per entry so each ingest creates a FRESH
+  // contract (unique on district, unit, unit_scope, effective_start) and every
+  // districtCounts() delta is an unambiguous +1. Years in the 2070s are unused
+  // by any other test in this file.
+  const b1a = { id: `bciRes-b1a-${MARK}`, unit: "teachers", year: "2070-71" };
+  const b1b = { id: `bciRes-b1b-${MARK}`, unit: "teachers", year: "2071-72" };
+  const b2a = { id: `bciRes-b2a-${MARK}`, unit: "teachers", year: "2072-73" };
+  const b2b = { id: `bciRes-b2b-${MARK}`, unit: "teachers", year: "2073-74" };
+  // Brand-new entries that never ran before the "restart".
+  const newA = { id: `bciRes-newA-${MARK}`, unit: "teachers", year: "2074-75" };
+  const newB = { id: `bciRes-newB-${MARK}`, unit: "teachers", year: "2075-76" };
+
+  // Carried across the sequential `it`s: the source doc ids the first two
+  // batches minted, so the resume can assert the short-circuit reuses the SAME
+  // docs rather than creating new ones.
+  const priorDocId = new Map<string, number>();
+
+  it("batches 1 & 2 ingest four entries under one runId", async () => {
+    for (const e of [b1a, b1b, b2a, b2b]) contentById.set(e.id, pdf(e.id));
+    const before = await districtCounts();
+
+    // Batch 1.
+    const res1 = await request(app)
+      .post("/admin/bulk-cba/ingest")
+      .send({
+        runId,
+        entries: [
+          entry({ driveFileId: b1a.id, unit: b1a.unit, schoolYear: b1a.year }),
+          entry({ driveFileId: b1b.id, unit: b1b.unit, schoolYear: b1b.year }),
+        ],
+      });
+    expect(res1.status).toBe(200);
+    expect(res1.body.counts).toEqual({ ingested: 2 });
+
+    // Batch 2 (same runId).
+    const res2 = await request(app)
+      .post("/admin/bulk-cba/ingest")
+      .send({
+        runId,
+        entries: [
+          entry({ driveFileId: b2a.id, unit: b2a.unit, schoolYear: b2a.year }),
+          entry({ driveFileId: b2b.id, unit: b2b.unit, schoolYear: b2b.year }),
+        ],
+      });
+    expect(res2.status).toBe(200);
+    expect(res2.body.counts).toEqual({ ingested: 2 });
+
+    // Record each entry's minted source doc id for the resume assertions.
+    for (const r of [...res1.body.results, ...res2.body.results] as Array<{
+      driveFileId: string;
+      status: string;
+      sourceDocId: number | null;
+    }>) {
+      expect(r.status).toBe("ingested");
+      expect(typeof r.sourceDocId).toBe("number");
+      priorDocId.set(r.driveFileId, r.sourceDocId as number);
+    }
+
+    // Four entries, four docs/contracts/jobs, four ledger rows.
+    const after = await districtCounts();
+    expect(after).toEqual({
+      docs: before.docs + 4,
+      contracts: before.contracts + 4,
+      jobs: before.jobs + 4,
+    });
+    for (const e of [b1a, b1b, b2a, b2b]) {
+      expect(await docCountForHash(hashOf(contentById.get(e.id)!))).toBe(1);
+      expect(await ledgerStatus(runId, e.id)).toBe("ingested");
+    }
+  });
+
+  it("resume re-posts a superset (already-ingested + new): prior entries short-circuit, only new ones ingest", async () => {
+    for (const e of [newA, newB]) contentById.set(e.id, pdf(e.id));
+    const newHashes = new Map([newA, newB].map((e) => [e.id, hashOf(contentById.get(e.id)!)]));
+
+    // The two new entries have never been seen by this run.
+    for (const e of [newA, newB]) {
+      expect(await docCountForHash(newHashes.get(e.id)!)).toBe(0);
+      expect(await ledgerStatus(runId, e.id)).toBeNull();
+    }
+    const before = await districtCounts();
+
+    // Fresh call tracking for BOTH side-effects so we can prove the resumed
+    // entries never re-download or re-upload. (beforeEach clears uploadBuffer;
+    // clear downloadDriveFile here too without disturbing its shared impl.)
+    vi.mocked(uploadBuffer).mockClear();
+    vi.mocked(downloadDriveFile).mockClear();
+
+    // The client, recovering from the restart, re-posts a SUPERSET in one batch:
+    // all four already-ingested entries plus the two that never ran. (6 <= the
+    // 25/request cap.) Order interleaves old and new to mirror a real re-drive.
+    const res = await request(app)
+      .post("/admin/bulk-cba/ingest")
+      .send({
+        runId,
+        entries: [
+          entry({ driveFileId: b1a.id, unit: b1a.unit, schoolYear: b1a.year }),
+          entry({ driveFileId: newA.id, unit: newA.unit, schoolYear: newA.year }),
+          entry({ driveFileId: b1b.id, unit: b1b.unit, schoolYear: b1b.year }),
+          entry({ driveFileId: b2a.id, unit: b2a.unit, schoolYear: b2a.year }),
+          entry({ driveFileId: newB.id, unit: newB.unit, schoolYear: newB.year }),
+          entry({ driveFileId: b2b.id, unit: b2b.unit, schoolYear: b2b.year }),
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    // All six report 'ingested', but four of them came from the ledger short
+    // circuit — nothing new was created for them.
+    expect(res.body.counts).toEqual({ ingested: 6 });
+
+    const byId = new Map(
+      (
+        res.body.results as Array<{ driveFileId: string; status: string; sourceDocId: number | null }>
+      ).map((r) => [r.driveFileId, r]),
+    );
+
+    // The four prior entries resumed onto their ORIGINAL source docs — no new
+    // ids handed out — proving the ledger short-circuit reused them.
+    for (const e of [b1a, b1b, b2a, b2b]) {
+      const r = byId.get(e.id)!;
+      expect(r.status).toBe("ingested");
+      expect(r.sourceDocId).toBe(priorDocId.get(e.id));
+    }
+    // The two new entries ingested and got brand-new doc ids.
+    for (const e of [newA, newB]) {
+      const r = byId.get(e.id)!;
+      expect(r.status).toBe("ingested");
+      expect(typeof r.sourceDocId).toBe("number");
+      expect(await docCountForHash(newHashes.get(e.id)!)).toBe(1);
+      expect(await activeJobCountForHash(newHashes.get(e.id)!)).toBe(1);
+      expect(await ledgerStatus(runId, e.id)).toBe("ingested");
+    }
+
+    // Only the two new entries did any real work: two downloads, two uploads,
+    // keyed by the two new content hashes. The four resumed entries returned
+    // from the ledger BEFORE the download/upload step.
+    expect(downloadDriveFile).toHaveBeenCalledTimes(2);
+    expect(uploadBuffer).toHaveBeenCalledTimes(2);
+    const uploadedKeys = new Set(vi.mocked(uploadBuffer).mock.calls.map((c) => c[0]));
+    expect(uploadedKeys).toEqual(
+      new Set([uploadedCbaKey(newHashes.get(newA.id)!), uploadedCbaKey(newHashes.get(newB.id)!)]),
+    );
+
+    // Net effect of the whole superset re-post is exactly the two new entries'
+    // worth of writes — the four already-ingested ones added nothing.
+    const after = await districtCounts();
+    expect(after).toEqual({
+      docs: before.docs + 2,
+      contracts: before.contracts + 2,
+      jobs: before.jobs + 2,
+    });
+  });
+
+  it("GET /admin/bulk-cba/progress totals stay consistent across the resume (union, not double-counted)", async () => {
+    const res = await request(app).get("/admin/bulk-cba/progress").query({ runId });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.runId).toBe(runId);
+    // Six distinct (run, file) rows ever posted (4 original + 2 new); the resume
+    // re-post of the four originals did NOT inflate the ledger.
+    expect(res.body.ingest).toEqual({ total: 6, ingested: 6 });
+    // One extraction job per ingested doc, all still active (worker isn't
+    // running in tests) — never doubled by the resume.
+    expect(res.body.extraction.jobs).toEqual({ queued: 6 });
+  });
+});
