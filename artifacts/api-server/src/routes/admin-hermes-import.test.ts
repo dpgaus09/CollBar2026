@@ -84,10 +84,23 @@ beforeAll(async () => {
 
 afterAll(async () => {
   for (const h of [FILE_HASH, FAIL_HASH]) {
+    const docIds = sql`(SELECT id FROM source_documents WHERE file_hash = ${h})`;
+    // Order matters: salary schedules + provisions reference contracts /
+    // source_documents with NO cascade, so clear the promoted projection before
+    // the parents. Cells cascade on schedule delete; deleting source_documents
+    // cascades extraction_jobs/versions/promotions.
     await db.execute(
-      sql`DELETE FROM extraction_jobs WHERE source_doc_id IN (SELECT id FROM source_documents WHERE file_hash = ${h})`,
+      sql`DELETE FROM contract_salary_schedules WHERE source_doc_id IN ${docIds}`,
     );
-    await db.execute(sql`DELETE FROM contracts WHERE source_doc_id IN (SELECT id FROM source_documents WHERE file_hash = ${h})`);
+    await db.execute(
+      sql`DELETE FROM contract_provisions WHERE contract_id IN (SELECT id FROM contracts WHERE source_doc_id IN ${docIds})`,
+    );
+    await db.execute(
+      sql`DELETE FROM extraction_jobs WHERE source_doc_id IN ${docIds}`,
+    );
+    await db.execute(
+      sql`DELETE FROM contracts WHERE source_doc_id IN ${docIds}`,
+    );
     await db.execute(sql`DELETE FROM source_documents WHERE file_hash = ${h}`);
     const local = localPath(h);
     if (existsSync(local)) rmSync(local);
@@ -285,5 +298,175 @@ describe("POST /admin/extraction/import", () => {
     expect(res.status).toBe(200);
     expect(res.body.results[0].status).toBe("failed");
     expect(res.body.results[0].reason).toMatch(/district_mismatch/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The whole point of the off-platform move: a SUCCESSFUL import must promote
+// into the LIVE projection the dashboard reads (Task #249). The FAILURE paths
+// above never touch the store functions, so without this the pipeline could
+// silently stop delivering new contract data to customers with no error.
+//
+// This runs last: it links a real PDF, imports valid normalized salary +
+// provisions + contract_meta JSON, and asserts (a) the per-doc ledger reports
+// `ingested`, (b) the promoted rows are visible in the exact live tables the
+// dashboard queries, and (c) a re-import of identical JSON reports `skipped`.
+// ---------------------------------------------------------------------------
+describe("POST /admin/extraction/import — successful import reaches customers", () => {
+  // A teacher (education) salary schedule: laneLabels BA/MA classify it as
+  // "teachers", so the router attaches it to the teachers contract on the doc.
+  const salaryCells = [
+    { stepLabel: "1", stepOrder: 1, laneLabel: "BA", laneOrder: 1, salaryAmount: 40000, pageRef: 1 },
+    { stepLabel: "1", stepOrder: 1, laneLabel: "MA", laneOrder: 2, salaryAmount: 45000, pageRef: 1 },
+    { stepLabel: "2", stepOrder: 2, laneLabel: "BA", laneOrder: 1, salaryAmount: 42000, pageRef: 1 },
+    { stepLabel: "2", stepOrder: 2, laneLabel: "MA", laneOrder: 2, salaryAmount: 47000, pageRef: 1 },
+  ];
+
+  function importEnvelope(sourceDocId: number) {
+    return {
+      documents: [
+        {
+          sourceDocId,
+          bargainingUnit: "teachers",
+          schoolYear: "2026-27",
+          fileHash: FILE_HASH,
+          domains: {
+            salary: {
+              schedules: [
+                {
+                  scheduleName: "Teachers",
+                  schoolYear: "2026-27",
+                  startYear: 2026,
+                  scheduleType: "lane_grid",
+                  laneLabels: ["BA", "MA"],
+                  stepCount: 2,
+                  laneCount: 2,
+                  pageStart: 1,
+                  pageEnd: 1,
+                  minSalary: 40000,
+                  maxSalary: 47000,
+                  confidence: 0.95,
+                  cells: salaryCells,
+                },
+              ],
+            },
+            provisions: {
+              contracts: [
+                {
+                  bargainingUnit: "teachers",
+                  provisions: [
+                    {
+                      category: "compensation",
+                      provisionKey: "base_salary_increase",
+                      valueNumeric: 3.5,
+                      valueText: "3.5%",
+                      unit: "percent",
+                      clauseExcerpt: "Base salaries shall increase 3.5%.",
+                      pageRef: 2,
+                      confidence: 0.9,
+                    },
+                  ],
+                },
+              ],
+            },
+            contractMeta: {
+              union_name: "Test Education Association",
+              affiliation: "IEA-NEA",
+              effective_start: "2026-07-01",
+              effective_end: "2029-06-30",
+              term_years: 3,
+            },
+          },
+        },
+      ],
+    };
+  }
+
+  it("promotes salary + provisions + contract_meta into the live tables and is idempotent", async () => {
+    // The PDF was linked (with unit 'teachers') earlier in this file. Resolve it.
+    const docRow = await db.execute(
+      sql`SELECT id FROM source_documents WHERE file_hash = ${FILE_HASH} LIMIT 1`,
+    );
+    expect(docRow.rows.length).toBe(1);
+    const sourceDocId = Number((docRow.rows[0] as { id: string | number }).id);
+
+    // --- First import: every domain is newly ingested. -----------------------
+    const res = await request(buildApp())
+      .post("/admin/extraction/import")
+      .send(importEnvelope(sourceDocId));
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.count).toBe(1);
+    expect(res.body.summary.ingested).toBe(1);
+
+    const doc = res.body.results[0];
+    expect(doc.status).toBe("ingested");
+    expect(doc.sourceDocId).toBe(sourceDocId);
+    expect(doc.domains.salary.status).toBe("ingested");
+    expect(doc.domains.salary.targets).toBe(1);
+    expect(doc.domains.provisions.status).toBe("ingested");
+    expect(doc.domains.provisions.targets).toBe(1);
+    expect(doc.domains.contract_meta.status).toBe("ingested");
+
+    // --- The promoted rows are visible in the LIVE tables the dashboard reads. -
+    const schedRows = await db.execute(sql`
+      SELECT id::text AS id, schedule_name AS "scheduleName", school_year AS "schoolYear"
+      FROM contract_salary_schedules WHERE source_doc_id = ${sourceDocId}
+    `);
+    expect(schedRows.rows).toHaveLength(1);
+    expect(schedRows.rows[0]).toMatchObject({
+      scheduleName: "Teachers",
+      schoolYear: "2026-27",
+    });
+    const scheduleId = (schedRows.rows[0] as { id: string }).id;
+    const cellRows = await db.execute(sql`
+      SELECT COUNT(*)::int AS n FROM contract_salary_schedule_cells
+      WHERE schedule_id = ${scheduleId}
+    `);
+    expect((cellRows.rows[0] as { n: number }).n).toBe(salaryCells.length);
+
+    const provRows = await db.execute(sql`
+      SELECT category, provision_key AS "provisionKey", value_numeric AS "valueNumeric"
+      FROM contract_provisions
+      WHERE contract_id IN (SELECT id FROM contracts WHERE source_doc_id = ${sourceDocId})
+    `);
+    expect(provRows.rows).toHaveLength(1);
+    expect(provRows.rows[0]).toMatchObject({
+      category: "compensation",
+      provisionKey: "base_salary_increase",
+    });
+    expect(
+      Number((provRows.rows[0] as { valueNumeric: string }).valueNumeric),
+    ).toBe(3.5);
+
+    const metaRows = await db.execute(sql`
+      SELECT union_name AS "unionName", affiliation, term_years AS "termYears"
+      FROM contracts WHERE source_doc_id = ${sourceDocId}
+    `);
+    expect(metaRows.rows).toHaveLength(1);
+    expect(metaRows.rows[0]).toMatchObject({
+      unionName: "Test Education Association",
+      affiliation: "IEA-NEA",
+    });
+    expect(
+      Number((metaRows.rows[0] as { termYears: string }).termYears),
+    ).toBe(3);
+
+    // --- Re-importing identical JSON is a no-op: already promoted, so skipped. -
+    const res2 = await request(buildApp())
+      .post("/admin/extraction/import")
+      .send(importEnvelope(sourceDocId));
+
+    expect(res2.status).toBe(200);
+    expect(res2.body.summary.skipped).toBe(1);
+    const doc2 = res2.body.results[0];
+    expect(doc2.status).toBe("skipped");
+    expect(doc2.domains.salary.status).toBe("skipped");
+    expect(doc2.domains.salary.reason).toMatch(/already_promoted_identical/i);
+    expect(doc2.domains.provisions.status).toBe("skipped");
+    expect(doc2.domains.provisions.reason).toMatch(/already_promoted_identical/i);
+    expect(doc2.domains.contract_meta.status).toBe("skipped");
+    expect(doc2.domains.contract_meta.reason).toMatch(/already_promoted_identical/i);
   });
 });
