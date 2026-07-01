@@ -9,7 +9,7 @@ import { db, pool } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import { VALID_BARGAINING_UNITS, BARGAINING_UNIT_LABELS } from "./bargaining-units.js";
 import { runPromotion } from "../lib/promote.js";
-import { uploadBuffer, uploadedCbaKey } from "../lib/objectStorage.js";
+import { objectExists, uploadBuffer, uploadedCbaKey } from "../lib/objectStorage.js";
 import { recordNewContractAlert } from "../lib/alert-detection.js";
 import {
   parseDriveFolderId,
@@ -2061,9 +2061,29 @@ async function processImportEnvelope(
       return result;
     }
   }
-  // The PDF bytes must be persisted (non-NULL storage_key), or its source link
-  // would 404 in production. link-pdf guarantees this; guard defensively.
+  // The customer's "view source" link only works when BOTH hold: (1) the row
+  // carries a non-NULL storage_key — the serving route 404s on NULL before it
+  // even tries object storage — and (2) the PDF bytes are actually present in
+  // object storage. A non-NULL storage_key alone is only a proxy: legacy
+  // local:-only rows, or a failed/rolled-back upload, can carry a storage_key
+  // while the object itself is absent. Verify existence authoritatively (a cheap
+  // HEAD) so import fails closed with `missing_object` instead of promoting a
+  // contract whose source link would 404 in production.
   if (!doc.storageKey) {
+    result.reason = "missing_object";
+    return result;
+  }
+  let objectPresent = false;
+  try {
+    objectPresent = doc.fileHash
+      ? await objectExists(uploadedCbaKey(doc.fileHash))
+      : false;
+  } catch {
+    // A malformed/absent file hash cannot resolve to an object key, so the PDF
+    // is not servable — treat it as missing rather than throwing.
+    objectPresent = false;
+  }
+  if (!objectPresent) {
     result.reason = "missing_object";
     return result;
   }

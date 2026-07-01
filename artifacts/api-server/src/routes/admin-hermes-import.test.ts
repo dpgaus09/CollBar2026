@@ -27,12 +27,17 @@ import { join } from "path";
 //   3. import returns a per-document ledger and never 500s on bad envelopes:
 //      empty/oversized batches are rejected, and per-item validation failures
 //      (bad unit, missing document) surface as failed rows, not thrown errors.
+//   4. import verifies the PDF bytes actually EXIST in object storage (not just
+//      a non-NULL storage_key) before promoting, so a promoted contract never
+//      has a dead "view source" link; a missing object fails with
+//      `missing_object`.
 //
-// Object Storage is mocked with a toggle so we can exercise both the failure
-// and success paths without touching the real bucket.
+// Object Storage is mocked with toggles so we can exercise both the failure
+// and success paths without touching the real bucket: `fail` simulates an
+// upload outage, `objectMissing` simulates bytes absent from the bucket.
 // ---------------------------------------------------------------------------
 
-const storage = vi.hoisted(() => ({ fail: false }));
+const storage = vi.hoisted(() => ({ fail: false, objectMissing: false }));
 
 vi.mock("../lib/objectStorage.js", () => ({
   uploadBuffer: vi.fn(async () => {
@@ -40,7 +45,7 @@ vi.mock("../lib/objectStorage.js", () => ({
   }),
   uploadedCbaKey: (h: string) => `il_cba/${h}.pdf`,
   streamObjectTo: vi.fn(),
-  objectExists: vi.fn(),
+  objectExists: vi.fn(async () => !storage.objectMissing),
 }));
 
 const adminRouter = (await import("./admin.js")).default;
@@ -298,6 +303,34 @@ describe("POST /admin/extraction/import", () => {
     expect(res.status).toBe(200);
     expect(res.body.results[0].status).toBe("failed");
     expect(res.body.results[0].reason).toMatch(/district_mismatch/i);
+  });
+
+  it("fails a document whose PDF bytes are missing from object storage", async () => {
+    // A non-NULL storage_key is only a proxy for "servable": legacy local:-only
+    // rows or a failed/rolled-back upload can carry a storage_key while the
+    // object itself is absent from the bucket. Import must verify the bytes
+    // actually exist (authoritative) and fail closed with `missing_object`,
+    // rather than promoting a contract whose "view source" link would 404 in
+    // production.
+    const doc = await db.execute(
+      sql`SELECT id FROM source_documents WHERE file_hash = ${FILE_HASH} LIMIT 1`,
+    );
+    const sourceDocId = Number((doc.rows[0] as { id: string | number }).id);
+    storage.objectMissing = true;
+    try {
+      const res = await request(buildApp())
+        .post("/admin/extraction/import")
+        .send({
+          documents: [
+            { sourceDocId, bargainingUnit: "teachers", domains: { salary: {} } },
+          ],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.results[0].status).toBe("failed");
+      expect(res.body.results[0].reason).toMatch(/missing_object/i);
+    } finally {
+      storage.objectMissing = false;
+    }
   });
 });
 

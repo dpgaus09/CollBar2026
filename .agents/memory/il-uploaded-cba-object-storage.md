@@ -18,8 +18,13 @@ FIRST; the local `storage_key` (`local:<absPath>`) is only a dev fallback.
 they ever try object storage by `file_hash`. So a NULL `storage_key` breaks the
 source link even when the bytes are present in the bucket. Any ingest path that
 writes bytes to object storage MUST also set/backfill a non-NULL `storage_key`
-(e.g. `linkUploadedCba` backfills it on its dedup paths), and an import
-precondition can safely use `storage_key != NULL` as the "servable" signal.
+(e.g. `linkUploadedCba` backfills it on its dedup paths). A non-NULL
+`storage_key` is NECESSARY but NOT SUFFICIENT: it is only a proxy — a legacy
+`local:`-only row or a failed/rolled-back upload can carry a `storage_key` while
+the object is absent. So the HERMES import precondition (processImportEnvelope)
+does BOTH: requires non-NULL `storage_key` AND verifies the bytes actually exist
+via `objectExists(uploadedCbaKey(fileHash))` (a cheap HEAD), failing closed with
+`missing_object` — otherwise it would promote a contract whose source link 404s.
 
 **Why:** the local filesystem under `pipeline/data/il_cba/` is dev-only — it is
 excluded from the deploy image (`.replitignore`) AND ephemeral on autoscale. A row
