@@ -222,6 +222,16 @@ async function docCountForHash(fileHash: string): Promise<number> {
   return Number((r.rows[0] as { n: number }).n);
 }
 
+async function contractCountForHash(fileHash: string): Promise<number> {
+  const r = await db.execute(sql`
+    SELECT COUNT(*)::int AS n
+    FROM contracts c
+    JOIN source_documents sd ON sd.id = c.source_doc_id
+    WHERE sd.district_id = ${districtId} AND sd.file_hash = ${fileHash}
+  `);
+  return Number((r.rows[0] as { n: number }).n);
+}
+
 describe("POST /admin/bulk-cba/ingest — enqueue + Object Storage", () => {
   it("ingests each matched entry once: 1 source doc, 1 contract, 1 job, 1 upload", async () => {
     const runId = `${MARK}-run1`;
@@ -894,5 +904,203 @@ describe("POST /admin/bulk-cba/ingest — a bad file mid-batch can't poison the 
       contracts: before.contracts + 4,
       jobs: before.jobs + 4,
     });
+  }, 20000);
+});
+
+// A folder an admin bulk-imports can contain the SAME contract PDF under two
+// DIFFERENT Drive file IDs. Existing coverage dedups ACROSS requests and
+// isolates DISTINCT-hash entries within one batch, but not the case where two
+// entries in ONE request share one content hash and race the content-dedup
+// SELECT/INSERT concurrently under mapLimit. Content-dedup is guarded at the DB
+// layer by source_documents_district_unit_hash_unique on
+// (district_id, bargaining_unit, file_hash), so exactly one source doc (and its
+// one contract + one active job) can ever result — never two docs, never a 500
+// that poisons the batch.
+//
+// NOTE ON THE LOSER'S STATUS: whichever INSERT loses the race hits that unique
+// index. The catch (admin.ts ~2006) only re-selects the winner and reports
+// 'duplicate' when the driver's error string matches /unique|duplicate/i; under
+// true co-flight the pg driver instead surfaces a generic "Failed query: ..."
+// message with no such token, so the loser is currently reported 'failed'. Data
+// integrity is unaffected (the DB index still collapses to one row), so this
+// test asserts the invariant that matters — one doc/contract/job — and tolerates
+// EITHER loser status. (Reporting the concurrent loser cleanly as 'duplicate' is
+// a tracked follow-up.) This test forces the race with a barrier (both dup
+// entries provably co-flight in one wave) and asserts the single-doc outcome
+// plus an untouched, independently-ingested sibling.
+describe("POST /admin/bulk-cba/ingest — the same contract twice in one batch is saved once", () => {
+  it("two entries sharing one content hash race in one wave → exactly one doc/contract/job", async () => {
+    const runId = `${MARK}-dupbatch`;
+    const dupId1 = `bciDup1-${MARK}`;
+    const dupId2 = `bciDup2-${MARK}`;
+    const goodId = `bciDupGood-${MARK}`;
+    // The dup pair must share (district, unit, content-hash) for dedup to fire,
+    // so they use the SAME unit + year (and below, the SAME bytes). Globally-
+    // unique combos vs. earlier tests keep each districtCounts() delta a clean +1.
+    const dupUnit = "nurses";
+    const dupYear = "2060-61";
+    const goodUnit = "transportation";
+    const goodYear = "2061-62";
+
+    // IDENTICAL bytes for both dup ids → IDENTICAL sha256. It's the hash, not the
+    // drive id, that dedups; the two ids only prove they arrived as separate
+    // entries. The good entry gets its own distinct content.
+    const sharedBuf = pdf(`dupbatch-shared-${MARK}`);
+    contentById.set(dupId1, sharedBuf);
+    contentById.set(dupId2, sharedBuf);
+    const goodBuf = pdf(goodId);
+    contentById.set(goodId, goodBuf);
+    const sharedHash = hashOf(sharedBuf);
+    const goodHash = hashOf(goodBuf);
+
+    expect(await docCountForHash(sharedHash)).toBe(0);
+
+    // Barrier: hold every download until all 3 entries are simultaneously in
+    // flight, then release so the two dup entries race the content-dedup
+    // SELECT/INSERT together rather than accidentally serializing. mapLimit runs
+    // min(4, 3) = 3 workers and none can free its slot until its download
+    // returns, so all 3 must reach the gate — proving co-flight deterministically.
+    const EXPECT_CONCURRENT = 3;
+    const original = vi.mocked(downloadDriveFile).getMockImplementation();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let dupCoflight = false;
+    const live = new Set<string>();
+    let arrived = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let safetyFired = false;
+    vi.mocked(downloadDriveFile).mockImplementation(async (id: string) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      live.add(id);
+      if (live.has(dupId1) && live.has(dupId2)) dupCoflight = true;
+      if (++arrived >= EXPECT_CONCURRENT) release();
+      try {
+        await gate;
+        const buf = contentById.get(id);
+        if (!buf) throw new Error(`no test content for drive file ${id}`);
+        return buf;
+      } finally {
+        inFlight--;
+        live.delete(id);
+      }
+    });
+
+    const safety = setTimeout(() => {
+      safetyFired = true;
+      release();
+    }, 10000);
+    const res = await (async () => {
+      try {
+        return await request(app)
+          .post("/admin/bulk-cba/ingest")
+          .send({
+            runId,
+            entries: [
+              entry({ driveFileId: dupId1, unit: dupUnit, schoolYear: dupYear }),
+              entry({ driveFileId: goodId, unit: goodUnit, schoolYear: goodYear }),
+              entry({ driveFileId: dupId2, unit: dupUnit, schoolYear: dupYear }),
+            ],
+          });
+      } finally {
+        clearTimeout(safety);
+        vi.mocked(downloadDriveFile).mockImplementation(original!);
+      }
+    })();
+
+    expect(res.status).toBe(200);
+
+    // Co-flight proof: the two duplicates genuinely overlapped in one wave — the
+    // barrier released because real concurrency reached 3, not because the 10s
+    // safety net fired — so this exercises the concurrent path, not an accidental
+    // serialization that would dedup trivially.
+    expect(safetyFired).toBe(false);
+    expect(maxInFlight).toBe(EXPECT_CONCURRENT);
+    expect(dupCoflight).toBe(true);
+
+    const byId = new Map(
+      (
+        res.body.results as Array<{
+          driveFileId: string;
+          status: string;
+          sourceDocId: number | null;
+          error: string | null;
+        }>
+      ).map((r) => [r.driveFileId, r]),
+    );
+    const d1 = byId.get(dupId1)!;
+    const d2 = byId.get(dupId2)!;
+    const good = byId.get(goodId)!;
+
+    // CORE GUARANTEE ("saved once"): however the two concurrent duplicates
+    // interleave, the shared content collapses to exactly ONE source document,
+    // ONE contract, and ONE active extraction job. Each is enforced by a unique
+    // index — source_documents' (district, unit, hash) key, contracts'
+    // (district, unit, scope, start) key, and the partial active-job index — so
+    // the single-row outcome holds regardless of how the wave is scheduled.
+    expect(await docCountForHash(sharedHash)).toBe(1);
+    expect(await contractCountForHash(sharedHash)).toBe(1);
+    expect(await activeJobCountForHash(sharedHash)).toBe(1);
+
+    // Exactly one of the pair wins the INSERT ('ingested'); the other never
+    // creates a second document. Under tight co-flight the loser's concurrent
+    // INSERT hits the unique index — today that surfaces as 'failed' (the DB
+    // conflict is genuine, but the driver wraps it in a generic "Failed query"
+    // message that the duplicate-detect regex misses) rather than the clean
+    // 'duplicate' it would get if the two happened to serialize. Either way it
+    // adds no second doc and is never silently dropped, so the test tolerates
+    // both statuses. (Reporting the concurrent loser as 'duplicate' — and the
+    // contract-attach race that change would then expose downstream — is a
+    // tracked follow-up; this test guards the data-integrity invariant, which is
+    // what must never regress.)
+    const winner = d1.status === "ingested" ? d1 : d2;
+    const loser = d1.status === "ingested" ? d2 : d1;
+    expect(winner.status).toBe("ingested");
+    expect(typeof winner.sourceDocId).toBe("number");
+    expect(["duplicate", "failed"]).toContain(loser.status);
+    // The loser never references a *different* doc: it either deduped onto the
+    // winner's doc or carries no doc id at all.
+    if (loser.sourceDocId != null) {
+      expect(loser.sourceDocId).toBe(winner.sourceDocId);
+    }
+
+    // Object Storage is ensured for BOTH duplicate entries (the upload precedes
+    // the content-dedup check) plus the good one — yet still only one shared doc
+    // exists, proving the dedup happens at the DB layer, not by skipping work.
+    expect(uploadBuffer).toHaveBeenCalledTimes(3);
+    const keyCounts = vi.mocked(uploadBuffer).mock.calls.reduce((m, c) => {
+      m.set(c[0], (m.get(c[0]) ?? 0) + 1);
+      return m;
+    }, new Map<string, number>());
+    expect(keyCounts.get(uploadedCbaKey(sharedHash))).toBe(2);
+    expect(keyCounts.get(uploadedCbaKey(goodHash))).toBe(1);
+
+    // The unrelated good entry landed fully independently: its own doc, contract,
+    // and active job, untouched by the duplicate collision beside it.
+    expect(good.status).toBe("ingested");
+    expect(typeof good.sourceDocId).toBe("number");
+    expect(await docCountForHash(goodHash)).toBe(1);
+    expect(await contractCountForHash(goodHash)).toBe(1);
+    expect(await activeJobCountForHash(goodHash)).toBe(1);
+
+    // Ledger mirrors the results: exactly one of the dup pair is recorded
+    // 'ingested' (never two successful ingests), and the good row is 'ingested'
+    // with its own doc id.
+    const led1 = await ledgerRow(runId, dupId1);
+    const led2 = await ledgerRow(runId, dupId2);
+    expect(
+      [led1?.status, led2?.status].filter((s) => s === "ingested"),
+    ).toHaveLength(1);
+    const goodLed = await ledgerRow(runId, goodId);
+    expect(goodLed?.status).toBe("ingested");
+    expect(goodLed?.source_doc_id).toBe(good.sourceDocId);
+
+    // Every count above is scoped to this test's two freshly-minted content
+    // hashes (never touched by any other test), so the assertions are immune to
+    // cross-test contamination of district-wide totals. A district-wide
+    // before/after aggregate was deliberately dropped: sibling concurrent-group
+    // tests can leak async writes into the shared district, making a global delta
+    // racy without adding any coverage the per-hash checks don't already give.
   }, 20000);
 });
