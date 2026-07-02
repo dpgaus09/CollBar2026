@@ -53,6 +53,20 @@ import {
 
 const POLL_INTERVAL_MS = Number(process.env.EXTRACTION_WORKER_POLL_MS ?? 3000);
 
+// Grace period after boot before the worker begins CLAIMING jobs. On an always-on
+// deployment the HTTP server must answer the platform's startup health probe
+// (/api/healthz) and go live BEFORE heavy PDF-render + Vision work begins. With a
+// full queue the worker would otherwise claim a job the instant we boot and pin
+// the (small) VM's single core — starving the event loop and risking OOM — so the
+// probe never gets a stable 200 and the publish fails at the promote step. The
+// delay only matters in production; dev/local keep the previous immediate-claim
+// behavior. Override via EXTRACTION_WORKER_STARTUP_DELAY_MS (0 disables).
+const DEFAULT_STARTUP_DELAY_MS =
+  process.env.NODE_ENV === "production" ? 60000 : 0;
+const STARTUP_DELAY_MS = Number(
+  process.env.EXTRACTION_WORKER_STARTUP_DELAY_MS ?? DEFAULT_STARTUP_DELAY_MS,
+);
+
 let started = false;
 let stopRequested = false;
 let loopPromise: Promise<void> | null = null;
@@ -365,6 +379,23 @@ export async function processJob(job: ExtractionJob): Promise<void> {
 }
 
 async function runLoop(): Promise<void> {
+  // Let the HTTP server pass the deployment's startup health probe and go live
+  // before we start claiming jobs (see STARTUP_DELAY_MS). Interruptible in
+  // POLL_INTERVAL_MS chunks so a shutdown during the grace window still exits
+  // promptly rather than blocking for the full delay.
+  if (STARTUP_DELAY_MS > 0) {
+    logger.info(
+      { delayMs: STARTUP_DELAY_MS },
+      "extraction worker: startup grace delay before claiming jobs",
+    );
+    let waited = 0;
+    while (!stopRequested && waited < STARTUP_DELAY_MS) {
+      const chunk = Math.min(POLL_INTERVAL_MS, STARTUP_DELAY_MS - waited);
+      await sleep(chunk);
+      waited += chunk;
+    }
+  }
+
   let pausedLogged = false;
   while (!stopRequested) {
     // Pause switch (Task #247): when paused, stop CLAIMING new jobs. Queued jobs
